@@ -61,6 +61,7 @@ def _decision_result(
         platform=platform,
         discover_id=discover_id,
         jobs=candidates,
+        intent_digest=plan.get("intent_digest"),
     )
     path = save_manifest(manifest)
     clear_pending_decision(platform, discover_id=discover_id)
@@ -105,12 +106,18 @@ def _resume_pending_decision(
     platform: str,
     *,
     profile: dict[str, Any],
+    round_intent: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     pending = load_pending_decision(platform)
     if pending is None:
         return None
     try:
-        plan = verify_search_plan(pending["plan"], platform=platform, profile=profile)
+        plan = verify_search_plan(
+            pending["plan"],
+            platform=platform,
+            profile=profile,
+            round_intent=round_intent,
+        )
     except ValueError as exc:
         if "expired" not in str(exc).casefold():
             raise
@@ -147,7 +154,13 @@ def run_discover(
     if not profile:
         raise ValueError("No resume profile found. Run `jobagent resume analyze --file <resume>` first.")
     require_compatible_profile(profile)
-    resumed = _resume_pending_decision(platform, profile=profile)
+    active_round = rounds.ensure_current_round()
+    round_intent = active_round.get("intent")
+    resumed = _resume_pending_decision(
+        platform,
+        profile=profile,
+        round_intent=round_intent,
+    )
     if resumed is not None:
         return resumed
     request_id = f"{platform}:{uuid.uuid4().hex}"
@@ -157,8 +170,14 @@ def run_discover(
             platform=platform,
             profile=profile,
             request_id=request_id,
+            round_intent=round_intent,
         )
-    verified_plan = verify_search_plan(plan, platform=platform, profile=profile)
+    verified_plan = verify_search_plan(
+        plan,
+        platform=platform,
+        profile=profile,
+        round_intent=round_intent,
+    )
     emit_stage(
         "search_plan_received",
         platform=platform,

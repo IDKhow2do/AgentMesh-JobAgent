@@ -96,7 +96,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     delivery_round = sub.add_parser("round", help="View or update the multi-platform round")
     round_sub = delivery_round.add_subparsers(dest="round_command", required=True)
-    round_sub.add_parser("start")
+    round_start = round_sub.add_parser("start")
+    round_start.add_argument(
+        "--accept-suggested",
+        action="store_true",
+        help="Confirm the target roles suggested from the current profile",
+    )
+    round_start.add_argument(
+        "--target-role",
+        action="append",
+        default=[],
+        help="Explicit target role for this round; repeat for multiple roles",
+    )
     round_sub.add_parser("status")
     round_audit = round_sub.add_parser("audit")
     round_audit.add_argument("--platform", choices=["boss", "liepin", "zhilian", "51job"])
@@ -692,7 +703,51 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         if args.round_command == "start":
-            start_new_round()
+            from jobagent.application.round_intent import (
+                build_round_intent,
+                target_role_confirmation,
+            )
+            from jobagent.infra.state import current_round_path, load_json, profile_path
+
+            current = load_json(current_round_path())
+            if (
+                current
+                and current.get("status") == "active"
+                and current.get("round_id")
+                and not args.accept_suggested
+                and not args.target_role
+            ):
+                start_new_round()
+                return {"ok": True, "workflow": round_status()}
+            profile = load_json(profile_path())
+            if not profile:
+                return {
+                    "ok": False,
+                    "error": "profile_required",
+                    "message": "Analyze a resume before confirming target roles.",
+                    "next_suggested": "jobagent resume analyze --file <resume>",
+                }
+            if not args.accept_suggested and not args.target_role:
+                return target_role_confirmation(
+                    profile,
+                    previous_round_id=(
+                        str(current.get("round_id")) if current and current.get("round_id") else None
+                    ),
+                )
+            try:
+                intent = build_round_intent(
+                    profile,
+                    accept_suggested=args.accept_suggested,
+                    target_roles=args.target_role,
+                )
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": "invalid_round_intent",
+                    "message": str(exc),
+                    "next_suggested": "jobagent round start",
+                }
+            start_new_round(intent)
             return {"ok": True, "workflow": round_status()}
         if args.round_command == "status":
             return {"ok": True, "workflow": round_status()}

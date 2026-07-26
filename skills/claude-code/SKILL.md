@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching, recruiter greetings and application audit.
-version: 0.4.7
+version: 0.5.0
 ---
 
 # Job Agent
@@ -23,6 +23,7 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - On Boss, do not report success from the platform's default introduction; require verification of the reviewed personalized greeting.
 - Never stop after one platform. Follow `workflow.next_suggested` while `workflow.continue_required=true`; only `workflow.workflow_complete=true` ends the round.
 - Create a round only by executing `jobagent round start`. Never infer that `doctor env`, `round status` or a platform command created or authorized a new round.
+- On `error=interaction_required`, use the host's native prompt card for the structured `interaction` payload. If native cards are unavailable, show `interaction.fallback_text` unchanged. Wait for the answer, then continue with `--accept-suggested` and/or explicit `--target-role` values. If the user already named a target role, pass it directly and do not ask again.
 - Skip a platform only after explicit user approval with `jobagent round skip --platform <platform> --confirm-skip`.
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
 - Forward `client_update_detected -> client_update_started -> client_update_completed -> client_command_resumed` once in the user's language. Do not ask permission for a managed signed update and do not stop after success; continue the original command. Stop only on `client_update_failed`, report its `message`, and follow `next_suggested`. Older clients may first emit only the compatibility completion/resume pair.
@@ -39,7 +40,7 @@ jobagent doctor env
 jobagent resume analyze --file <resume-path> \
   --target-role "<target role>" \
   --target-cities <city1> <city2>
-jobagent round start
+jobagent round start --target-role "<target role>"
 ```
 
 One completed Discover covers one platform, processes at most 100 candidate jobs and costs a fixed 10 credits. Cloud resume analysis costs 5 credits. Registration, API Key creation, and the open-source client are free; new accounts start with zero cloud credits. The signed cloud response is authoritative for charges and refunds. The optional AgentMesh360 monthly pass costs CNY 29, lasts 30 days, and includes 1,000 credits shared across AgentMesh360 cloud products without automatic renewal. Previously issued signup-trial credits remain usable until their original expiry.
@@ -50,6 +51,8 @@ Start the four-platform round explicitly with:
 
 ```bash
 jobagent round start
+# After the target-role card:
+jobagent round start --accept-suggested
 jobagent round status
 ```
 

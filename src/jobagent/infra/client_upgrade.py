@@ -15,7 +15,7 @@ from jobagent.infra.profile_contract import profile_compatibility_issues
 from jobagent.infra.rounds import migrate_round_payload
 from jobagent.infra.state import APP_DIR
 
-STATE_MIGRATION_VERSION = 2
+STATE_MIGRATION_VERSION = 3
 
 _EPHEMERAL_FILES = (
     "state/release_manifest_cache.json",

@@ -9,7 +9,7 @@ from jobagent.infra.state import current_round_path, rounds_dir, save_json, load
 
 DEFAULT_PLATFORM_ORDER = ["boss", "liepin", "zhilian", "51job"]
 TERMINAL_PLATFORM_STATUSES = {"completed", "skipped_this_round"}
-ROUND_SCHEMA_VERSION = 2
+ROUND_SCHEMA_VERSION = 3
 DELIVERY_POLICY = {
     "selected": "auto",
     "review": "explicit_override_only",
@@ -69,7 +69,7 @@ def ensure_current_round() -> dict[str, Any]:
     )
 
 
-def _create_round() -> dict[str, Any]:
+def _create_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create the persisted round state for the explicit start command."""
 
     round_id = new_round_id()
@@ -82,18 +82,36 @@ def _create_round() -> dict[str, Any]:
         "updated_at": now,
         "platform_order": list(DEFAULT_PLATFORM_ORDER),
         "browser_session_id": "local-cdp-19222",
+        "intent": intent or {
+            "status": "legacy_implicit",
+            "target_roles": [],
+            "source": "internal_compatibility",
+            "confirmed_at": now,
+        },
         "platforms": _default_platform_state(),
     }
     save_round(state)
     return state
 
 
-def start_new_round() -> dict[str, Any]:
+def start_new_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
     """Start a round explicitly, or return the already-active round."""
     current = load_json(current_round_path())
     if current and current.get("status") == "active" and current.get("round_id"):
-        return _migrate_round(current)
-    return _create_round()
+        active = _migrate_round(current)
+        if intent is not None and not _same_intent(active.get("intent"), intent):
+            raise RoundOrderError(
+                {
+                    "ok": False,
+                    "error": "round_intent_conflict",
+                    "message": "The active round already has a different target-role intent.",
+                    "round_id": active["round_id"],
+                    "target_roles": (active.get("intent") or {}).get("target_roles") or [],
+                    "next_suggested": "jobagent round status",
+                }
+            )
+        return active
+    return _create_round(intent)
 
 
 def _migrate_round(state: dict[str, Any]) -> dict[str, Any]:
@@ -108,6 +126,21 @@ def migrate_round_payload(state: dict[str, Any]) -> dict[str, Any]:
     """Return a current-schema round without reading or writing global state."""
     if state.get("schema_version") == ROUND_SCHEMA_VERSION:
         return dict(state)
+    if state.get("schema_version") == 2:
+        migrated = dict(state)
+        migrated["schema_version"] = ROUND_SCHEMA_VERSION
+        migrated["updated_at"] = utc_now()
+        migrated["intent"] = {
+            "status": "legacy_implicit",
+            "target_roles": [],
+            "source": "pre_target_role_confirmation",
+            "confirmed_at": state.get("created_at") or utc_now(),
+        }
+        migrated["migration"] = {
+            "from_schema_version": 2,
+            "reason": "preserve_active_round_and_mark_legacy_intent",
+        }
+        return migrated
     return {
         "schema_version": ROUND_SCHEMA_VERSION,
         "round_id": state.get("round_id") or new_round_id(),
@@ -116,12 +149,32 @@ def migrate_round_payload(state: dict[str, Any]) -> dict[str, Any]:
         "updated_at": utc_now(),
         "platform_order": list(DEFAULT_PLATFORM_ORDER),
         "browser_session_id": state.get("browser_session_id") or "local-cdp-19222",
+        "intent": {
+            "status": "legacy_implicit",
+            "target_roles": [],
+            "source": "legacy_state_migration",
+            "confirmed_at": state.get("created_at") or utc_now(),
+        },
         "platforms": _default_platform_state(),
         "migration": {
             "from_schema_version": state.get("schema_version"),
             "reason": "reset_legacy_ambiguous_platform_statuses",
         },
     }
+
+
+def _same_intent(current: Any, requested: dict[str, Any]) -> bool:
+    current_roles = [
+        str(role).strip().casefold()
+        for role in (current or {}).get("target_roles", [])
+        if str(role).strip()
+    ]
+    requested_roles = [
+        str(role).strip().casefold()
+        for role in requested.get("target_roles", [])
+        if str(role).strip()
+    ]
+    return current_roles == requested_roles
 
 
 def save_round(state: dict[str, Any]) -> None:
@@ -253,6 +306,7 @@ def round_status() -> dict[str, Any]:
             "stages": list(ROUND_EXECUTION_POLICY["stages"]),
         },
         "platform_order": order,
+        "intent": state.get("intent"),
         "platforms": platforms,
         "current_platform": current_platform,
         "remaining_platforms": remaining,

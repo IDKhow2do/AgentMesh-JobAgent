@@ -14,6 +14,7 @@ This is the public instruction source for an Agent operating Job Agent on behalf
 8. Report the overall round complete only when `workflow.workflow_complete=true`. Skipping a platform requires the user's explicit approval and `jobagent round skip --platform <platform> --confirm-skip`.
 9. Create a round only with `jobagent round start`. `doctor env`, `round status` and platform commands must never be treated as implicit authorization to create another round.
 10. When a cloud command returns `retryable=true` and `request_preserved=true`, immediately execute its `next_suggested` command. Do not ask the user to click retry, re-login or recollect jobs; the same signed Discover request is resumed without another charge.
+11. When output returns `error=interaction_required`, prefer the host's native prompt card using the structured `interaction` payload. If the host cannot render cards, show `interaction.fallback_text` unchanged. Do not create a round until the required answer is available.
 
 ## Goal, Actions and Acceptance
 
@@ -27,10 +28,22 @@ At the start of a round, run:
 
 ```bash
 jobagent round start
-jobagent round status
 ```
 
-The CLI persists the four-platform order and returns one `next_suggested` command. Follow it after each platform audit. A platform-level success is an intermediate milestone, not completion of the user's overall job-search round.
+For a new round this first returns an AgentMesh360 `interaction_required` target-role confirmation. Render its native card when supported; otherwise show the numbered text fallback. Continue with exactly one of:
+
+```bash
+# Accept the suggested roles
+jobagent round start --accept-suggested
+
+# Use only explicit user roles
+jobagent round start --target-role "<target role>"
+
+# Keep suggestions and add an explicit role
+jobagent round start --accept-suggested --target-role "<additional role>"
+```
+
+If the user already named the target role in the current request, use `--target-role` directly and do not ask again. After confirmation, run `jobagent round status`. The CLI persists the confirmed role intent and four-platform order, then returns one `next_suggested` command. Follow it after each platform audit. A platform-level success is an intermediate milestone, not completion of the user's overall job-search round.
 
 Do not collect logins as a separate setup phase. At round start, log in to Boss only. Do not open or request the Liepin login until Boss audit has advanced `workflow.current_platform` to `liepin`; apply the same rule to Zhilian and 51Job.
 
@@ -109,7 +122,7 @@ If authentication fails, show the exact error. Do not silently change workflows.
 
 ## 3. Analyze Resume
 
-Ask for a PDF, DOCX, TXT or Markdown resume and the target role/cities.
+Ask for a PDF, DOCX, TXT or Markdown resume. Target role and cities are optional hints when the user has already stated them.
 
 ```bash
 jobagent resume analyze --file <resume-path> \
@@ -119,7 +132,7 @@ jobagent resume analyze --file <resume-path> \
 
 Acceptance: output reports `ok=true` and a saved profile path.
 
-Then execute the returned `jobagent round start`. This explicit command begins the four-platform round and authorizes automatic delivery of signed `selected` jobs for that round.
+Then execute the returned `jobagent round start`. If it returns `interaction_required`, render its card or fallback text and wait for the one target-role answer. Only the continued `round start --accept-suggested` or `round start --target-role ...` creates the four-platform round and authorizes automatic delivery of signed `selected` jobs.
 
 ## 4. Run One Platform
 

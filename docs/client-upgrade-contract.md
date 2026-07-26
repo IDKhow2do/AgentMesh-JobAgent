@@ -23,7 +23,7 @@
 | `state/profile.json` | 保留并校验 schema | 可兼容则原样保留；不兼容时阻断平台命令并要求重新分析简历 |
 | 四个平台 audit log | 永远保留 | 它们是投递、消息送达和去重证据，不参与缓存清理 |
 | `state/support_state.json` | 保留 | 首次投递后的单次提示状态不得因升级重置 |
-| `state/current_round.json` | 按 schema 迁移 | 迁移记录来源 schema 和原因；含义不明确的旧平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
+| `state/current_round.json` | 按 schema 迁移 | v2 活动 round 原样保留平台进度并标记 `legacy_implicit` 意图，不能在升级中途追加岗位确认；更旧且含义不明确的平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
 | `state/rounds/` | 保留 | 历史轮次不覆盖、不删除 |
 | `state/discoveries/` | 同协议保留，协议变化时归档 | 归档到 `state/archive/`，不得连同 audit 一起删除；`0.4.5` 起新增的 `pending-decision.json` 属于账户绑定的可恢复请求，成功后删除，旧安装缺失该文件无需迁移 |
 | release manifest cache | 自动清理 | 新版本重新获取并验证签名策略 |

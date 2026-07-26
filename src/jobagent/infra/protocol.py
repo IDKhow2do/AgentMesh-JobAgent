@@ -141,6 +141,7 @@ def verify_search_plan(
     *,
     platform: str,
     profile: dict[str, Any],
+    round_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     signed = verify_signed_payload(
         plan,
@@ -153,6 +154,12 @@ def verify_search_plan(
         raise ProtocolError("search plan platform mismatch")
     if signed.get("profile_digest") != digest_payload(profile):
         raise ProtocolError("search plan profile digest mismatch")
+    if round_intent and round_intent.get("status") == "confirmed":
+        expected_intent_digest = digest_payload(round_intent)
+        if signed.get("intent_digest") != expected_intent_digest:
+            raise ProtocolError("search plan intent digest mismatch")
+        if signed.get("round_intent") != round_intent:
+            raise ProtocolError("search plan round intent mismatch")
     if int(signed.get("candidate_limit", 0)) != 100:
         raise ProtocolError("search plan candidate limit mismatch")
     _validate_search_queries(signed.get("queries"))
@@ -167,6 +174,7 @@ def verify_decision_manifest(
     platform: str,
     discover_id: str,
     jobs: list[dict[str, Any]],
+    intent_digest: str | None = None,
 ) -> dict[str, Any]:
     signed = verify_signed_payload(
         manifest,
@@ -177,6 +185,8 @@ def verify_decision_manifest(
         raise ProtocolError("decision protocol version mismatch")
     if signed.get("platform") != platform or signed.get("discover_id") != discover_id:
         raise ProtocolError("decision binding mismatch")
+    if intent_digest is not None and signed.get("intent_digest") != intent_digest:
+        raise ProtocolError("decision intent digest mismatch")
     if signed.get("candidate_digest") != candidate_digest(jobs):
         raise ProtocolError("decision candidate digest mismatch")
     if _is_expired(str(signed.get("expires_at", ""))):

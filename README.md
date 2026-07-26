@@ -52,7 +52,7 @@ jobagent doctor env
 jobagent resume analyze --file ~/Downloads/resume.pdf \
   --target-role "AI产品经理" \
   --target-cities 深圳 北京
-jobagent round start
+jobagent round start --target-role "AI产品经理"
 ```
 
 After an existing installation updates, Job Agent automatically clears rebuildable runtime caches and migrates compatible saved state before any platform command. API Keys, recruiting-site login cookies, resume profiles, audit history and user preferences are preserved. Run `jobagent upgrade-check`; if it returns `ok=false`, follow `next_suggested` and repeat the check before opening a platform.
@@ -83,8 +83,23 @@ Start a new round explicitly. Reading status never creates a round:
 
 ```bash
 jobagent round start
+```
+
+When no target role was supplied, `round start` returns an AgentMesh360
+`interaction_required` payload. A capable host Agent renders its prompt card;
+other hosts display the included numbered-text fallback. The required answer
+continues with one of:
+
+```bash
+jobagent round start --accept-suggested
+jobagent round start --target-role "数据运营经理"
+jobagent round start --accept-suggested --target-role "数据运营经理"
 jobagent round status
 ```
+
+The confirmed target roles belong to this round and do not rewrite resume job
+history. If the user already named a target role, the host Agent passes it
+directly and does not ask again.
 
 Every platform command returns a `workflow` object. A platform audit does not end the overall task while `workflow.continue_required=true`; the Agent must run `workflow.next_suggested` and continue to the next platform. The overall task is complete only when `workflow.workflow_complete=true`. A platform may be skipped for the current round only after the user explicitly approves:
 

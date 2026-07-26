@@ -212,7 +212,7 @@ def test_legacy_round_is_migrated_to_four_platform_pending_state(monkeypatch, tm
     assert workflow["platform_order"] == ["boss", "liepin", "zhilian", "51job"]
     assert workflow["remaining_platforms"] == ["boss", "liepin", "zhilian", "51job"]
     assert all(item["status"] == "pending" for item in workflow["platforms"].values())
-    assert json.loads(current_path.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(current_path.read_text(encoding="utf-8"))["schema_version"] == 3
 
 
 def test_auto_driver_reports_cdp_failure_without_switching_browser_profiles(monkeypatch):

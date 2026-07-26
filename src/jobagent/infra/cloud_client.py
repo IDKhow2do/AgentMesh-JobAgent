@@ -170,23 +170,22 @@ def discovery_start(
     platform: str,
     profile: dict[str, Any],
     request_id: str,
+    round_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from jobagent.infra.protocol import digest_payload
 
-    return _request(
-        "POST",
-        "/v1/discovery/start",
-        {
-            "platform": platform,
-            "profile": profile,
-            "profile_digest": digest_payload(profile),
-            "client_version": __version__,
-            "protocol_version": PROTOCOL_VERSION,
-            "request_id": request_id,
-        },
-        timeout=60,
-        max_attempts=3,
-    )
+    body = {
+        "platform": platform,
+        "profile": profile,
+        "profile_digest": digest_payload(profile),
+        "client_version": __version__,
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": request_id,
+    }
+    if round_intent and round_intent.get("status") == "confirmed":
+        body["round_intent"] = round_intent
+        body["intent_digest"] = digest_payload(round_intent)
+    return _request("POST", "/v1/discovery/start", body, timeout=60, max_attempts=3)
 
 
 def discovery_decide(

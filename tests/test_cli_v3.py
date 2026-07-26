@@ -64,6 +64,17 @@ def test_public_parser_exposes_only_v3_platform_commands():
     assert parser.parse_args(["account", "switch", "--new-state"]).new_state is True
     assert parser.parse_args(["round", "status"]).round_command == "status"
     assert parser.parse_args(["round", "start"]).round_command == "start"
+    round_start = parser.parse_args(
+        [
+            "round",
+            "start",
+            "--accept-suggested",
+            "--target-role",
+            "数据运营经理",
+        ]
+    )
+    assert round_start.accept_suggested is True
+    assert round_start.target_role == ["数据运营经理"]
     assert parser.parse_args(["round", "audit", "--failures-only"]).failures_only is True
     assert parser.parse_args(
         ["round", "skip", "--platform", "liepin", "--confirm-skip"]
@@ -306,6 +317,13 @@ def test_doctor_env_reports_healthy_environment_when_credits_are_insufficient(
         lambda _account: {"status": "ready", "ready": True},
     )
     monkeypatch.setattr("jobagent.infra.state.profile_path", lambda: tmp_path / "profile.json")
+    monkeypatch.setattr(
+        "jobagent.infra.rounds.round_status",
+        lambda: {
+            "status": "not_started",
+            "next_suggested": "jobagent round start",
+        },
+    )
 
     result = cli._doctor_env()
 
@@ -681,6 +699,23 @@ def test_public_agent_docs_require_automatic_discover_transport_recovery():
         assert "next_suggested" in text
 
 
+def test_public_agent_docs_require_native_interaction_and_text_fallback():
+    root = Path(__file__).resolve().parents[1]
+    docs = [
+        (root / "AGENTS.md").read_text(encoding="utf-8"),
+        (root / "README.md").read_text(encoding="utf-8"),
+        (root / "docs/agent-onboarding.md").read_text(encoding="utf-8"),
+        (root / "skills/claude-code/SKILL.md").read_text(encoding="utf-8"),
+        (root / "skills/openclaw-job-agent/SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for text in docs:
+        assert "interaction_required" in text
+        assert "fallback" in text
+        assert "--accept-suggested" in text
+        assert "--target-role" in text
+
+
 def test_public_agent_docs_treat_zhilian_route_keyword_as_opaque():
     root = Path(__file__).resolve().parents[1]
     docs = [
@@ -724,6 +759,97 @@ def test_search_plan_rejects_opaque_platform_keyword(monkeypatch):
 
     with pytest.raises(ProtocolError, match="opaque platform identifier"):
         verify_search_plan(plan, platform="zhilian", profile=profile)
+
+
+def test_search_plan_binds_confirmed_round_intent(monkeypatch):
+    import jobagent.infra.protocol as protocol
+
+    private, public = _key_pair()
+    monkeypatch.setattr(protocol, "DECISION_SIGNING_PUBLIC_KEY", public)
+    profile = {"preferences": {"targetRoles": [{"title": "数据分析师"}]}}
+    round_intent = {
+        "status": "confirmed",
+        "target_roles": ["数据运营经理"],
+        "source": "user_explicit",
+        "profile_digest": digest_payload(profile),
+        "confirmed_at": "2026-07-27T08:00:00+00:00",
+    }
+    plan = _sign(
+        private,
+        {
+            "manifest_type": "search_plan",
+            "protocol_version": 1,
+            "discover_id": "dis_round_intent",
+            "platform": "zhilian",
+            "profile_digest": digest_payload(profile),
+            "round_intent": round_intent,
+            "intent_digest": digest_payload(round_intent),
+            "queries": [
+                {
+                    "keyword": "数据运营经理",
+                    "city": "上海",
+                    "page_limit": 2,
+                }
+            ],
+            "candidate_limit": 100,
+            "expires_at": _future(),
+        },
+    )
+
+    verified = verify_search_plan(
+        plan,
+        platform="zhilian",
+        profile=profile,
+        round_intent=round_intent,
+    )
+
+    assert verified["intent_digest"] == digest_payload(round_intent)
+
+
+def test_search_plan_rejects_changed_round_intent(monkeypatch):
+    import jobagent.infra.protocol as protocol
+
+    private, public = _key_pair()
+    monkeypatch.setattr(protocol, "DECISION_SIGNING_PUBLIC_KEY", public)
+    profile = {"preferences": {"targetRoles": [{"title": "数据分析师"}]}}
+    signed_intent = {
+        "status": "confirmed",
+        "target_roles": ["数据运营经理"],
+        "source": "user_explicit",
+        "profile_digest": digest_payload(profile),
+        "confirmed_at": "2026-07-27T08:00:00+00:00",
+    }
+    plan = _sign(
+        private,
+        {
+            "manifest_type": "search_plan",
+            "protocol_version": 1,
+            "discover_id": "dis_changed_intent",
+            "platform": "zhilian",
+            "profile_digest": digest_payload(profile),
+            "round_intent": signed_intent,
+            "intent_digest": digest_payload(signed_intent),
+            "queries": [
+                {
+                    "keyword": "数据运营经理",
+                    "city": "上海",
+                    "page_limit": 2,
+                }
+            ],
+            "candidate_limit": 100,
+            "expires_at": _future(),
+        },
+    )
+    changed_intent = dict(signed_intent)
+    changed_intent["target_roles"] = ["AI产品经理"]
+
+    with pytest.raises(ProtocolError, match="intent digest mismatch"):
+        verify_search_plan(
+            plan,
+            platform="zhilian",
+            profile=profile,
+            round_intent=changed_intent,
+        )
 
 
 @pytest.mark.parametrize("keyword", ["财务总监", "Business Finance Leader", "FP&A负责人"])
@@ -849,6 +975,17 @@ def test_discover_verifies_both_signatures_and_discards_raw_candidates(tmp_path,
         application.rounds,
         "round_status",
         lambda: {"round_id": "round-1", "next_suggested": "jobagent 51job apply review"},
+    )
+    monkeypatch.setattr(
+        application.rounds,
+        "ensure_current_round",
+        lambda: {
+            "round_id": "round-1",
+            "intent": {
+                "status": "legacy_implicit",
+                "target_roles": [],
+            },
+        },
     )
     output = tmp_path / "decision.json"
 

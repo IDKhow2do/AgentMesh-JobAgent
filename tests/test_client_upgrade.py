@@ -88,8 +88,9 @@ def test_old_install_clears_only_ephemeral_state_and_migrates_round(tmp_path):
     assert (state / "support_state.json").exists()
     assert (state / "discoveries" / "boss-old.json").exists()
     migrated_round = json.loads((state / "current_round.json").read_text(encoding="utf-8"))
-    assert migrated_round["schema_version"] == 2
+    assert migrated_round["schema_version"] == 3
     assert migrated_round["migration"]["from_schema_version"] == 1
+    assert migrated_round["intent"]["status"] == "legacy_implicit"
     marker = json.loads((state / "client_upgrade_state.json").read_text(encoding="utf-8"))
     assert marker["client_version"] == "0.3.16"
     assert marker["state_migration_version"] == upgrade.STATE_MIGRATION_VERSION
