@@ -712,7 +712,8 @@ def test_public_agent_docs_require_native_interaction_and_text_fallback():
     for text in docs:
         assert "interaction_required" in text
         assert "fallback" in text
-        assert "--accept-suggested" in text
+        assert "jobagent interaction respond" in text
+        assert "interaction ID" in text
         assert "--target-role" in text
 
 

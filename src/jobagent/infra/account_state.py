@@ -17,6 +17,7 @@ _ACCOUNT_OWNED_PATHS = (
     "profile.json",
     "support_state.json",
     "current_round.json",
+    "pending_interaction.json",
     "rounds",
     "discoveries",
     "archive",

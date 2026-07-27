@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.0
+version: 0.5.1
 metadata:
   openclaw:
     emoji: "💼"
@@ -33,7 +33,7 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - On Boss, a platform default introduction is not the reviewed greeting. Require the CLI's exact personalized-delivery verification.
 - Never stop after one platform. Follow `workflow.next_suggested` while `workflow.continue_required=true`; only `workflow.workflow_complete=true` ends the round.
 - Create a round only by executing `jobagent round start`. Never infer that `doctor env`, `round status` or a platform command created or authorized a new round.
-- On `error=interaction_required`, render the structured `interaction` as a native host card when supported. Otherwise show `interaction.fallback_text` unchanged. Wait for the answer, then continue with `--accept-suggested` and/or explicit `--target-role` values. If the user already named a target role, pass it directly and do not ask again.
+- On `error=interaction_required`, render the structured `interaction` as a native host card only when the card interface is callable in the current surface and mode. Codex uses the ready-to-call `host_presentations.adapters.codex.arguments` when `request_user_input` is callable and maps the returned label through `answer_mapping`; other hosts map every declared field option exactly and use `default_option_ids` as the recommendation marker. If the interface is unavailable in the current mode, show `interaction.fallback_text` unchanged and describe that as a mode-level text fallback, not a lack of host card support. Continue every answer through `jobagent interaction respond` with the exact interaction ID. Append/replace may return a second role-input interaction. If the user already named a target role, pass it directly to `round start` and do not ask again.
 - Skip a platform only after explicit user approval with `jobagent round skip --platform <platform> --confirm-skip`.
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
 - Forward `client_update_detected -> client_update_started -> client_update_completed -> client_command_resumed` once in the user's language. Do not ask permission for a managed signed update and do not stop after success; continue the original command. Stop only on `client_update_failed`, report its `message`, and follow `next_suggested`. Older clients may first emit only the compatibility completion/resume pair.
@@ -70,7 +70,7 @@ Each completed platform Discover accepts at most 100 candidate jobs and costs a 
 ```bash
 jobagent round start
 # After the target-role card:
-jobagent round start --accept-suggested
+jobagent interaction respond --interaction-id "<id>" --choice accept_suggested
 jobagent round status
 ```
 

@@ -86,15 +86,37 @@ jobagent round start
 ```
 
 When no target role was supplied, `round start` returns an AgentMesh360
-`interaction_required` payload. A capable host Agent renders its prompt card;
-other hosts display the included numbered-text fallback. The required answer
-continues with one of:
+`interaction_required` payload with three stable choices: accept the suggested
+roles, keep them and append roles, or replace them. A host Agent must render a
+native prompt card when the card interface is callable in its current surface
+and mode. If that interface is unavailable, it displays the included
+numbered-text fallback without changing the choices. Do not describe this as
+the host lacking card support when only the current mode lacks the interface.
+For Codex, the response includes ready-to-call
+`host_presentations.adapters.codex.arguments` plus an `answer_mapping`; use it
+when `request_user_input` is callable in the current mode.
+
+The host continues every card or text answer through the interaction ID:
+
+```bash
+jobagent interaction respond --interaction-id "<id>" --choice accept_suggested
+jobagent interaction respond --interaction-id "<id>" --choice append_roles
+jobagent interaction respond --interaction-id "<id>" --choice replace_roles
+jobagent interaction respond --interaction-id "<id>" --target-role "数据运营经理"
+jobagent round status
+```
+
+Append and replace choices return a second role-input interaction when no role
+was included in the first response. The CLI validates the interaction ID and
+profile digest, and repeated responses cannot create a duplicate round.
+
+Direct commands remain available when the user's message already contains the
+intent:
 
 ```bash
 jobagent round start --accept-suggested
 jobagent round start --target-role "数据运营经理"
 jobagent round start --accept-suggested --target-role "数据运营经理"
-jobagent round status
 ```
 
 The confirmed target roles belong to this round and do not rewrite resume job

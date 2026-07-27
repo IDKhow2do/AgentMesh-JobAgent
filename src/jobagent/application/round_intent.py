@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from jobagent.infra.interaction_protocol import build_interaction_required
+from jobagent.infra.interaction_protocol import (
+    build_host_presentations,
+    build_interaction_required,
+)
 from jobagent.infra.protocol import digest_payload
 from jobagent.infra.rounds import utc_now
 
 MAX_TARGET_ROLES = 4
+TARGET_ROLE_CHOICES = {
+    "accept_suggested",
+    "append_roles",
+    "replace_roles",
+}
 
 
 def suggested_target_roles(profile: dict[str, Any]) -> list[str]:
@@ -49,6 +57,32 @@ def build_round_intent(
     }
 
 
+def build_round_intent_from_choice(
+    profile: dict[str, Any],
+    *,
+    choice: str,
+    target_roles: list[str] | None,
+) -> dict[str, Any]:
+    if choice not in TARGET_ROLE_CHOICES:
+        raise ValueError(f"Unsupported target-role choice: {choice}")
+    explicit = _normalize_roles(target_roles or [])
+    if choice == "accept_suggested":
+        if explicit:
+            raise ValueError("The suggested-role choice cannot include additional target roles.")
+        return build_round_intent(
+            profile,
+            accept_suggested=True,
+            target_roles=[],
+        )
+    if not explicit:
+        raise ValueError("Enter at least one target role for this choice.")
+    return build_round_intent(
+        profile,
+        accept_suggested=choice == "append_roles",
+        target_roles=explicit,
+    )
+
+
 def target_role_confirmation(
     profile: dict[str, Any],
     *,
@@ -75,9 +109,10 @@ def target_role_confirmation(
         fallback = (
             f"根据对你简历经历和能力的综合分析，我建议本轮优先投递：{roles_text}。\n\n"
             "请选择：\n"
-            "1. 按照建议岗位开始投递\n"
-            "2. 其他（直接回复岗位名称）\n\n"
-            "你也可以回复“再加数据运营经理”或“只投数据运营经理”。"
+            "1. 按建议岗位开始（推荐）\n"
+            "2. 保留建议岗位，并追加其他岗位\n"
+            "3. 只投你指定的其他岗位\n\n"
+            "选择 2 或 3 后，请继续输入岗位名称。"
         )
         fields = [
             {
@@ -88,12 +123,24 @@ def target_role_confirmation(
                 "options": [
                     {
                         "option_id": "accept_suggested",
-                        "label": "按照建议岗位开始投递",
-                    }
+                        "label": "按建议岗位",
+                        "description": f"投递 {roles_text}，并继续本轮流程。",
+                    },
+                    {
+                        "option_id": "append_roles",
+                        "label": "追加其他岗位",
+                        "description": "保留建议岗位，并输入还想投递的岗位。",
+                    },
+                    {
+                        "option_id": "replace_roles",
+                        "label": "只投其他岗位",
+                        "description": "不采用建议岗位，改为输入你指定的岗位。",
+                    },
                 ],
-                "allow_other": True,
-                "other_label": "其他（用户输入）",
-                "other_placeholder": "例如：数据运营经理",
+                "default_option_ids": ["accept_suggested"],
+                "min_selections": 1,
+                "max_selections": 1,
+                "allow_other": False,
                 "known_values": suggested,
             }
         ]
@@ -121,18 +168,70 @@ def target_role_confirmation(
         prompt=prompt,
         fields=fields,
         fallback_text=fallback,
-        continuation_action="jobagent.round.start",
+        continuation_action="jobagent.interaction.respond",
         idempotency_key=interaction_id,
     )
     return {
         "ok": False,
         "error": "interaction_required",
         "interaction": interaction,
+        "host_presentations": build_host_presentations(interaction),
         "suggested_roles": suggested,
         "next_suggested": (
-            "jobagent round start --accept-suggested"
+            f'jobagent interaction respond --interaction-id "{interaction_id}" '
+            "--choice accept_suggested"
             if suggested
-            else 'jobagent round start --target-role "<target role>"'
+            else f'jobagent interaction respond --interaction-id "{interaction_id}" '
+            '--target-role "<target role>"'
+        ),
+    }
+
+
+def target_role_input_request(
+    profile: dict[str, Any],
+    *,
+    root_interaction_id: str,
+    choice: str,
+) -> dict[str, Any]:
+    if choice not in {"append_roles", "replace_roles"}:
+        raise ValueError("A target-role input request requires append_roles or replace_roles.")
+    interaction_id = f"{root_interaction_id}:roles:{choice}"
+    if choice == "append_roles":
+        title = "追加目标岗位"
+        prompt = "请输入还想追加到本轮建议中的岗位名称。"
+        fallback = "请输入要追加的岗位名称，例如：数据运营经理。"
+    else:
+        title = "指定其他岗位"
+        prompt = "请输入本轮只想投递的岗位名称。"
+        fallback = "请输入本轮只想投递的岗位名称，例如：数据运营经理。"
+    interaction = build_interaction_required(
+        interaction_id=interaction_id,
+        product_id="job_agent",
+        kind="target_role_input",
+        title=title,
+        prompt=prompt,
+        fields=[
+            {
+                "field_id": "target_roles",
+                "type": "text",
+                "label": "目标岗位",
+                "required": True,
+                "placeholder": "例如：数据运营经理",
+            }
+        ],
+        fallback_text=fallback,
+        continuation_action="jobagent.interaction.respond",
+        idempotency_key=interaction_id,
+    )
+    return {
+        "ok": False,
+        "error": "interaction_required",
+        "interaction": interaction,
+        "host_presentations": build_host_presentations(interaction),
+        "suggested_roles": suggested_target_roles(profile),
+        "next_suggested": (
+            f'jobagent interaction respond --interaction-id "{interaction_id}" '
+            '--target-role "<target role>"'
         ),
     }
 

@@ -35,13 +35,19 @@ def _profile() -> dict:
 def isolated_round_state(tmp_path, monkeypatch):
     profile_path = tmp_path / "profile.json"
     current_path = tmp_path / "current-round.json"
+    pending_path = tmp_path / "pending-interaction.json"
     history_dir = tmp_path / "rounds"
     profile_path.write_text(json.dumps(_profile(), ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(state, "profile_path", lambda: profile_path)
     monkeypatch.setattr(state, "current_round_path", lambda: current_path)
+    monkeypatch.setattr(state, "pending_interaction_path", lambda: pending_path)
     monkeypatch.setattr(rounds, "current_round_path", lambda: current_path)
     monkeypatch.setattr(rounds, "rounds_dir", lambda: history_dir)
-    return current_path
+    return {
+        "current": current_path,
+        "pending": pending_path,
+        "profile": profile_path,
+    }
 
 
 def test_round_start_without_answer_returns_shared_interaction(isolated_round_state):
@@ -53,10 +59,31 @@ def test_round_start_without_answer_returns_shared_interaction(isolated_round_st
     assert interaction["protocol"] == "agentmesh360.interaction_required"
     assert interaction["preferred_presentation"] == "card"
     assert interaction["allow_text_fallback"] is True
-    assert interaction["fields"][0]["allow_other"] is True
+    field = interaction["fields"][0]
+    assert field["allow_other"] is False
+    assert field["default_option_ids"] == ["accept_suggested"]
+    assert [option["option_id"] for option in field["options"]] == [
+        "accept_suggested",
+        "append_roles",
+        "replace_roles",
+    ]
+    assert all(option["description"] for option in field["options"])
     assert interaction["fields"][0]["known_values"] == ["数据分析师", "商业分析师"]
-    assert "1. 按照建议岗位开始投递" in interaction["fallback_text"]
-    assert not isolated_round_state.exists()
+    assert "1. 按建议岗位开始（推荐）" in interaction["fallback_text"]
+    assert "2. 保留建议岗位，并追加其他岗位" in interaction["fallback_text"]
+    assert "3. 只投你指定的其他岗位" in interaction["fallback_text"]
+    assert interaction["continuation"]["action"] == "jobagent.interaction.respond"
+    codex = result["host_presentations"]["adapters"]["codex"]
+    assert codex["supported"] is True
+    question = codex["arguments"]["questions"][0]
+    assert question["header"] == "本轮目标岗位"
+    assert question["id"] == "target_role_choice"
+    assert len(question["options"]) == 3
+    assert question["options"][0]["label"].endswith("(Recommended)")
+    assert codex["answer_mapping"]["追加其他岗位"] == "append_roles"
+    assert codex["free_text_other"]["default_option_id"] == "replace_roles"
+    assert not isolated_round_state["current"].exists()
+    assert isolated_round_state["pending"].exists()
 
 
 def test_accept_suggested_creates_confirmed_round(isolated_round_state):
@@ -69,7 +96,8 @@ def test_accept_suggested_creates_confirmed_round(isolated_round_state):
     assert intent["status"] == "confirmed"
     assert intent["source"] == "suggested"
     assert intent["target_roles"] == ["数据分析师", "商业分析师"]
-    assert isolated_round_state.exists()
+    assert isolated_round_state["current"].exists()
+    assert not isolated_round_state["pending"].exists()
 
 
 def test_explicit_role_replaces_suggestions(isolated_round_state):
@@ -119,6 +147,150 @@ def test_active_round_is_idempotent_and_rejects_retargeting(isolated_round_state
             )
         )
     assert error.value.payload["error"] == "round_intent_conflict"
+
+
+def test_native_card_accept_response_creates_round(isolated_round_state):
+    requested = _dispatch(build_parser().parse_args(["round", "start"]))
+    interaction_id = requested["interaction"]["interaction_id"]
+
+    result = _dispatch(
+        build_parser().parse_args(
+            [
+                "interaction",
+                "respond",
+                "--interaction-id",
+                interaction_id,
+                "--choice",
+                "accept_suggested",
+            ]
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["workflow"]["intent"]["source"] == "suggested"
+    assert result["workflow"]["intent"]["target_roles"] == ["数据分析师", "商业分析师"]
+    assert result["interaction_receipt"]["choice"] == "accept_suggested"
+    assert not isolated_round_state["pending"].exists()
+
+
+def test_append_choice_returns_role_input_then_creates_round(isolated_round_state):
+    requested = _dispatch(build_parser().parse_args(["round", "start"]))
+    root_id = requested["interaction"]["interaction_id"]
+
+    follow_up = _dispatch(
+        build_parser().parse_args(
+            [
+                "interaction",
+                "respond",
+                "--interaction-id",
+                root_id,
+                "--choice",
+                "append_roles",
+            ]
+        )
+    )
+
+    assert follow_up["error"] == "interaction_required"
+    assert follow_up["interaction"]["kind"] == "target_role_input"
+    assert follow_up["interaction"]["fields"][0]["type"] == "text"
+    codex = follow_up["host_presentations"]["adapters"]["codex"]
+    assert codex["supported"] is False
+    assert codex["unsupported_reason"] == "current_interaction_requires_free_text"
+    assert not isolated_round_state["current"].exists()
+
+    result = _dispatch(
+        build_parser().parse_args(
+            [
+                "interaction",
+                "respond",
+                "--interaction-id",
+                follow_up["interaction"]["interaction_id"],
+                "--target-role",
+                "数据运营经理",
+            ]
+        )
+    )
+
+    assert result["workflow"]["intent"]["source"] == "suggested_plus_explicit"
+    assert result["workflow"]["intent"]["target_roles"] == [
+        "数据分析师",
+        "商业分析师",
+        "数据运营经理",
+    ]
+    assert result["interaction_receipt"]["interaction_ids"] == [
+        root_id,
+        follow_up["interaction"]["interaction_id"],
+    ]
+
+
+def test_replace_choice_can_include_role_in_first_response(isolated_round_state):
+    requested = _dispatch(build_parser().parse_args(["round", "start"]))
+    interaction_id = requested["interaction"]["interaction_id"]
+
+    result = _dispatch(
+        build_parser().parse_args(
+            [
+                "interaction",
+                "respond",
+                "--interaction-id",
+                interaction_id,
+                "--choice",
+                "replace_roles",
+                "--target-role",
+                "数据运营经理",
+            ]
+        )
+    )
+
+    assert result["workflow"]["intent"]["source"] == "user_explicit"
+    assert result["workflow"]["intent"]["target_roles"] == ["数据运营经理"]
+
+
+def test_completed_interaction_response_is_idempotent(isolated_round_state):
+    requested = _dispatch(build_parser().parse_args(["round", "start"]))
+    command = [
+        "interaction",
+        "respond",
+        "--interaction-id",
+        requested["interaction"]["interaction_id"],
+        "--choice",
+        "replace_roles",
+        "--target-role",
+        "数据运营经理",
+    ]
+    first = _dispatch(build_parser().parse_args(command))
+    repeated = _dispatch(build_parser().parse_args(command))
+
+    assert repeated["ok"] is True
+    assert repeated["idempotent_replay"] is True
+    assert repeated["workflow"]["round_id"] == first["workflow"]["round_id"]
+
+
+def test_changed_profile_invalidates_pending_interaction(isolated_round_state):
+    requested = _dispatch(build_parser().parse_args(["round", "start"]))
+    profile = _profile()
+    profile["career"]["currentJob"]["title"] = "产品经理"
+    isolated_round_state["profile"].write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = _dispatch(
+        build_parser().parse_args(
+            [
+                "interaction",
+                "respond",
+                "--interaction-id",
+                requested["interaction"]["interaction_id"],
+                "--choice",
+                "accept_suggested",
+            ]
+        )
+    )
+
+    assert result["error"] == "interaction_context_changed"
+    assert not isolated_round_state["current"].exists()
+    assert not isolated_round_state["pending"].exists()
 
 
 def test_schema_v2_active_round_is_preserved_with_legacy_intent():

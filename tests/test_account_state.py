@@ -47,6 +47,10 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
     state.mkdir()
     ensure_account_state(_account("acct_account_a"), app_dir=tmp_path)
     (state / "profile.json").write_text('{"owner":"a"}', encoding="utf-8")
+    (state / "pending_interaction.json").write_text(
+        '{"interaction_id":"interaction-a"}',
+        encoding="utf-8",
+    )
     (state / "archive").mkdir()
     (state / "archive" / "old-decision.json").write_text(
         '{"owner":"a"}', encoding="utf-8"
@@ -61,6 +65,7 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
 
     assert switched["browser_profile_preserved"] is True
     assert not (state / "profile.json").exists()
+    assert not (state / "pending_interaction.json").exists()
     assert not (state / "archive").exists()
     assert not (state / "browser_session.json").exists()
     (state / "profile.json").write_text('{"owner":"b"}', encoding="utf-8")
@@ -72,11 +77,15 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
     )
 
     assert "profile.json" in restored["restored"]
+    assert "pending_interaction.json" in restored["restored"]
     assert "archive" in restored["restored"]
     assert json.loads((state / "profile.json").read_text(encoding="utf-8"))["owner"] == "a"
     assert json.loads(
         (state / "archive" / "old-decision.json").read_text(encoding="utf-8")
     )["owner"] == "a"
+    assert json.loads(
+        (state / "pending_interaction.json").read_text(encoding="utf-8")
+    )["interaction_id"] == "interaction-a"
     assert state_owner_status("acct_account_a", app_dir=tmp_path)["ready"] is True
     saved_b = tmp_path / "accounts" / "acct_account_b" / "state" / "profile.json"
     assert json.loads(saved_b.read_text(encoding="utf-8"))["owner"] == "b"

@@ -94,6 +94,21 @@ def build_parser() -> argparse.ArgumentParser:
     support = sub.add_parser("support", help="Voluntary project support")
     support.add_subparsers(dest="support_command", required=True).add_parser("star")
 
+    interaction = sub.add_parser("interaction", help="Continue a structured host interaction")
+    interaction_sub = interaction.add_subparsers(dest="interaction_command", required=True)
+    interaction_respond = interaction_sub.add_parser("respond")
+    interaction_respond.add_argument("--interaction-id", required=True)
+    interaction_respond.add_argument(
+        "--choice",
+        choices=["accept_suggested", "append_roles", "replace_roles"],
+    )
+    interaction_respond.add_argument(
+        "--target-role",
+        action="append",
+        default=[],
+        help="Target role supplied for append or replace choices; repeat for multiple roles",
+    )
+
     delivery_round = sub.add_parser("round", help="View or update the multi-platform round")
     round_sub = delivery_round.add_subparsers(dest="round_command", required=True)
     round_start = round_sub.add_parser("start")
@@ -415,6 +430,172 @@ def _resume_analyze(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
+    from jobagent.application.round_intent import (
+        build_round_intent_from_choice,
+        target_role_input_request,
+    )
+    from jobagent.infra.interaction_state import (
+        clear_pending_interaction,
+        load_pending_interaction,
+        save_pending_interaction,
+    )
+    from jobagent.infra.protocol import digest_payload
+    from jobagent.infra.rounds import round_status, start_new_round, utc_now
+    from jobagent.infra.state import current_round_path, load_json, profile_path
+
+    interaction_id = str(args.interaction_id or "").strip()
+    profile = load_json(profile_path())
+    if not profile:
+        return {
+            "ok": False,
+            "error": "profile_required",
+            "message": "Analyze a resume before answering the target-role interaction.",
+            "next_suggested": "jobagent resume analyze --file <resume>",
+        }
+
+    pending = load_pending_interaction()
+    current = load_json(current_round_path()) or {}
+    receipt = current.get("interaction_receipt") or {}
+    receipt_ids = {
+        str(value)
+        for value in receipt.get("interaction_ids") or []
+        if str(value).strip()
+    }
+    if interaction_id in receipt_ids:
+        recorded_choice = str(receipt.get("choice") or "")
+        if args.choice and args.choice != recorded_choice:
+            return {
+                "ok": False,
+                "error": "interaction_response_conflict",
+                "message": "This interaction already created a round with a different answer.",
+                "next_suggested": "jobagent round status",
+            }
+        if args.target_role:
+            try:
+                requested = build_round_intent_from_choice(
+                    profile,
+                    choice=recorded_choice,
+                    target_roles=args.target_role,
+                )
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": "invalid_interaction_response",
+                    "message": str(exc),
+                    "next_suggested": "jobagent round status",
+                }
+            recorded_roles = (current.get("intent") or {}).get("target_roles") or []
+            if [role.casefold() for role in requested["target_roles"]] != [
+                str(role).casefold() for role in recorded_roles
+            ]:
+                return {
+                    "ok": False,
+                    "error": "interaction_response_conflict",
+                    "message": "This interaction already created a round with different target roles.",
+                    "next_suggested": "jobagent round status",
+                }
+        return {
+            "ok": True,
+            "idempotent_replay": True,
+            "interaction_receipt": receipt,
+            "workflow": round_status(),
+        }
+
+    if not pending or str(pending.get("interaction_id") or "") != interaction_id:
+        return {
+            "ok": False,
+            "error": "interaction_not_pending",
+            "message": "This interaction is no longer waiting for an answer.",
+            "next_suggested": "jobagent round start",
+        }
+    if str(pending.get("profile_digest") or "") != digest_payload(profile):
+        clear_pending_interaction()
+        return {
+            "ok": False,
+            "error": "interaction_context_changed",
+            "message": "The resume profile changed after this interaction was created.",
+            "next_suggested": "jobagent round start",
+        }
+
+    stage = str(pending.get("stage") or "")
+    choice = str(args.choice or pending.get("choice") or "")
+    if stage == "choice" and not args.choice:
+        return {
+            "ok": False,
+            "error": "invalid_interaction_response",
+            "message": "Select one target-role option before continuing.",
+            "next_suggested": str(
+                (pending.get("interaction") or {}).get("fallback_text") or ""
+            ),
+        }
+    if stage == "roles" and args.choice and args.choice != pending.get("choice"):
+        return {
+            "ok": False,
+            "error": "interaction_response_conflict",
+            "message": "The role-entry answer does not match the selected option.",
+            "next_suggested": str(
+                (pending.get("interaction") or {}).get("fallback_text") or ""
+            ),
+        }
+    if choice in {"append_roles", "replace_roles"} and not args.target_role:
+        follow_up = target_role_input_request(
+            profile,
+            root_interaction_id=str(pending.get("root_interaction_id") or interaction_id),
+            choice=choice,
+        )
+        follow_up_interaction = follow_up["interaction"]
+        save_pending_interaction(
+            follow_up_interaction,
+            stage="roles",
+            profile_digest=digest_payload(profile),
+            suggested_roles=list(pending.get("suggested_roles") or []),
+            previous_round_id=pending.get("previous_round_id"),
+            root_interaction_id=str(pending.get("root_interaction_id") or interaction_id),
+            choice=choice,
+        )
+        return follow_up
+    try:
+        intent = build_round_intent_from_choice(
+            profile,
+            choice=choice,
+            target_roles=args.target_role,
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": "invalid_interaction_response",
+            "message": str(exc),
+            "next_suggested": str(
+                (pending.get("interaction") or {}).get("fallback_text") or ""
+            ),
+        }
+
+    root_interaction_id = str(pending.get("root_interaction_id") or interaction_id)
+    interaction_ids = list(dict.fromkeys([root_interaction_id, interaction_id]))
+    receipt = {
+        "protocol": "agentmesh360.interaction_required",
+        "protocol_version": 1,
+        "interaction_ids": interaction_ids,
+        "choice": choice,
+        "response_digest": digest_payload(
+            {
+                "interaction_id": interaction_id,
+                "choice": choice,
+                "target_roles": intent["target_roles"],
+            }
+        ),
+        "completed_at": utc_now(),
+    }
+    start_new_round(intent, interaction_receipt=receipt)
+    clear_pending_interaction()
+    return {
+        "ok": True,
+        "interaction_receipt": receipt,
+        "workflow": round_status(),
+    }
+
+
 def _with_login_workflow(platform: str, payload: dict[str, Any]) -> dict[str, Any]:
     from jobagent.infra import rounds
 
@@ -694,6 +875,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         from jobagent.infra.support import support_star_payload
 
         return support_star_payload()
+    if args.command == "interaction":
+        return _interaction_respond(args)
     if args.command == "round":
         from jobagent.infra.rounds import (
             assert_platform_turn,
@@ -707,6 +890,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 build_round_intent,
                 target_role_confirmation,
             )
+            from jobagent.infra.interaction_state import (
+                clear_pending_interaction,
+                save_pending_interaction,
+            )
+            from jobagent.infra.protocol import digest_payload
             from jobagent.infra.state import current_round_path, load_json, profile_path
 
             current = load_json(current_round_path())
@@ -717,6 +905,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 and not args.accept_suggested
                 and not args.target_role
             ):
+                clear_pending_interaction()
                 start_new_round()
                 return {"ok": True, "workflow": round_status()}
             profile = load_json(profile_path())
@@ -728,12 +917,25 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "next_suggested": "jobagent resume analyze --file <resume>",
                 }
             if not args.accept_suggested and not args.target_role:
-                return target_role_confirmation(
+                confirmation = target_role_confirmation(
                     profile,
                     previous_round_id=(
                         str(current.get("round_id")) if current and current.get("round_id") else None
                     ),
                 )
+                save_pending_interaction(
+                    confirmation["interaction"],
+                    stage="choice" if confirmation["suggested_roles"] else "roles",
+                    profile_digest=digest_payload(profile),
+                    suggested_roles=confirmation["suggested_roles"],
+                    previous_round_id=(
+                        str(current.get("round_id"))
+                        if current and current.get("round_id")
+                        else None
+                    ),
+                    choice=None if confirmation["suggested_roles"] else "replace_roles",
+                )
+                return confirmation
             try:
                 intent = build_round_intent(
                     profile,
@@ -748,6 +950,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "next_suggested": "jobagent round start",
                 }
             start_new_round(intent)
+            clear_pending_interaction()
             return {"ok": True, "workflow": round_status()}
         if args.round_command == "status":
             return {"ok": True, "workflow": round_status()}

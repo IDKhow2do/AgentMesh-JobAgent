@@ -2,6 +2,28 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.1] - 2026-07-27
+
+### Fixed
+
+- Target-role confirmation now exposes three complete choices that map directly to native host cards: accept suggestions, append roles, or replace suggestions.
+- Add `jobagent interaction respond` as the single continuation path for card and text answers, including a follow-up role-input interaction for append/replace choices.
+- Include ready-to-call Codex `request_user_input` arguments and a stable display-label-to-option-ID map when the interaction can use a native choice card.
+- Bind pending interactions to the current account and resume profile, reject stale or conflicting answers, and make repeated accepted responses idempotent.
+- Host instructions now distinguish a host's card capability from whether the current surface or mode exposes the card interface.
+
+### Compatibility
+
+- Existing direct `round start --accept-suggested` and `round start --target-role` commands remain valid when the user's intent is already explicit.
+- Existing rounds, profiles, browser sessions, decisions and audits are preserved. The new pending-interaction file is account-bound and removed after a successful response.
+
+## [0.5.0] - 2026-07-27
+
+### Added
+
+- Add AgentMesh360 `interaction_required` v1 target-role confirmation before creating a new round.
+- Persist confirmed target roles in the round and bind them to signed cloud search plans and decisions.
+
 ## [0.4.6] - 2026-07-24
 
 ### Fixed

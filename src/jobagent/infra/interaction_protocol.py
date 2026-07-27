@@ -89,3 +89,70 @@ def validate_interaction_required(payload: dict[str, Any]) -> dict[str, Any]:
     if not str(continuation.get("idempotency_key") or "").strip():
         raise InteractionProtocolError("interaction idempotency key is required")
     return payload
+
+
+def build_host_presentations(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build optional host-native arguments without changing the shared protocol."""
+
+    validate_interaction_required(payload)
+    fields = payload["fields"]
+    codex: dict[str, Any] = {
+        "tool": "request_user_input",
+        "requires_callable_tool_in_current_mode": True,
+        "fallback_field": "interaction.fallback_text",
+        "supported": False,
+    }
+    if len(fields) == 1:
+        field = fields[0]
+        options = field.get("options") or []
+        if field.get("type") == "single" and 2 <= len(options) <= 3:
+            defaults = set(field.get("default_option_ids") or [])
+            rendered_options: list[dict[str, str]] = []
+            answer_mapping: dict[str, str] = {}
+            for option in options:
+                label = str(option["label"])
+                if option["option_id"] in defaults:
+                    label = f"{label} (Recommended)"
+                rendered_options.append(
+                    {
+                        "label": label,
+                        "description": str(option.get("description") or option["label"]),
+                    }
+                )
+                answer_mapping[label] = str(option["option_id"])
+            codex.update(
+                {
+                    "supported": True,
+                    "arguments": {
+                        "questions": [
+                            {
+                                "header": str(field["label"])[:12],
+                                "id": str(field["field_id"]),
+                                "question": str(payload["prompt"]),
+                                "options": rendered_options,
+                            }
+                        ]
+                    },
+                    "answer_mapping": answer_mapping,
+                    "free_text_other": {
+                        "field_id": str(field["field_id"]),
+                        "response_key": "other_text",
+                        "default_option_id": (
+                            "replace_roles"
+                            if "replace_roles"
+                            in {str(option["option_id"]) for option in options}
+                            else None
+                        ),
+                        "target_role_source": "other_text",
+                    },
+                }
+            )
+        else:
+            codex["unsupported_reason"] = "current_interaction_requires_free_text"
+    else:
+        codex["unsupported_reason"] = "current_interaction_has_multiple_fields"
+    return {
+        "preferred": "native_card",
+        "fallback": "text",
+        "adapters": {"codex": codex},
+    }

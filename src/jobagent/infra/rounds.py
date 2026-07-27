@@ -69,7 +69,11 @@ def ensure_current_round() -> dict[str, Any]:
     )
 
 
-def _create_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
+def _create_round(
+    intent: dict[str, Any] | None = None,
+    *,
+    interaction_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Create the persisted round state for the explicit start command."""
 
     round_id = new_round_id()
@@ -90,11 +94,17 @@ def _create_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
         },
         "platforms": _default_platform_state(),
     }
+    if interaction_receipt is not None:
+        state["interaction_receipt"] = interaction_receipt
     save_round(state)
     return state
 
 
-def start_new_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
+def start_new_round(
+    intent: dict[str, Any] | None = None,
+    *,
+    interaction_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Start a round explicitly, or return the already-active round."""
     current = load_json(current_round_path())
     if current and current.get("status") == "active" and current.get("round_id"):
@@ -111,7 +121,7 @@ def start_new_round(intent: dict[str, Any] | None = None) -> dict[str, Any]:
                 }
             )
         return active
-    return _create_round(intent)
+    return _create_round(intent, interaction_receipt=interaction_receipt)
 
 
 def _migrate_round(state: dict[str, Any]) -> dict[str, Any]:
