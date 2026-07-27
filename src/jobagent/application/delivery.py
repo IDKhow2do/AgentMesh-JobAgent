@@ -8,7 +8,12 @@ from typing import Any
 from jobagent.infra import rounds
 from jobagent.infra.activity import active_command
 from jobagent.infra.audit import AuditLog, boss_job_key
-from jobagent.infra.discovery_state import build_review, load_envelope
+from jobagent.infra.delivery_preview import (
+    DeliveryPreviewError,
+    preview_required_payload,
+    validate_delivery_preview,
+)
+from jobagent.infra.discovery_state import load_envelope
 from jobagent.infra.diagnostics import emit_stage, progress_heartbeat
 from jobagent.infra.platform_lock import PlatformSessionLock
 from jobagent.infra.protocol import verify_stored_decision
@@ -30,11 +35,36 @@ class UserInterventionRequired(RuntimeError):
         return self.prompt
 
 
-def _load_reviewed(platform: str, input_path: str | None) -> dict[str, Any]:
+def _load_reviewed(
+    platform: str,
+    input_path: str | None,
+    *,
+    preview_id: str | None,
+) -> dict[str, Any]:
     envelope = load_envelope(platform, input_path, reviewed=True if input_path is None else None)
     verify_stored_decision(envelope["manifest"], platform=platform)
     if "send_candidates" not in envelope:
-        envelope = build_review(envelope)
+        raise DeliveryPreviewError(preview_required_payload(platform, input_path))
+    preview = envelope.get("delivery_preview")
+    if not isinstance(preview, dict) or not preview_id:
+        raise DeliveryPreviewError(
+            preview_required_payload(platform, str(envelope.get("source_path") or input_path or ""))
+        )
+    try:
+        validate_delivery_preview(
+            preview,
+            send_candidates=list(envelope["send_candidates"]),
+            expected_platform=platform,
+            expected_discover_id=str(envelope["discover_id"]),
+            expected_preview_id=preview_id,
+        )
+    except ValueError as exc:
+        payload = preview_required_payload(
+            platform,
+            str(envelope.get("source_path") or input_path or ""),
+        )
+        payload["message"] = str(exc)
+        raise DeliveryPreviewError(payload) from exc
     return envelope
 
 
@@ -240,15 +270,47 @@ def send_reviewed(
     platform: str,
     *,
     input_path: str | None = None,
+    preview_id: str | None = None,
     limit: int = 20,
     dry_run: bool = False,
     stop_on_failure: bool = True,
 ) -> dict[str, Any]:
-    reviewed = _load_reviewed(platform, input_path)
+    reviewed = _load_reviewed(platform, input_path, preview_id=preview_id)
     all_jobs = list(reviewed.get("send_candidates") or [])
     jobs = all_jobs[: max(1, min(100, limit))]
     if not jobs:
-        raise ValueError("The reviewed decision contains no send candidates")
+        next_suggested = f"jobagent {platform} audit"
+        rounds.set_platform_status(
+            platform,
+            "sent",
+            command=(
+                "jobagent boss greet send"
+                if platform == "boss"
+                else f"jobagent {platform} apply send"
+            ),
+            evidence={
+                "discover_id": reviewed["discover_id"],
+                "attempted": 0,
+                "delivered": 0,
+                "failed": 0,
+                "skipped": 0,
+                "reviewed_count": 0,
+            },
+            next_suggested=next_suggested,
+        )
+        return {
+            "ok": True,
+            "platform": platform,
+            "discover_id": reviewed["discover_id"],
+            "attempted": 0,
+            "delivered": 0,
+            "failed": 0,
+            "skipped": 0,
+            "dry_run": dry_run,
+            "attempts": [],
+            "next_suggested": next_suggested,
+            "workflow": rounds.round_status(),
+        }
     emit_stage("delivery_started", platform=platform, total=len(jobs), dry_run=dry_run)
 
     def on_attempt(attempt, index: int, total: int) -> None:
@@ -308,9 +370,15 @@ def send_reviewed(
         f"jobagent {platform} audit"
         if complete_batch
         else (
-            f"jobagent boss greet send --input {input_path} --limit 100"
+            (
+                "jobagent boss greet send "
+                f"--input {reviewed['source_path']} --preview-id {preview_id} --limit 100"
+            )
             if platform == "boss"
-            else f"jobagent {platform} apply send --input {input_path} --limit 100"
+            else (
+                f"jobagent {platform} apply send "
+                f"--input {reviewed['source_path']} --preview-id {preview_id} --limit 100"
+            )
         )
     )
     rounds.set_platform_status(

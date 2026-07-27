@@ -39,6 +39,10 @@ def _add_review(parser: argparse.ArgumentParser) -> None:
 
 def _add_send(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", "-i", help="Reviewed decision file; defaults to latest")
+    parser.add_argument(
+        "--preview-id",
+        help="Delivery-preview handoff ID emitted by review; this is not a user confirmation",
+    )
     parser.add_argument("--limit", type=int, default=100, help="Maximum jobs in this send batch")
     parser.add_argument("--dry-run", action="store_true", help="Plan without touching platform buttons")
     parser.add_argument("--continue-on-failure", action="store_true")
@@ -1025,6 +1029,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     return send_reviewed(
         platform,
         input_path=args.input,
+        preview_id=args.preview_id,
         limit=args.limit,
         dry_run=args.dry_run,
         stop_on_failure=not args.continue_on_failure,
@@ -1056,8 +1061,10 @@ def main() -> None:
 
         try:
             from jobagent.application.delivery import UserInterventionRequired
+            from jobagent.infra.delivery_preview import DeliveryPreviewError
         except ImportError:
             UserInterventionRequired = ()  # type: ignore[assignment,misc]
+            DeliveryPreviewError = ()  # type: ignore[assignment,misc]
         if isinstance(exc, AccountStateError):
             payload = exc.payload
         elif isinstance(exc, UpgradeCompatibilityError):
@@ -1078,6 +1085,8 @@ def main() -> None:
                 "requires_user_action": True,
                 "user_prompt": exc.prompt,
             }
+        elif DeliveryPreviewError and isinstance(exc, DeliveryPreviewError):
+            payload = exc.payload
         elif isinstance(exc, PlatformLockError):
             payload = exc.payload
         elif isinstance(exc, RoundOrderError):

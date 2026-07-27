@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.2
+version: 0.5.3
 metadata:
   openclaw:
     emoji: "💼"
@@ -27,6 +27,8 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - Run Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job as complete vertical chains. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> send -> audit` chain and complete its audit before logging in to the next platform. Never operate their shared browser concurrently.
 - Stop whenever `requires_user_action=true`; relay `user_prompt` exactly and wait.
 - Report `selected / review / rejected`, then automatically deliver the signed `selected` list without asking again.
+- On `event=delivery_preview`, show every row in `delivery_preview.items` before any real platform action. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including `--preview-id`.
+- On `error=delivery_preview_required`, immediately run the returned review `next_suggested`, display the regenerated preview, and follow its newly bound send command. Preserve existing user promotions; do not recollect, recharge or ask for confirmation.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.
 - Never promote `review` without IDs chosen by the user and `--confirm-promote`. Never auto-promote `rejected`.
 - Starting the round authorizes real actions for `selected`; send commands have no per-platform confirmation flag.
@@ -83,7 +85,7 @@ Boss直聘:
 jobagent boss login --check
 jobagent boss discover
 jobagent boss greet preview
-jobagent boss greet send
+jobagent boss greet send --input <review_file> --preview-id <preview_id>
 jobagent boss audit
 ```
 
@@ -93,7 +95,7 @@ jobagent boss audit
 jobagent liepin login --check
 jobagent liepin discover
 jobagent liepin apply review
-jobagent liepin apply send
+jobagent liepin apply send --input <review_file> --preview-id <preview_id>
 jobagent liepin audit
 ```
 
@@ -103,7 +105,7 @@ jobagent liepin audit
 jobagent zhilian login --check
 jobagent zhilian discover
 jobagent zhilian apply review
-jobagent zhilian apply send
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
 jobagent zhilian audit
 ```
 
@@ -115,7 +117,7 @@ Treat any Zhilian `kw...` URL segment as opaque platform state, never as the clo
 jobagent 51job login --check
 jobagent 51job discover
 jobagent 51job apply review
-jobagent 51job apply send
+jobagent 51job apply send --input <review_file> --preview-id <preview_id>
 jobagent 51job audit
 ```
 

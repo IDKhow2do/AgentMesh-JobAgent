@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching, recruiter greetings and application audit.
-version: 0.5.2
+version: 0.5.3
 ---
 
 # Job Agent
@@ -16,6 +16,8 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - Run platforms as complete vertical chains: Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> send -> audit` chain and complete its audit before logging in to the next platform.
 - When output contains `requires_user_action=true`, stop, relay `user_prompt` and wait for the user.
 - Report `selected / review / rejected`, then automatically deliver signed `selected` jobs without asking again for each platform.
+- On `event=delivery_preview`, show every row in `delivery_preview.items` before real delivery. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including `--preview-id`.
+- On `error=delivery_preview_required`, immediately run the returned review `next_suggested`, display the regenerated preview, and follow its newly bound send command. Preserve existing user promotions; do not recollect, recharge or ask for confirmation.
 - `review` is excluded by default. Promote only IDs named by the user and always pass `--confirm-promote`.
 - Never automatically promote `rejected`.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.
@@ -63,10 +65,10 @@ jobagent boss discover
 jobagent boss greet preview
 ```
 
-Report the signed decision and greetings, then continue automatically:
+Report the signed decision, show the complete delivery preview, then continue with the exact bound command:
 
 ```bash
-jobagent boss greet send
+jobagent boss greet send --input <review_file> --preview-id <preview_id>
 jobagent boss audit
 ```
 
@@ -79,7 +81,7 @@ jobagent liepin apply review
 ```
 
 ```bash
-jobagent liepin apply send
+jobagent liepin apply send --input <review_file> --preview-id <preview_id>
 jobagent liepin audit
 ```
 
@@ -92,7 +94,7 @@ jobagent zhilian apply review
 ```
 
 ```bash
-jobagent zhilian apply send
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
 jobagent zhilian audit
 ```
 
@@ -107,7 +109,7 @@ jobagent 51job apply review
 ```
 
 ```bash
-jobagent 51job apply send
+jobagent 51job apply send --input <review_file> --preview-id <preview_id>
 jobagent 51job audit
 ```
 

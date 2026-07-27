@@ -38,6 +38,8 @@ This is the public Job Agent CLI repository in the AgentMesh ecosystem. It conta
 - Follow the persisted workflow and `next_suggested`; never invent a parallel or batch-login workflow.
 - Platforms run as complete vertical chains in this order: Boss -> Liepin -> Zhilian -> 51Job. Complete the current platform through audit before logging in to the next platform.
 - Starting a job-search round authorizes automatic delivery of cloud-signed `selected` jobs. Do not request another confirmation before each platform or send command.
+- When review returns `event=delivery_preview`, show every row in `delivery_preview.items` before any real platform action. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including its `--preview-id`; never invent, omit or reuse a preview ID from another platform or Discover.
+- If send returns `error=delivery_preview_required`, execute its review `next_suggested` immediately, display the regenerated preview, and then follow the new bound send command. This is compatibility recovery for older review files and does not require recollection, another Discover charge or user confirmation.
 - `review` jobs require explicit user-selected IDs and `--confirm-promote`. Never auto-promote `rejected` jobs.
 - Stop and relay the exact prompt whenever the CLI returns `requires_user_action=true`.
 - Never delete `~/.jobagent` or the Job Agent Chrome profile as a general upgrade fix. Follow `client_upgrade_required`, `conflicts`, and `next_suggested`.

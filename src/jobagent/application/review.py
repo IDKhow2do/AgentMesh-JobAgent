@@ -6,6 +6,7 @@ from typing import Any
 
 from jobagent.infra import rounds
 from jobagent.infra.audit import AuditLog, boss_job_key
+from jobagent.infra.delivery_preview import build_delivery_preview
 from jobagent.infra.discovery_state import build_review, load_envelope, save_review
 from jobagent.infra.protocol import verify_stored_decision
 
@@ -36,10 +37,19 @@ def review_decision(
     envelope = load_envelope(platform, input_path, reviewed=False if input_path is None else None)
     manifest = verify_stored_decision(envelope["manifest"], platform=platform)
     envelope["manifest"] = envelope["manifest"]
+    existing_promoted_ids = [
+        str(item.get("job_id"))
+        for item in (envelope.get("user_overrides") or [])
+        if isinstance(item, dict)
+        and item.get("from") == "review"
+        and item.get("to") == "selected"
+        and item.get("job_id")
+    ]
+    requested_promoted_ids = list(promoted_ids or []) or existing_promoted_ids
     review = build_review(
         envelope,
-        promoted_ids=promoted_ids,
-        confirm_promote=confirm_promote,
+        promoted_ids=requested_promoted_ids,
+        confirm_promote=confirm_promote or bool(existing_promoted_ids),
     )
     if platform == "boss":
         _exclude_delivered_boss_jobs(review)
@@ -54,11 +64,25 @@ def review_decision(
                 f"{platform} decision is missing signed greetings for: " + ", ".join(missing)
             )
     path = save_review(review, output_path)
-    next_suggested = (
+    send_command = (
         f"jobagent boss greet send --input {path}"
         if platform == "boss"
         else f"jobagent {platform} apply send --input {path}"
     )
+    delivery_preview = build_delivery_preview(
+        platform=platform,
+        discover_id=str(manifest["discover_id"]),
+        send_candidates=review["send_candidates"],
+        send_command=send_command,
+        selected_count=len(manifest.get("selected", [])),
+        promoted_count=len(review["user_overrides"]),
+        review_count=len(manifest.get("review", [])),
+        rejected_count=len(manifest.get("rejected", [])),
+        skipped_delivered_count=len(review.get("skipped_delivered", [])),
+    )
+    review["delivery_preview"] = delivery_preview
+    path = save_review(review, str(path))
+    next_suggested = str(delivery_preview["continuation"]["action"])
     rounds.set_platform_status(
         platform,
         "reviewed",
@@ -67,11 +91,16 @@ def review_decision(
             if platform == "boss"
             else f"jobagent {platform} apply review"
         ),
-        evidence={"discover_id": manifest["discover_id"], "send_count": len(review["send_candidates"])},
+        evidence={
+            "discover_id": manifest["discover_id"],
+            "send_count": len(review["send_candidates"]),
+            "preview_id": delivery_preview["preview_id"],
+        },
         next_suggested=next_suggested,
     )
     return {
         "ok": True,
+        "event": "delivery_preview",
         "platform": platform,
         "discover_id": manifest["discover_id"],
         "selected": manifest.get("selected", []),
@@ -81,6 +110,9 @@ def review_decision(
         "skipped_delivered": review.get("skipped_delivered", []),
         "skipped_delivered_count": len(review.get("skipped_delivered", [])),
         "send_count": len(review["send_candidates"]),
+        "display_required": True,
+        "requires_user_action": False,
+        "delivery_preview": delivery_preview,
         "review_file": str(path),
         "next_suggested": next_suggested,
         "workflow": rounds.round_status(),

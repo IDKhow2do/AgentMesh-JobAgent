@@ -20,7 +20,7 @@ ROUND_EXECUTION_POLICY = {
     "mode": "vertical_end_to_end",
     "prelogin_future_platforms": False,
     "advance_only_after": "audit",
-    "stages": ["login", "discover", "review", "send", "audit"],
+    "stages": ["login", "discover", "review", "delivery_preview", "send", "audit"],
 }
 
 

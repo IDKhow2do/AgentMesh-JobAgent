@@ -28,7 +28,14 @@ def test_round_state_is_created_and_platform_skip_is_round_local(monkeypatch, tm
         "mode": "vertical_end_to_end",
         "prelogin_future_platforms": False,
         "advance_only_after": "audit",
-        "stages": ["login", "discover", "review", "send", "audit"],
+            "stages": [
+                "login",
+                "discover",
+                "review",
+                "delivery_preview",
+                "send",
+                "audit",
+            ],
     }
 
     updated = rounds.set_platform_status("liepin", "skipped_this_round", command="test")

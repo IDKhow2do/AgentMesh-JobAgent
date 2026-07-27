@@ -590,6 +590,7 @@ def test_selected_send_runs_without_per_platform_confirmation(monkeypatch):
             "liepin",
             {
                 "input_path": None,
+                "preview_id": None,
                 "limit": 100,
                 "dry_run": False,
                 "stop_on_failure": True,
@@ -1061,6 +1062,39 @@ def test_unexpected_cli_error_writes_diagnostic_log(tmp_path, monkeypatch, capsy
     assert "RuntimeError: boom" in log_path.read_text(encoding="utf-8")
 
 
+def test_cli_reports_delivery_preview_recovery_without_diagnostic_log(
+    monkeypatch,
+    capsys,
+):
+    from jobagent import cli
+    from jobagent.infra.delivery_preview import DeliveryPreviewError
+
+    payload = {
+        "ok": False,
+        "error": "delivery_preview_required",
+        "request_preserved": True,
+        "requires_user_action": False,
+        "next_suggested": "jobagent liepin apply review --input old.review.json",
+    }
+    monkeypatch.setattr(cli, "_maybe_update", lambda _args: None)
+    monkeypatch.setattr(cli, "_prepare_client_upgrade", lambda _args: None)
+    monkeypatch.setattr(cli, "_verify_state_owner_for_command", lambda _args: None)
+    monkeypatch.setattr(
+        cli,
+        "_dispatch",
+        lambda _args: (_ for _ in ()).throw(DeliveryPreviewError(payload)),
+    )
+    monkeypatch.setattr("sys.argv", ["jobagent", "liepin", "apply", "send"])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    reported = json.loads(capsys.readouterr().err)
+    assert reported == payload
+    assert "diagnostic_log" not in reported
+
+
 def test_cli_blocks_platform_dispatch_when_upgrade_requires_recovery(monkeypatch, capsys):
     from jobagent import cli
     from jobagent.infra.client_upgrade import UpgradeCompatibilityError
@@ -1164,10 +1198,97 @@ def test_review_requires_confirmation_to_promote_and_never_promotes_rejected(tmp
     )
     reviewed = json.loads(output.read_text(encoding="utf-8"))
     assert result["send_count"] == 2
+    assert result["event"] == "delivery_preview"
+    assert result["display_required"] is True
+    assert result["requires_user_action"] is False
+    assert result["delivery_preview"]["protocol"] == "agentmesh360.delivery_preview"
+    assert result["delivery_preview"]["requires_user_confirmation"] is False
+    assert [item["title"] for item in result["delivery_preview"]["items"]] == [
+        "Selected",
+        "Review",
+    ]
+    assert result["delivery_preview"]["preview_id"] in result["next_suggested"]
+    assert reviewed["delivery_preview"] == result["delivery_preview"]
     assert [item["id"] for item in reviewed["send_candidates"]] == ["s", "r"]
     assert reviewed["user_overrides"] == [{"job_id": "r", "from": "review", "to": "selected"}]
     assert statuses == [("liepin", "reviewed")]
     assert result["workflow"]["round_id"] == "round-1"
+
+
+def test_reviewing_an_old_review_file_preserves_existing_promotions(tmp_path, monkeypatch):
+    import jobagent.infra.protocol as protocol
+    from jobagent.application.review import review_decision
+
+    private, public = _key_pair()
+    monkeypatch.setattr(protocol, "DECISION_SIGNING_PUBLIC_KEY", public)
+    manifest = _sign(
+        private,
+        {
+            "manifest_type": "decision_manifest",
+            "protocol_version": 1,
+            "manifest_id": "dm_old_review",
+            "discover_id": "dis_old_review",
+            "platform": "zhilian",
+            "candidate_digest": "sha256:" + "a" * 64,
+            "input_count": 2,
+            "deduplicated_count": 2,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": _future(24),
+            "selected": [
+                {
+                    "id": "selected",
+                    "title": "数据分析师",
+                    "classification": "selected",
+                }
+            ],
+            "review": [
+                {
+                    "id": "promoted",
+                    "title": "数据运营经理",
+                    "classification": "review",
+                }
+            ],
+            "rejected": [],
+            "billing": {"action": "jobagent.discover", "credits": 10, "transaction_id": "1"},
+        },
+    )
+    old_review = tmp_path / "old.review.json"
+    old_review.write_text(
+        json.dumps(
+            {
+                "platform": "zhilian",
+                "discover_id": "dis_old_review",
+                "manifest": manifest,
+                "user_overrides": [
+                    {"job_id": "promoted", "from": "review", "to": "selected"}
+                ],
+                "send_candidates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jobagent.application.review.rounds.set_platform_status",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "jobagent.application.review.rounds.round_status",
+        lambda: {"round_id": "round-1"},
+    )
+
+    result = review_decision(
+        "zhilian",
+        input_path=str(old_review),
+        output_path=str(tmp_path / "regenerated.review.json"),
+    )
+
+    assert [item["title"] for item in result["delivery_preview"]["items"]] == [
+        "数据分析师",
+        "数据运营经理",
+    ]
+    assert result["promoted"] == [
+        {"job_id": "promoted", "from": "review", "to": "selected"}
+    ]
 
 
 def test_send_marks_platform_sent_and_audit_advances_to_next_platform(monkeypatch):
