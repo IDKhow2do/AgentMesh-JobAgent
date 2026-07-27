@@ -2,6 +2,14 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.2] - 2026-07-27
+
+### Fixed
+
+- Canonical release archive verification now fixes Git archive permissions and ignores machine-level Git configuration, global attributes and replacement objects.
+- Official macOS/Linux and Windows installers configure the managed checkout with the same canonical archive permissions.
+- A genuine archive verification failure now returns machine-readable official-installer recovery commands while preserving account state, browser sessions, profiles, rounds and audits.
+
 ## [0.5.1] - 2026-07-27
 
 ### Fixed

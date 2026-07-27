@@ -65,6 +65,7 @@ else
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone "$REPO_URL" "$INSTALL_DIR"
 fi
+git -C "$INSTALL_DIR" config tar.umask 002
 ok "Repo at $INSTALL_DIR"
 
 # 3. Venv

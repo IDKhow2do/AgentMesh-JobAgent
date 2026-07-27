@@ -72,3 +72,5 @@
 - 过期 Key / 不兼容画像：平台 dispatch 不执行，恢复命令可执行。
 - 协议变化：旧 discoveries 可追溯归档，所有 audit 原地保留。
 - 损坏状态：原文件可追溯归档，后续命令不因 JSON 解析错误崩溃。
+- Release archive 校验固定 `tar.umask=002`，忽略系统级 Git 配置、全局 attributes 和 replace refs；发布机与客户机必须对同一 commit 得到相同 SHA256。
+- 旧客户端若返回 `release artifact hash mismatch`，不得关闭校验或删除 `~/.jobagent`。重新运行官方安装器一次以修复受管仓库配置，并保留账户状态、浏览器登录、画像、轮次和审计。

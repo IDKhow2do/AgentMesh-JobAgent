@@ -37,4 +37,5 @@ def test_official_installer_targets_public_repo_and_current_credential_term(rela
     assert "jiyangnan/job-agent" not in text
     assert "license key" not in text.lower()
     assert "jobagent boss discover" not in text
+    assert "config tar.umask 002" in text
     assert text.index("jobagent round start") < text.index("jobagent boss login --check")

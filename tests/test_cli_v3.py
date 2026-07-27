@@ -1619,6 +1619,43 @@ def test_managed_update_emits_failure_event(tmp_path, monkeypatch):
     assert events[-1][1]["next_suggested"].startswith("Resolve the reported update error")
 
 
+def test_managed_update_hash_failure_emits_safe_installer_recovery(tmp_path, monkeypatch):
+    import jobagent.infra.release_update as updates
+
+    monkeypatch.setattr(updates, "__version__", "0.5.1")
+    manifest = {
+        "latest_client_version": "0.5.2",
+        "minimum_supported_version": "0.3.0",
+        "notes_url": "https://example.test/v0.5.2",
+    }
+    events = []
+    monkeypatch.setattr(updates, "fetch_release_manifest", lambda **_kwargs: manifest)
+    monkeypatch.setattr(updates, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(updates, "_install_metadata", lambda _root: {"managed": True})
+
+    def fail_update(*_args, **_kwargs):
+        raise updates.UpdateError("release artifact hash mismatch")
+
+    monkeypatch.setattr(updates, "apply_managed_update", fail_update)
+
+    with pytest.raises(updates.UpdateError, match="artifact hash mismatch"):
+        updates.check_for_update(
+            auto_apply=True,
+            on_event=lambda stage, **details: events.append((stage, details)),
+        )
+
+    failure = events[-1][1]
+    assert failure["error_code"] == "release_artifact_hash_mismatch"
+    assert failure["recovery_commands"]["macos_linux"] == updates.POSIX_INSTALL_COMMAND
+    assert (
+        failure["recovery_commands"]["windows_powershell"]
+        == updates.WINDOWS_INSTALL_COMMAND
+    )
+    assert "preserves Job Agent account state and browser sessions" in failure[
+        "next_suggested"
+    ]
+
+
 def test_current_release_does_not_emit_update_events(monkeypatch):
     import jobagent.infra.release_update as updates
 

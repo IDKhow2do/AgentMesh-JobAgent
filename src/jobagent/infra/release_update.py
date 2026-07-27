@@ -31,6 +31,16 @@ OFFICIAL_REPO_URLS = {
 }
 CACHE_TTL_SECONDS = 5 * 60
 UpdateEventHandler = Callable[..., None]
+POSIX_INSTALL_COMMAND = (
+    "curl -fsSL "
+    "https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/install.sh "
+    "| bash"
+)
+WINDOWS_INSTALL_COMMAND = (
+    "irm "
+    "https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/install.ps1 "
+    "| iex"
+)
 
 
 class UpdateError(RuntimeError):
@@ -186,9 +196,23 @@ def _update_lock():
 def _archive_sha256(root: Path, commit: str) -> str:
     import hashlib
 
+    env = os.environ.copy()
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_ATTR_NOSYSTEM"] = "1"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = subprocess.run(
-        ["git", "archive", "--format=tar", commit],
+        [
+            "git",
+            "-c",
+            "tar.umask=002",
+            "-c",
+            f"core.attributesFile={os.devnull}",
+            "archive",
+            "--format=tar",
+            commit,
+        ],
         cwd=root,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -282,10 +306,28 @@ def check_for_update(
         version = apply_managed_update(manifest, root=root)
     except Exception as exc:
         if on_event is not None:
+            recovery: dict[str, Any] = {
+                "error_code": "client_update_failed",
+                "next_suggested": (
+                    "Resolve the reported update error, then run the same command again."
+                ),
+            }
+            if str(exc) == "release artifact hash mismatch":
+                recovery = {
+                    "error_code": "release_artifact_hash_mismatch",
+                    "next_suggested": (
+                        "Re-run the official installer once, then repeat the original command. "
+                        "The installer preserves Job Agent account state and browser sessions."
+                    ),
+                    "recovery_commands": {
+                        "macos_linux": POSIX_INSTALL_COMMAND,
+                        "windows_powershell": WINDOWS_INSTALL_COMMAND,
+                    },
+                }
             on_event(
                 "client_update_failed",
                 message=str(exc),
-                next_suggested="Resolve the reported update error, then run the same command again.",
+                **recovery,
                 **event_details,
             )
         raise

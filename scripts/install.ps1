@@ -72,6 +72,8 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
     New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir -Parent) | Out-Null
     git clone $RepoUrl $InstallDir
 }
+git -C $InstallDir config tar.umask 002
+if ($LASTEXITCODE -ne 0) { Die "Failed to configure canonical release archive permissions." }
 Ok "Repo at $InstallDir"
 
 # 3. Venv

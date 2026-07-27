@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching, recruiter greetings and application audit.
-version: 0.5.1
+version: 0.5.2
 ---
 
 # Job Agent
@@ -27,6 +27,7 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - Skip a platform only after explicit user approval with `jobagent round skip --platform <platform> --confirm-skip`.
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
 - Forward `client_update_detected -> client_update_started -> client_update_completed -> client_command_resumed` once in the user's language. Do not ask permission for a managed signed update and do not stop after success; continue the original command. Stop only on `client_update_failed`, report its `message`, and follow `next_suggested`. Older clients may first emit only the compatibility completion/resume pair.
+- For `client_update_failed` with `error_code=release_artifact_hash_mismatch`, run the returned official-installer recovery command once and repeat the original command. It preserves Job Agent state and browser sessions; never disable the signature/tag/commit/archive checks or delete the managed profile.
 - When a cloud command returns `retryable=true` and `request_preserved=true`, do not ask the user to retry, re-login or recollect jobs. Run the returned `next_suggested` command immediately; Discover resumes the same signed request and candidate set without another charge.
 - Profiles, rounds, decisions and audits are account-bound. On `local_state_owner_required`, ask the user to confirm ownership and run `jobagent account bind --confirm-legacy`. On `local_state_account_mismatch`, ask the user to confirm the account switch and run `jobagent account switch --new-state`. Never edit the owner file manually.
 - For browser slowness or conflicting login evidence, run `jobagent browser diagnose --platform <platform>` before asking for another login. It is read-only; `login.state=unknown` or `conflicting` is not `login_required`.

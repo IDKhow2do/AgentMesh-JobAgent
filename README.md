@@ -228,7 +228,7 @@ The local decision file contains the signed result needed for review and deliver
 jobagent update check
 ```
 
-Official managed installations verify the Core ReleaseManifest, exact Git tag and commit, canonical archive SHA256 and smoke test. Updates are deferred while a Discover or send action is active and roll back if verification or installation fails.
+Official managed installations verify the Core ReleaseManifest, exact Git tag and commit, canonical archive SHA256 and smoke test. The installer fixes the canonical Git archive permissions so machine-level Git settings cannot change the digest. Updates are deferred while a Discover or send action is active and roll back if verification or installation fails. If an older installation reports `release artifact hash mismatch`, re-run the official installer once; it preserves Job Agent account state, browser sessions, profiles, rounds and audits.
 
 ## Agent Instructions
 

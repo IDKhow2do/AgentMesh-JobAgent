@@ -277,7 +277,7 @@ When a managed client updates, forward these stderr progress stages in the user'
 - `client_update_started`: report that the signed update is being installed before the requested command.
 - `client_update_completed`: report that the update succeeded.
 - `client_command_resumed`: continue the original command immediately; do not stop for another confirmation.
-- `client_update_failed`: stop, report `message` and follow `next_suggested`.
+- `client_update_failed`: stop, report `message` and follow `next_suggested`. For `error_code=release_artifact_hash_mismatch`, run the returned official-installer recovery command once, then repeat the original command; do not disable verification or delete local state/browser profiles.
 
 These stages are emitted only when a newer release is involved. Do not invent an update message for `status=current` or repeat a successful update notice on later commands. A first upgrade from an older client may begin with the compatibility `client_update_completed` and `client_command_resumed` stages because that older process could not emit the earlier stages.
 
