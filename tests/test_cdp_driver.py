@@ -521,6 +521,62 @@ def test_click_chat_entry_follows_trusted_initial_chat_redirect(monkeypatch):
     assert "securityId" not in str(result)
 
 
+def test_click_chat_entry_recognizes_greet_pop_and_opens_bound_chat(monkeypatch):
+    monkeypatch.setattr(cdp_driver.time, "sleep", lambda _seconds: None)
+    redirect_url = (
+        "https://www.zhipin.com/web/geek/chat"
+        "?id=conversation-1&jobId=job-1&securityId=signed"
+    )
+    driver = make_driver([
+        '{"ok":true,"step":"target_继续沟通","label":"继续沟通",'
+        '"jobId":"job-1","x":42,"y":24,"redirectUrl":"'
+        + redirect_url
+        + '"}',
+        '{"ok":true,"step":"platform_default_sent","autoSent":true,'
+        '"platformDefaultSent":true,"sentMessage":"这是我的资料"}',
+    ])
+
+    result = driver.click_chat_entry()
+
+    assert result == {
+        "ok": True,
+        "step": "navigated_chat_redirect_after_default",
+        "label": "继续沟通",
+        "jobId": "job-1",
+        "x": 42,
+        "y": 24,
+        "clicked": True,
+        "autoSent": True,
+        "platformDefaultSent": True,
+        "sentMessage": "这是我的资料",
+        "chatPath": "/web/geek/chat",
+    }
+    assert ("Page.navigate", {"url": redirect_url}) in driver.cdp.send_calls
+    assert "securityId" not in str(result)
+    assert "el.querySelector('a[redirect-url]')" in driver.cdp.js_calls[0]
+    assert ".dialog-wrap.greet-pop" in driver.cdp.js_calls[1]
+    assert "已向BOSS发送消息" in driver.cdp.js_calls[1]
+    assert ".message, .dialog-con" in driver.cdp.js_calls[1]
+
+
+def test_click_chat_entry_rejects_untrusted_bound_chat_redirect(monkeypatch):
+    monkeypatch.setattr(cdp_driver.time, "sleep", lambda _seconds: None)
+    driver = make_driver([
+        '{"ok":true,"step":"target_继续沟通","label":"继续沟通",'
+        '"jobId":"job-1","x":42,"y":24,'
+        '"redirectUrl":"https://attacker.example/web/geek/chat"}',
+        '{"ok":true,"step":"platform_default_sent","autoSent":true,'
+        '"platformDefaultSent":true,"sentMessage":"这是我的资料"}',
+    ])
+
+    result = driver.click_chat_entry()
+
+    assert result["step"] == "platform_default_sent"
+    assert result["platformDefaultSent"] is True
+    assert not any(method == "Page.navigate" for method, _params in driver.cdp.send_calls)
+    assert "attacker.example" not in str(result)
+
+
 def test_click_chat_entry_targets_visible_chat_buttons(monkeypatch):
     monkeypatch.setattr(cdp_driver.time, "sleep", lambda _seconds: None)
     driver = make_driver([

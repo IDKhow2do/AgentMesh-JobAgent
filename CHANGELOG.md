@@ -2,6 +2,29 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.4] - 2026-07-28
+
+### Fixed
+
+- Recognize the current Boss greeting confirmation dialog instead of waiting for an editor on the covered job page.
+- Preserve the job-bound, same-origin Boss chat destination before the first click and continue to the correct conversation after the platform sends its default introduction.
+- Keep the signed chat query out of delivery results and audits while still requiring the reviewed personalized greeting itself to be visible with delivery evidence.
+
+### Compatibility
+
+- Existing API Keys, profiles, rounds, signed decisions, delivery previews, browser sessions and audits are preserved. No cache clearing, state migration or new Discover charge is required.
+
+## [0.5.3] - 2026-07-27
+
+### Added
+
+- Show the complete pending-delivery list before any real action on Boss, Liepin, Zhilian or 51Job.
+- Bind each send to the exact displayed platform, Discover result and ordered candidate list with a short-lived `preview_id`.
+
+### Compatibility
+
+- Existing review files can regenerate a bound preview without recollecting jobs or charging another Discover. Empty delivery lists close safely with zero platform actions.
+
 ## [0.5.2] - 2026-07-27
 
 ### Fixed

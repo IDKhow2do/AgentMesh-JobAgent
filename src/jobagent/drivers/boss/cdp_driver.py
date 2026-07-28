@@ -197,6 +197,24 @@ class CDPBossDriver(BossActionDriver):
             },
         )
 
+    @staticmethod
+    def _trusted_boss_chat_redirect(url: str) -> str:
+        """Return a validated Boss chat URL without weakening the origin boundary."""
+        try:
+            target = urlsplit(url)
+        except ValueError:
+            return ""
+        if (
+            target.scheme != "https"
+            or target.hostname != "www.zhipin.com"
+            or target.port is not None
+            or target.username is not None
+            or target.password is not None
+            or target.path != "/web/geek/chat"
+        ):
+            return ""
+        return target.geturl()
+
     def dismiss_javascript_dialog(self) -> dict[str, Any]:
         """Dismiss a blocking page alert without treating its text as user input."""
         self._ensure_connected()
@@ -552,7 +570,7 @@ class CDPBossDriver(BossActionDriver):
             try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
             var rect = el.getBoundingClientRect();
             var jobMatch = (location.pathname || '').match(/\/job_detail\/([^/]+?)(?:\.html)?$/);
-            return JSON.stringify({
+            var info = {
               ok: true,
               step: 'target_' + label,
               label: label,
@@ -561,7 +579,23 @@ class CDPBossDriver(BossActionDriver):
               className: String(el.className || ''),
               x: Math.round(rect.left + rect.width / 2),
               y: Math.round(rect.top + rect.height / 2)
-            });
+            };
+            var redirectLink = el.matches && el.matches('a[redirect-url]')
+              ? el
+              : (el.querySelector ? el.querySelector('a[redirect-url]') : null);
+            var redirectPath = redirectLink
+              ? (redirectLink.getAttribute('redirect-url') || '')
+              : '';
+            if (redirectPath) {
+              try {
+                var redirectTarget = new URL(redirectPath, location.origin);
+                if (redirectTarget.origin === location.origin
+                    && redirectTarget.pathname === '/web/geek/chat') {
+                  info.redirectUrl = redirectTarget.href;
+                }
+              } catch (e) {}
+            }
+            return JSON.stringify(info);
           }
           var labels = ['立即沟通', '继续沟通', '继续聊', '开聊'];
           var selectorGroups = [
@@ -610,6 +644,9 @@ class CDPBossDriver(BossActionDriver):
             click_data = json.loads(result.get("result", {}).get("value", "{}"))
             if not click_data.get("ok"):
                 return click_data
+            chat_redirect_url = self._trusted_boss_chat_redirect(
+                str(click_data.pop("redirectUrl", "") or "")
+            )
             if "x" in click_data and "y" in click_data:
                 self._click_at(click_data["x"], click_data["y"])
                 click_data["clicked"] = True
@@ -646,17 +683,20 @@ class CDPBossDriver(BossActionDriver):
                     });
                   }
                   var startDialogs = Array.prototype.slice.call(
-                    document.querySelectorAll('.startchat-dialog, .dialog-wrap.startchat-dialog')
+                    document.querySelectorAll(
+                      '.startchat-dialog, .dialog-wrap.startchat-dialog, '
+                      + '.dialog-wrap.greet-pop, .greet-pop'
+                    )
                   );
                   for (var d = 0; d < startDialogs.length; d++) {
                     var dialog = startDialogs[d];
                     if (!isVisible(dialog)) continue;
                     var dialogText = (dialog.innerText || dialog.textContent || '').trim();
-                    var messageEl = dialog.querySelector('.message');
+                    var messageEl = dialog.querySelector('.message, .dialog-con');
                     var sentMessage = messageEl
                       ? (messageEl.innerText || messageEl.textContent || '').trim()
                       : dialogText;
-                    if (/已发送/.test(dialogText)) {
+                    if (/已向BOSS发送消息|已发送/.test(dialogText)) {
                       return JSON.stringify({
                         ok: true,
                         step: 'platform_default_sent',
@@ -698,6 +738,20 @@ class CDPBossDriver(BossActionDriver):
                 popup_result = self.cdp.evaluate(popup_js, timeout=5)
                 popup_data = json.loads(popup_result.get("result", {}).get("value", "{}"))
                 if popup_data.get("ok"):
+                    if (
+                        popup_data.get("platformDefaultSent")
+                        and chat_redirect_url
+                    ):
+                        try:
+                            self.cdp.send(
+                                "Page.navigate",
+                                {"url": chat_redirect_url},
+                            )
+                            popup_data["step"] = "navigated_chat_redirect_after_default"
+                            popup_data["chatPath"] = "/web/geek/chat"
+                        except Exception:
+                            popup_data["step"] = "platform_default_sent"
+                            popup_data["chatRedirectFailed"] = True
                     if popup_data.get("step") == "target_继续沟通" and "x" in popup_data and "y" in popup_data:
                         self._click_at(popup_data["x"], popup_data["y"])
                         popup_data["step"] = "clicked_继续沟通"
@@ -713,6 +767,12 @@ class CDPBossDriver(BossActionDriver):
             # editor. Follow only the same-origin chat path supplied by the
             # page itself; do not persist its signed query string in audit.
             if click_data.get("label") in {"立即沟通", "继续沟通", "继续聊"}:
+                if chat_redirect_url:
+                    self.cdp.send("Page.navigate", {"url": chat_redirect_url})
+                    click_data["autoSent"] = False
+                    click_data["step"] = "navigated_chat_redirect"
+                    click_data["chatPath"] = "/web/geek/chat"
+                    return click_data
                 redirect_js = """
                 (function(){
                   function isVisible(el) {
