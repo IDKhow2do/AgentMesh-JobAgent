@@ -11,6 +11,14 @@ def test_inspection_script_preserves_javascript_newline_escapes():
     assert "title + '\\n' + text" in script
 
 
+def test_zhilian_inspection_treats_official_account_home_as_authenticated():
+    script = _inspection_script("zhilian")
+
+    assert "i\\.zhaopin\\.com" in script
+    assert "我的智联" in script
+    assert "authenticatedLocation" in script
+
+
 class _FakeClient:
     def connect(self, _url, timeout=5):
         self.connected = timeout

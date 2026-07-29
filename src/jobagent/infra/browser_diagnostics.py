@@ -27,7 +27,11 @@ def _inspection_script(platform: str) -> str:
       }}[platform] || [];
       const loginUrl = /passport|[/]login/.test(href);
       const loginUi = /登录[/]注册|扫码登录|验证码登录|请登录/.test(title + '\\n' + text.slice(0, 800));
-      const authUi = authTerms.filter((term) => text.includes(term)).length >= 2;
+      const authenticatedLocation = platform === 'zhilian'
+        && /^https:\\/\\/i\\.zhaopin\\.com(?:\\/|$)/.test(href)
+        && /我的智联/.test(title);
+      const authUi = authenticatedLocation
+        || authTerms.filter((term) => text.includes(term)).length >= 2;
       const resources = performance.getEntriesByType('resource') || [];
       return JSON.stringify({{
         url: href,

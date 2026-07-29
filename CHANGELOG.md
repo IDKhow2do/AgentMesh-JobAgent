@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.5] - 2026-07-29
+
+### Fixed
+
+- Recognize the official Zhilian account home as authenticated during read-only browser diagnosis, avoiding inconclusive login guidance after a successful sign-in.
+- Normalize official Zhilian job links from HTTP or protocol-relative forms to HTTPS before Discover results are saved or delivered.
+- Use process-specific temporary files for client-upgrade state so simultaneous CLI starts cannot overwrite each other's atomic write.
+
+### Compatibility
+
+- Existing API Keys, profiles, rounds, signed decisions, delivery previews, browser sessions and audits are preserved. No cache clearing, state migration or additional Discover charge is required.
+
 ## [0.5.4] - 2026-07-28
 
 ### Fixed

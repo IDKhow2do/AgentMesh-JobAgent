@@ -84,6 +84,19 @@ def test_zhilian_public_parser_extracts_stable_identity():
     assert job.name and job.url
 
 
+def test_zhilian_public_parser_normalizes_official_links_to_https():
+    job = parse_zhilian_job(
+        {
+            "jobTitle": "AI产品经理",
+            "jobUrl": "http://www.zhaopin.com/jobdetail/CC1.htm",
+            "cityName": "深圳",
+        },
+        city_name="深圳",
+    )
+
+    assert job.url == "https://www.zhaopin.com/jobdetail/CC1.htm"
+
+
 def test_51job_public_parser_extracts_stable_identity():
     payload = json.loads((FIXTURES / "job51/search_results_page1.json").read_text())
     raw = payload["cards"][0]

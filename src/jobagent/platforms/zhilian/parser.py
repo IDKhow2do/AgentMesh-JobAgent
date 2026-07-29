@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from jobagent.domain.models import Job
 
@@ -47,6 +48,7 @@ def parse_zhilian_job(raw: dict[str, Any], city_name: str = "") -> Job:
     url = _first(raw, "url", "jobUrl", "positionURL", "pcUrl")
     if not url and job_id:
         url = f"https://www.zhaopin.com/jobdetail/{job_id}.htm"
+    url = _normalize_zhilian_url(str(url))
 
     return Job(
         name=str(title),
@@ -62,6 +64,21 @@ def parse_zhilian_job(raw: dict[str, Any], city_name: str = "") -> Job:
         platform="zhilian",
         raw_data=raw,
     )
+
+
+def _normalize_zhilian_url(value: str) -> str:
+    url = value.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold()
+    if parsed.scheme == "http" and (
+        host == "zhaopin.com" or host.endswith(".zhaopin.com")
+    ):
+        return urlunsplit(
+            ("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+        )
+    return url
 
 
 def _derive_from_raw_text(raw: dict[str, Any]) -> dict[str, str]:
