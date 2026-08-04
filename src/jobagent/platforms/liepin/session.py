@@ -46,7 +46,17 @@ class LiepinSessionGuide:
         wait_seconds: int = 5,
     ) -> LiepinSessionStatus:
         """Open a read-only search page and inspect whether login is required."""
-        url = build_liepin_search_url(query, city)
+        try:
+            url = build_liepin_search_url(query, city)
+        except ValueError:
+            return LiepinSessionStatus(
+                ok=False,
+                logged_in=False,
+                login_required=False,
+                url="https://www.liepin.com/zhaopin/",
+                error="liepin_city_code_not_found",
+                evidence={"city": city.strip().removesuffix("市")},
+            )
         open_result = self.driver.open_url_in_new_tab(url, wait_seconds=wait_seconds)
         if not open_result.get("ok"):
             return LiepinSessionStatus(

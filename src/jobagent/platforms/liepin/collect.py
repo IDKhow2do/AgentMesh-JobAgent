@@ -19,29 +19,34 @@ from .selectors import build_liepin_snapshot_script
 LIEPIN_CITY_CODES = {
     "北京": "010",
     "上海": "020",
+    "广州": "050020",
     "深圳": "050090",
 }
 
+LIEPIN_SEARCH_URL = "https://www.liepin.com/zhaopin/"
 
-def build_liepin_search_url(query: str, city: str = "", page: int = 1) -> str:
+
+def build_liepin_search_url(
+    query: str,
+    city: str = "",
+    page: int = 1,
+    *,
+    city_code: str | None = None,
+) -> str:
     """Build a human-search URL for the live read-only spike."""
     city = city.strip().removesuffix("市") if city else ""
-    city_code = LIEPIN_CITY_CODES.get(city) if city else ""
+    resolved_city_code = (city_code or LIEPIN_CITY_CODES.get(city) or "").strip()
     current_page = max(0, int(page) - 1)
-    if city_code:
+    if resolved_city_code:
         return (
-            "https://www.liepin.com/zhaopin/"
-            f"?city={quote(city_code)}&dq={quote(city_code)}"
+            f"{LIEPIN_SEARCH_URL}?city={quote(resolved_city_code)}&dq={quote(resolved_city_code)}"
             f"&currentPage={current_page}&pageSize=40&key={quote(query)}"
             "&scene=input&sfrom=search_job_pc"
         )
-    url = "https://www.liepin.com/zhaopin/"
     if city:
-        url += f"?city={quote(city)}&dq={quote(city)}"
-    else:
-        url += "?"
+        raise ValueError(f"Liepin city code is unresolved for {city}")
     return (
-        f"{url}&currentPage={current_page}&pageSize=40&key={quote(query)}"
+        f"{LIEPIN_SEARCH_URL}?currentPage={current_page}&pageSize=40&key={quote(query)}"
         "&scene=input&sfrom=search_job_pc"
     )
 
@@ -80,6 +85,12 @@ class LiepinCollectResult:
             payload["user_action"] = "login_liepin"
             payload["user_prompt"] = LIEPIN_LOGIN_USER_PROMPT
             payload["next_suggested"] = "jobagent liepin login"
+        elif self.error == "liepin_city_code_not_found":
+            payload["message"] = (
+                "Liepin city filter could not be resolved safely for "
+                f"{self.city or 'the requested city'}."
+            )
+            payload["retryable"] = False
         elif self.ok:
             payload["next_suggested"] = "jobagent liepin rank --input <liepin.raw.json> --output <liepin.ranked.json>"
         if include_snapshot:
@@ -114,10 +125,42 @@ class LiepinReadOnlyCollector:
         jobs: list[Job] = []
         seen: set[str] = set()
         snapshots: list[dict[str, Any]] = []
-        first_url = build_liepin_search_url(query, city, page=start_page)
+        city_code = LIEPIN_CITY_CODES.get(city, "") if city else ""
+        city_resolution: dict[str, Any] = {
+            "ok": True,
+            "city": city,
+            "code": city_code,
+            "source": "bundled_seed" if city_code else "none",
+        }
+        if city and not city_code:
+            city_resolution = self._resolve_city_code(city, wait_seconds=wait_seconds)
+            city_code = str(city_resolution.get("code") or "")
+            if not city_code:
+                return LiepinCollectResult(
+                    query=query,
+                    city=city,
+                    url=str(city_resolution.get("url") or LIEPIN_SEARCH_URL),
+                    jobs=[],
+                    snapshot={"cityResolution": city_resolution},
+                    page=start_page,
+                    pages=page_count,
+                    ok=False,
+                    error="liepin_city_code_not_found",
+                )
+        first_url = build_liepin_search_url(
+            query,
+            city,
+            page=start_page,
+            city_code=city_code,
+        )
 
         for index, current_page in enumerate(range(start_page, start_page + page_count)):
-            url = build_liepin_search_url(query, city, page=current_page)
+            url = build_liepin_search_url(
+                query,
+                city,
+                page=current_page,
+                city_code=city_code,
+            )
             open_result = self.driver.open_url_in_new_tab(url, wait_seconds=wait_seconds)
             if not open_result.get("ok"):
                 return LiepinCollectResult(
@@ -141,6 +184,8 @@ class LiepinReadOnlyCollector:
             snapshot = self._extract_snapshot(limit=remaining)
             snapshot["page"] = current_page
             snapshot["requestedUrl"] = url
+            if city:
+                snapshot["cityResolution"] = city_resolution
             snapshots.append(snapshot)
             failure = _snapshot_failure(snapshot)
             if failure:
@@ -189,6 +234,78 @@ class LiepinReadOnlyCollector:
             page=start_page,
             pages=page_count,
         )
+
+    def _resolve_city_code(self, city: str, wait_seconds: int) -> dict[str, Any]:
+        """Resolve an unbundled city from Liepin's own visible page metadata."""
+        current = self._extract_city_code(city)
+        if current.get("ok"):
+            current["source"] = "current_page"
+            return current
+
+        open_result = self.driver.open_url_in_new_tab(
+            LIEPIN_SEARCH_URL,
+            wait_seconds=wait_seconds,
+        )
+        if not open_result.get("ok"):
+            return {
+                "ok": False,
+                "city": city,
+                "code": "",
+                "source": "liepin_search_home",
+                "url": str(open_result.get("url") or LIEPIN_SEARCH_URL),
+                "error": str(open_result.get("error") or "open_url_failed"),
+            }
+        resolved = self._extract_city_code(city)
+        resolved["source"] = "liepin_search_home"
+        resolved.setdefault("url", str(open_result.get("url") or LIEPIN_SEARCH_URL))
+        return resolved
+
+    def _extract_city_code(self, city: str) -> dict[str, Any]:
+        normalized_city = city.strip().removesuffix("市")
+        city_literal = json.dumps(normalized_city, ensure_ascii=False)
+        js = f"""
+        (function(){{
+          const mode = 'liepin_city_code_resolution';
+          const expected = {city_literal};
+          const normalize = function(value) {{
+            return String(value || '').trim().replace(/市$/, '');
+          }};
+          const candidates = Array.from(document.querySelectorAll('[data-code][data-name]'));
+          const matched = candidates.find(function(el) {{
+            return normalize(el.getAttribute('data-name')) === normalize(expected);
+          }});
+          const code = matched ? String(matched.getAttribute('data-code') || '').trim() : '';
+          return JSON.stringify({{
+            ok: /^\\d+$/.test(code),
+            mode: mode,
+            city: normalize(expected),
+            code: code,
+            url: location.href || '',
+            candidateCount: candidates.length,
+            error: code ? '' : 'liepin_city_code_not_found'
+          }});
+        }})()
+        """
+        result = self.driver._exec_js(js)
+        if isinstance(result, dict) and "raw" in result:
+            try:
+                parsed = json.loads(result["raw"])
+                return parsed if isinstance(parsed, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                return {
+                    "ok": False,
+                    "city": normalized_city,
+                    "code": "",
+                    "error": "liepin_city_code_parse_failed",
+                }
+        if isinstance(result, dict):
+            return result
+        return {
+            "ok": False,
+            "city": normalized_city,
+            "code": "",
+            "error": "liepin_city_code_not_found",
+        }
 
     def _extract_snapshot(self, limit: int = 20) -> dict[str, Any]:
         """Extract visible job-card candidates from the current browser page."""

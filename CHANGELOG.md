@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.6] - 2026-08-04
+
+### Fixed
+
+- Use Liepin's current Guangzhou city code instead of sending raw city text that produces an empty result page.
+- Resolve unbundled Liepin city codes from the platform's own page metadata before collecting jobs.
+- Stop with an explicit city-resolution error when a requested Liepin city cannot be verified, instead of misreporting a valid search as `no_candidates`.
+
+### Compatibility
+
+- Existing API Keys, profiles, rounds, signed decisions, delivery previews, browser sessions and audits are preserved. No cache clearing, state migration, repeated login or additional Discover charge is required.
+
 ## [0.5.5] - 2026-07-29
 
 ### Fixed
