@@ -611,6 +611,17 @@ def test_public_docs_do_not_restore_per_platform_send_confirmation():
     assert "automatic selected delivery" in claude_guide
 
 
+def test_public_readme_identifies_the_official_product_site():
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert readme.startswith("# AgentMesh360 Job Agent\n")
+    assert (
+        "[jobagent.agentmesh360.com](https://jobagent.agentmesh360.com/)"
+        in readme
+    )
+
+
 def test_public_agent_docs_forbid_batch_login_and_require_vertical_completion():
     root = Path(__file__).resolve().parents[1]
     docs = [
