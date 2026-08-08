@@ -1,6 +1,8 @@
-# AgentMesh Job Agent
+# AgentMesh360 Job Agent
 
-Job Agent is an Agent-native job-search product. Its open-source CLI connects recruiting platforms through the user's own browser session, while AgentMesh360 cloud intelligence provides the official candidate profile, job decisions and personalized communication.
+**Official website:** [jobagent.agentmesh360.com](https://jobagent.agentmesh360.com/)
+
+AgentMesh360 Job Agent is an Agent-native job-search product. Its open-source CLI connects recruiting platforms through the user's own browser session, while AgentMesh360 cloud intelligence provides the official candidate profile, job decisions and personalized communication.
 
 The cloud turns the resume into a recruiter-side 36-dimension candidate profile, creates profile-driven search plans, classifies every deduplicated job into signed `selected / review / rejected` results with reasons and risks, and generates evidence-grounded personalized greetings where the platform supports them. The CLI verifies those official results before delivery.
 
