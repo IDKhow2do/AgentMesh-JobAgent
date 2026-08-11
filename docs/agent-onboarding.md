@@ -50,6 +50,12 @@ jobagent interaction respond --interaction-id "<follow-up-id>" --target-role "<t
 
 If the user already named the target role in the current request, use `round start --target-role` directly and do not ask again. After confirmation, run `jobagent round status`. The CLI validates the interaction ID and profile digest, persists the confirmed role intent and four-platform order, then returns one `next_suggested` command. Follow it after each platform audit. A platform-level success is an intermediate milestone, not completion of the user's overall job-search round.
 
+Do not treat a role that appears only in this document, README, a skill example,
+test data or a previous conversation as user intent. If the current user did not
+state a role, omit `--target-role` and use the CLI interaction. Profiles created
+before target-role policy v2 are intentionally treated as unverified and require
+one explicit role answer; they do not require another paid resume analysis.
+
 Do not collect logins as a separate setup phase. At round start, log in to Boss only. Do not open or request the Liepin login until Boss audit has advanced `workflow.current_platform` to `liepin`; apply the same rule to Zhilian and 51Job.
 
 One completed platform Discover accepts at most 100 candidate jobs and costs a fixed 10 credits. Cloud resume analysis costs 5 credits. The signed cloud response is authoritative for charges and refunds: pre-decision browser failures are not charged, cloud-decision failures are refunded, and retrying the same task does not charge twice. Registration, API Key creation, and the open-source client are free; new accounts start with zero cloud credits. The optional AgentMesh360 monthly pass costs CNY 29, lasts 30 days, and includes 1,000 shared credits without automatic renewal. Previously issued signup-trial credits remain usable until their original expiry.

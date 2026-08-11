@@ -12,6 +12,7 @@ from jobagent.infra.protocol import digest_payload
 from jobagent.infra.rounds import utc_now
 
 MAX_TARGET_ROLES = 4
+TARGET_ROLE_POLICY_VERSION = 2
 TARGET_ROLE_CHOICES = {
     "accept_suggested",
     "append_roles",
@@ -20,6 +21,15 @@ TARGET_ROLE_CHOICES = {
 
 
 def suggested_target_roles(profile: dict[str, Any]) -> list[str]:
+    metadata = profile.get("_meta")
+    if not isinstance(metadata, dict):
+        return []
+    try:
+        policy_version = int(metadata.get("targetRolePolicyVersion") or 0)
+    except (TypeError, ValueError):
+        policy_version = 0
+    if policy_version < TARGET_ROLE_POLICY_VERSION:
+        return []
     preferences = profile.get("preferences") or {}
     raw_roles = preferences.get("targetRoles") or []
     ordered = sorted(
@@ -103,11 +113,11 @@ def target_role_confirmation(
     if suggested:
         roles_text = "、".join(suggested)
         prompt = (
-            f"根据对你简历经历和能力的综合分析，我建议本轮优先投递：{roles_text}。"
+            f"根据当前简历中可验证的经历和能力，我建议本轮优先投递：{roles_text}。"
             "除此以外，你还想投递其他岗位吗？"
         )
         fallback = (
-            f"根据对你简历经历和能力的综合分析，我建议本轮优先投递：{roles_text}。\n\n"
+            f"根据当前简历中可验证的经历和能力，我建议本轮优先投递：{roles_text}。\n\n"
             "请选择：\n"
             "1. 按建议岗位开始（推荐）\n"
             "2. 保留建议岗位，并追加其他岗位\n"
@@ -145,10 +155,13 @@ def target_role_confirmation(
             }
         ]
     else:
-        prompt = "没有得到足够可靠的默认岗位建议。请输入本轮想投递的目标岗位。"
+        prompt = (
+            "当前画像没有经过新版岗位方向校验，不能安全地替你默认选择岗位。"
+            "请输入本轮想投递的目标岗位。"
+        )
         fallback = (
-            "请输入本轮想投递的目标岗位，例如：\n"
-            "数据运营经理\n\n"
+            "当前画像没有经过新版岗位方向校验，不能安全地替你默认选择岗位。\n\n"
+            "请输入本轮想投递的目标岗位。\n\n"
             "收到岗位后，Agent 应执行 jobagent round start --target-role <岗位名称>。"
         )
         fields = [
@@ -157,7 +170,7 @@ def target_role_confirmation(
                 "type": "text",
                 "label": "本轮目标岗位",
                 "required": True,
-                "placeholder": "例如：数据运营经理",
+                "placeholder": "请输入岗位名称",
             }
         ]
     interaction = build_interaction_required(
@@ -199,11 +212,11 @@ def target_role_input_request(
     if choice == "append_roles":
         title = "追加目标岗位"
         prompt = "请输入还想追加到本轮建议中的岗位名称。"
-        fallback = "请输入要追加的岗位名称，例如：数据运营经理。"
+        fallback = "请输入要追加的岗位名称。"
     else:
         title = "指定其他岗位"
         prompt = "请输入本轮只想投递的岗位名称。"
-        fallback = "请输入本轮只想投递的岗位名称，例如：数据运营经理。"
+        fallback = "请输入本轮只想投递的岗位名称。"
     interaction = build_interaction_required(
         interaction_id=interaction_id,
         product_id="job_agent",
@@ -216,7 +229,7 @@ def target_role_input_request(
                 "type": "text",
                 "label": "目标岗位",
                 "required": True,
-                "placeholder": "例如：数据运营经理",
+                "placeholder": "请输入岗位名称",
             }
         ],
         fallback_text=fallback,

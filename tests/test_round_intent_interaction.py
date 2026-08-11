@@ -12,6 +12,7 @@ from jobagent.infra.interaction_protocol import validate_interaction_required
 def _profile() -> dict:
     return {
         "schema_version": 1,
+        "_meta": {"targetRolePolicyVersion": 2},
         "basic": {"currentCity": "深圳", "totalExperience": 6},
         "career": {"currentJob": {"title": "数据分析师"}},
         "preferences": {
@@ -83,6 +84,26 @@ def test_round_start_without_answer_returns_shared_interaction(isolated_round_st
     assert codex["answer_mapping"]["追加其他岗位"] == "append_roles"
     assert codex["free_text_other"]["default_option_id"] == "replace_roles"
     assert not isolated_round_state["current"].exists()
+    assert isolated_round_state["pending"].exists()
+
+
+def test_legacy_profile_roles_are_not_presented_as_verified_suggestions(
+    isolated_round_state,
+):
+    profile = _profile()
+    profile.pop("_meta")
+    isolated_round_state["profile"].write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = _dispatch(build_parser().parse_args(["round", "start"]))
+
+    assert result["error"] == "interaction_required"
+    assert result["suggested_roles"] == []
+    assert result["interaction"]["fields"][0]["type"] == "text"
+    assert "没有经过新版岗位方向校验" in result["interaction"]["fallback_text"]
+    assert "AI产品经理" not in result["interaction"]["fallback_text"]
     assert isolated_round_state["pending"].exists()
 
 
