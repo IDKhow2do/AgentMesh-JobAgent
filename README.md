@@ -51,10 +51,17 @@ The official installer creates a managed installation. Starting with `0.3.0`, ma
 ```bash
 jobagent init --key <your_api_key>
 jobagent doctor env
-jobagent resume analyze --file ~/Downloads/resume.pdf \
-  --target-role "AI产品经理" \
-  --target-cities 深圳 北京
-jobagent round start --target-role "AI产品经理"
+jobagent resume analyze --file ~/Downloads/resume.pdf
+jobagent round start
+```
+
+The Agent must not copy a target role from documentation examples or infer that
+the user already chose one. When the user explicitly states a target role, pass
+that exact intent directly:
+
+```bash
+jobagent resume analyze --file ~/Downloads/resume.pdf --target-role "<user-stated target role>"
+jobagent round start --target-role "<user-stated target role>"
 ```
 
 After an existing installation updates, Job Agent automatically clears rebuildable runtime caches and migrates compatible saved state before any platform command. API Keys, recruiting-site login cookies, resume profiles, audit history and user preferences are preserved. Run `jobagent upgrade-check`; if it returns `ok=false`, follow `next_suggested` and repeat the check before opening a platform.
@@ -104,7 +111,7 @@ The host continues every card or text answer through the interaction ID:
 jobagent interaction respond --interaction-id "<id>" --choice accept_suggested
 jobagent interaction respond --interaction-id "<id>" --choice append_roles
 jobagent interaction respond --interaction-id "<id>" --choice replace_roles
-jobagent interaction respond --interaction-id "<id>" --target-role "数据运营经理"
+jobagent interaction respond --interaction-id "<id>" --target-role "<user-stated target role>"
 jobagent round status
 ```
 
@@ -117,8 +124,8 @@ intent:
 
 ```bash
 jobagent round start --accept-suggested
-jobagent round start --target-role "数据运营经理"
-jobagent round start --accept-suggested --target-role "数据运营经理"
+jobagent round start --target-role "<user-stated target role>"
+jobagent round start --accept-suggested --target-role "<user-stated target role>"
 ```
 
 The confirmed target roles belong to this round and do not rewrite resume job

@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.6
+version: 0.5.7
 metadata:
   openclaw:
     emoji: "💼"
@@ -35,6 +35,7 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - On Boss, a platform default introduction is not the reviewed greeting. Require the CLI's exact personalized-delivery verification.
 - Never stop after one platform. Follow `workflow.next_suggested` while `workflow.continue_required=true`; only `workflow.workflow_complete=true` ends the round.
 - Create a round only by executing `jobagent round start`. Never infer that `doctor env`, `round status` or a platform command created or authorized a new round.
+- Never copy a target role from README, skill examples, prior users or test data. Pass `--target-role` only when the current user explicitly stated that role; otherwise omit it and use the returned target-role interaction.
 - On `error=interaction_required`, render the structured `interaction` as a native host card only when the card interface is callable in the current surface and mode. Codex uses the ready-to-call `host_presentations.adapters.codex.arguments` when `request_user_input` is callable and maps the returned label through `answer_mapping`; other hosts map every declared field option exactly and use `default_option_ids` as the recommendation marker. If the interface is unavailable in the current mode, show `interaction.fallback_text` unchanged and describe that as a mode-level text fallback, not a lack of host card support. Continue every answer through `jobagent interaction respond` with the exact interaction ID. Append/replace may return a second role-input interaction. If the user already named a target role, pass it directly to `round start` and do not ask again.
 - Skip a platform only after explicit user approval with `jobagent round skip --platform <platform> --confirm-skip`.
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
@@ -62,9 +63,12 @@ irm https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/
 ```bash
 jobagent init --key <your_api_key>
 jobagent doctor env
-jobagent resume analyze --file <resume-path> --target-role "<role>" --target-cities <cities>
-jobagent round start --target-role "<role>"
+jobagent resume analyze --file <resume-path>
+jobagent round start
 ```
+
+When the current user has explicitly named a role, pass that exact value to
+both commands with `--target-role "<user-stated target role>"`.
 
 Each completed platform Discover accepts at most 100 candidate jobs and costs a fixed 10 credits. Cloud resume analysis costs 5 credits. Registration, API Key creation, and the open-source client are free; new accounts start with zero cloud credits. The signed cloud response is authoritative for charges and refunds. The optional AgentMesh360 monthly pass costs CNY 29, lasts 30 days, and includes 1,000 credits shared across AgentMesh360 cloud products without automatic renewal. Previously issued signup-trial credits remain usable until their original expiry.
 
