@@ -178,6 +178,99 @@ def test_upgrade_migration_is_idempotent(tmp_path):
     assert (app_dir / "state" / "discoveries" / "boss-old.json").exists()
 
 
+def test_delivery_confirmation_upgrade_preserves_decision_and_requires_fresh_review(tmp_path):
+    upgrade = importlib.import_module("jobagent.infra.client_upgrade")
+    app_dir = tmp_path / ".jobagent"
+    state = app_dir / "state"
+    _seed_preserved_state(app_dir)
+    _write_json(
+        state / "client_upgrade_state.json",
+        {
+            "client_version": "0.5.7",
+            "protocol_version": 1,
+            "state_migration_version": 3,
+            "status": "ready",
+        },
+    )
+    _write_json(
+        state / "current_round.json",
+        {
+            "schema_version": 3,
+            "round_id": "round-old-preview",
+            "status": "active",
+            "platform_order": ["boss", "liepin", "zhilian", "51job"],
+            "platforms": {
+                "boss": {
+                    "status": "reviewed",
+                    "next_suggested": (
+                        "jobagent boss greet send --input old.review.json "
+                        "--preview-id dpv_old"
+                    ),
+                },
+                "liepin": {"status": "pending"},
+                "zhilian": {"status": "pending"},
+                "51job": {"status": "pending"},
+            },
+            "intent": {
+                "status": "confirmed",
+                "target_roles": ["数据分析师"],
+                "source": "user_explicit",
+            },
+        },
+    )
+    review_path = state / "discoveries" / "boss" / "dis-old.review.json"
+    _write_json(
+        review_path,
+        {
+            "platform": "boss",
+            "discover_id": "dis-old",
+            "manifest": {"signed": True},
+            "user_overrides": [
+                {"job_id": "review-1", "from": "review", "to": "selected"}
+            ],
+            "send_candidates": [{"id": "selected-1"}, {"id": "review-1"}],
+            "delivery_preview": {
+                "preview_id": "dpv_old",
+                "requires_user_confirmation": False,
+                "automatic_continuation": True,
+            },
+            "delivery_authorization": {"authorization_id": "legacy"},
+        },
+    )
+    target_role_pending = {
+        "kind": "target_role_confirmation",
+        "interaction_id": "target-role-1",
+    }
+    _write_json(state / "pending_interaction.json", target_role_pending)
+
+    report = upgrade.run_client_upgrade(
+        app_dir=app_dir,
+        current_version="0.5.8",
+        protocol_version=1,
+    )
+
+    migrated_review = json.loads(review_path.read_text(encoding="utf-8"))
+    migrated_round = json.loads(
+        (state / "current_round.json").read_text(encoding="utf-8")
+    )
+    assert report["ok"] is True
+    assert report["state_migration_version"] == 4
+    assert "delivery_preview" not in migrated_review
+    assert "delivery_authorization" not in migrated_review
+    assert [item["id"] for item in migrated_review["send_candidates"]] == [
+        "selected-1",
+        "review-1",
+    ]
+    assert migrated_review["user_overrides"][0]["job_id"] == "review-1"
+    assert migrated_round["platforms"]["boss"]["status"] == "awaiting_delivery_confirmation"
+    assert migrated_round["platforms"]["boss"]["next_suggested"] == (
+        "jobagent boss greet preview"
+    )
+    assert json.loads(
+        (state / "pending_interaction.json").read_text(encoding="utf-8")
+    ) == target_role_pending
+
+
 def test_protocol_change_archives_unsigned_runtime_decisions_without_touching_audit(tmp_path):
     upgrade = importlib.import_module("jobagent.infra.client_upgrade")
     app_dir = tmp_path / ".jobagent"

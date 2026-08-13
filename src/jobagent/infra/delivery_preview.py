@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import shlex
 from datetime import datetime, timezone
 from typing import Any
 
+from jobagent.infra.interaction_protocol import (
+    build_host_presentations,
+    build_interaction_required,
+)
 from jobagent.infra.protocol import digest_payload
 
 DELIVERY_PREVIEW_PROTOCOL = "agentmesh360.delivery_preview"
@@ -76,13 +81,11 @@ def _fallback_text(
     *,
     platform: str,
     items: list[dict[str, Any]],
-    next_suggested: str,
 ) -> str:
     label = _PLATFORM_LABELS[platform]
     lines = [
         f"{label}待投递岗位清单（共 {len(items)} 个）",
-        "以下岗位已经完成云端匹配与签名审核，将按本轮授权自动投递。",
-        "这是投递前告知，不需要再次确认；请先向用户完整展示清单，再立即继续执行投递。",
+        "以下岗位已经完成云端匹配与签名审核。真实投递前必须由你最后确认。",
         "",
     ]
     if items:
@@ -95,8 +98,71 @@ def _fallback_text(
         )
     else:
         lines.append("本平台没有待投递岗位。")
-    lines.extend(["", f"展示完成后自动继续：{next_suggested}"])
+    if items:
+        lines.extend(
+            [
+                "",
+                "请选择：",
+                "1. 确认全部投递",
+                "2. 排除部分岗位",
+                "3. 取消本平台投递",
+                "",
+                "在你明确选择前，Job Agent 不会执行任何真实投递。",
+            ]
+        )
+    else:
+        lines.extend(["", "没有真实平台动作需要确认，将继续进入审计。"])
     return "\n".join(lines)
+
+
+def _confirmation_interaction(
+    *,
+    platform: str,
+    discover_id: str,
+    preview_id: str,
+    fallback_text: str,
+) -> dict[str, Any]:
+    label = _PLATFORM_LABELS[platform]
+    interaction_id = f"delivery:{platform}:{discover_id}:{preview_id}"
+    return build_interaction_required(
+        interaction_id=interaction_id,
+        product_id="job_agent",
+        kind="delivery_confirmation",
+        title=f"确认{label}投递清单",
+        prompt=f"请审阅上方 {label} 待投递岗位，并决定本次如何执行。",
+        fields=[
+            {
+                "field_id": "delivery_choice",
+                "type": "single",
+                "label": "投递决定",
+                "required": True,
+                "options": [
+                    {
+                        "option_id": "confirm_all",
+                        "label": "确认全部投递",
+                        "description": "确认清单中的全部岗位并继续真实投递。",
+                    },
+                    {
+                        "option_id": "exclude_jobs",
+                        "label": "排除部分岗位",
+                        "description": "输入不想投递的岗位序号，重新审阅调整后的清单。",
+                    },
+                    {
+                        "option_id": "cancel_delivery",
+                        "label": "取消本平台投递",
+                        "description": "本轮不在这个平台投递任何岗位。",
+                    },
+                ],
+                "default_option_ids": ["confirm_all"],
+                "min_selections": 1,
+                "max_selections": 1,
+                "allow_other": False,
+            }
+        ],
+        fallback_text=fallback_text,
+        continuation_action="jobagent.interaction.respond",
+        idempotency_key=interaction_id,
+    )
 
 
 def build_delivery_preview(
@@ -118,7 +184,8 @@ def build_delivery_preview(
         for index, item in enumerate(send_candidates, start=1)
     ]
     preview_id = _preview_id(platform, discover_id, items)
-    next_suggested = f"{send_command} --preview-id {preview_id}"
+    fallback_text = _fallback_text(platform=platform, items=items)
+    requires_confirmation = bool(items)
     payload = {
         "event": "delivery_preview",
         "protocol": DELIVERY_PREVIEW_PROTOCOL,
@@ -131,13 +198,17 @@ def build_delivery_preview(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "title": f"{_PLATFORM_LABELS[platform]}待投递岗位清单",
         "message": (
-            f"以下 {len(items)} 个岗位将按本轮授权自动投递。"
-            "请先完整展示清单，然后自动继续；不要再次询问用户是否投递。"
+            f"以下 {len(items)} 个岗位已完成筛选。"
+            + (
+                "请完整展示清单并等待用户确认；确认前不得执行真实投递。"
+                if requires_confirmation
+                else "本平台没有待投递岗位，不会执行真实平台动作。"
+            )
         ),
         "display_required": True,
-        "requires_user_action": False,
-        "requires_user_confirmation": False,
-        "automatic_continuation": True,
+        "requires_user_action": requires_confirmation,
+        "requires_user_confirmation": requires_confirmation,
+        "automatic_continuation": not requires_confirmation,
         "preferred_presentation": "table",
         "allow_text_fallback": True,
         "columns": [
@@ -157,16 +228,25 @@ def build_delivery_preview(
         },
         "items": items,
         "continuation": {
-            "action": next_suggested,
-            "automatic": True,
-            "requires_user_confirmation": False,
+            "action": (
+                "jobagent.interaction.respond"
+                if requires_confirmation
+                else f"{send_command} --preview-id {preview_id}"
+            ),
+            "automatic": not requires_confirmation,
+            "requires_user_confirmation": requires_confirmation,
         },
     }
-    payload["fallback_text"] = _fallback_text(
-        platform=platform,
-        items=items,
-        next_suggested=next_suggested,
-    )
+    payload["fallback_text"] = fallback_text
+    if requires_confirmation:
+        interaction = _confirmation_interaction(
+            platform=platform,
+            discover_id=discover_id,
+            preview_id=preview_id,
+            fallback_text=fallback_text,
+        )
+        payload["interaction"] = interaction
+        payload["host_presentations"] = build_host_presentations(interaction)
     validate_delivery_preview(
         payload,
         send_candidates=send_candidates,
@@ -209,16 +289,33 @@ def validate_delivery_preview(
         raise ValueError("delivery preview items do not match reviewed candidates")
     if payload.get("display_required") is not True:
         raise ValueError("delivery preview must be displayed")
-    if payload.get("requires_user_confirmation") is not False:
-        raise ValueError("delivery preview must not request another confirmation")
+    requires_confirmation = bool(items)
+    if payload.get("requires_user_confirmation") is not requires_confirmation:
+        raise ValueError("delivery preview confirmation requirement mismatch")
+    if payload.get("requires_user_action") is not requires_confirmation:
+        raise ValueError("delivery preview user-action requirement mismatch")
+    if payload.get("automatic_continuation") is requires_confirmation:
+        raise ValueError("delivery preview continuation mode mismatch")
     continuation = payload.get("continuation")
-    if not isinstance(continuation, dict) or preview_id not in str(continuation.get("action") or ""):
-        raise ValueError("delivery preview continuation is not bound to the preview")
+    if not isinstance(continuation, dict):
+        raise ValueError("delivery preview continuation is missing")
+    if requires_confirmation:
+        if continuation.get("action") != "jobagent.interaction.respond":
+            raise ValueError("delivery preview must pause for a structured interaction")
+        if continuation.get("automatic") is not False:
+            raise ValueError("delivery preview must not continue automatically")
+        interaction = payload.get("interaction")
+        if not isinstance(interaction, dict) or preview_id not in str(
+            interaction.get("interaction_id") or ""
+        ):
+            raise ValueError("delivery preview interaction is not bound to the preview")
+    elif preview_id not in str(continuation.get("action") or ""):
+        raise ValueError("empty delivery preview continuation is not bound to the preview")
     return payload
 
 
 def preview_required_payload(platform: str, input_path: str | None) -> dict[str, Any]:
-    source = f" --input {input_path}" if input_path else ""
+    source = f" --input {shlex.quote(input_path)}" if input_path else ""
     review_command = (
         f"jobagent boss greet preview{source}"
         if platform == "boss"
@@ -229,8 +326,9 @@ def preview_required_payload(platform: str, input_path: str | None) -> dict[str,
         "error": "delivery_preview_required",
         "platform": platform,
         "message": (
-            "The reviewed delivery list must be displayed before automatic delivery. "
-            "Run the review command, show its complete delivery_preview, then follow its next_suggested."
+            "The reviewed delivery list must be regenerated before delivery. "
+            "Run the review command, show its complete delivery_preview, then wait for the "
+            "declared user confirmation."
         ),
         "request_preserved": True,
         "requires_user_action": False,

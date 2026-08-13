@@ -15,7 +15,7 @@ from jobagent.infra.profile_contract import profile_compatibility_issues
 from jobagent.infra.rounds import migrate_round_payload
 from jobagent.infra.state import APP_DIR
 
-STATE_MIGRATION_VERSION = 3
+STATE_MIGRATION_VERSION = 4
 
 _EPHEMERAL_FILES = (
     "state/release_manifest_cache.json",
@@ -161,6 +161,64 @@ def _conflicts(app_dir: Path) -> list[dict[str, Any]]:
     return conflicts
 
 
+def _migrate_delivery_confirmation_state(
+    root: Path,
+    *,
+    migrated: list[str],
+    cleared: list[str],
+) -> None:
+    """Invalidate pre-confirmation previews without discarding signed decisions."""
+
+    state_dir = root / "state"
+    discoveries = state_dir / "discoveries"
+    if discoveries.exists():
+        for path in discoveries.rglob("*.review.json"):
+            payload = _read_json(path)
+            if payload is None:
+                continue
+            changed = False
+            for key in ("delivery_preview", "delivery_authorization"):
+                if key in payload:
+                    payload.pop(key, None)
+                    changed = True
+            if changed:
+                _write_json(path, payload)
+                migrated.append(_relative(path, root))
+
+    pending_path = state_dir / "pending_interaction.json"
+    pending = _read_json(pending_path)
+    if pending and str(pending.get("kind") or "").startswith("delivery_"):
+        pending_path.unlink()
+        cleared.append(_relative(pending_path, root))
+
+    round_path = state_dir / "current_round.json"
+    current = _read_json(round_path)
+    if current is None:
+        return
+    changed = False
+    platforms = current.get("platforms")
+    if isinstance(platforms, dict):
+        for platform, item in platforms.items():
+            if not isinstance(item, dict) or item.get("status") != "reviewed":
+                continue
+            item["status"] = "awaiting_delivery_confirmation"
+            item["next_suggested"] = (
+                "jobagent boss greet preview"
+                if platform == "boss"
+                else f"jobagent {platform} apply review"
+            )
+            evidence = item.get("evidence")
+            if isinstance(evidence, dict):
+                evidence.pop("preview_id", None)
+                evidence.pop("authorization_id", None)
+            changed = True
+    if changed:
+        _write_json(round_path, current)
+        relative = _relative(round_path, root)
+        if relative not in migrated:
+            migrated.append(relative)
+
+
 def run_client_upgrade(
     *,
     app_dir: Path | None = None,
@@ -235,6 +293,13 @@ def run_client_upgrade(
             if migrated_round != round_payload:
                 _write_json(round_path, migrated_round)
                 migrated.append("state/current_round.json")
+
+        if migration_changed:
+            _migrate_delivery_confirmation_state(
+                root,
+                migrated=migrated,
+                cleared=cleared,
+            )
 
         discoveries = state_dir / "discoveries"
         if protocol_changed and discoveries.exists():

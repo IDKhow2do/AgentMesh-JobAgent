@@ -19,10 +19,10 @@ Each platform is isolated from the others. A page change on one platform does no
 
 ```text
 Resume profile
-  -> Boss Discover / signed review / delivery preview / automatic selected delivery / audit
-  -> Liepin Discover / signed review / delivery preview / automatic selected delivery / audit
-  -> Zhilian Discover / signed review / delivery preview / automatic selected delivery / audit
-  -> 51Job Discover / signed review / delivery preview / automatic selected delivery / audit
+  -> Boss Discover / signed review / delivery preview / user confirmation / delivery / audit
+  -> Liepin Discover / signed review / delivery preview / user confirmation / delivery / audit
+  -> Zhilian Discover / signed review / delivery preview / user confirmation / delivery / audit
+  -> 51Job Discover / signed review / delivery preview / user confirmation / delivery / audit
   -> completed round
 ```
 
@@ -162,7 +162,8 @@ The diagnostic separates CDP reachability, tab presence, page readiness and logi
 jobagent boss login
 jobagent boss discover
 jobagent boss greet preview
-jobagent boss greet send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent boss greet send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent boss audit
 ```
 
@@ -174,7 +175,8 @@ Boss uses a personalized greeting. `greet preview` shows the signed decision and
 jobagent liepin login
 jobagent liepin discover
 jobagent liepin apply review
-jobagent liepin apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent liepin audit
 ```
 
@@ -184,7 +186,8 @@ jobagent liepin audit
 jobagent zhilian login
 jobagent zhilian discover
 jobagent zhilian apply review
-jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent zhilian audit
 ```
 
@@ -196,7 +199,8 @@ jobagent zhilian audit
 jobagent 51job login
 jobagent 51job discover
 jobagent 51job apply review
-jobagent 51job apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent 51job apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent 51job audit
 ```
 
@@ -206,16 +210,17 @@ Boss and 猎聘 require a non-empty signed personalized greeting of at most 100 
 
 ## Review Rules
 
-- `selected` jobs are delivered automatically after signed review; the Agent does not ask for another confirmation on each platform.
-- Before any real delivery, review emits `agentmesh360.delivery_preview v1` with every pending job. The Agent must show the complete table, or the exact text fallback, and then execute the bound `next_suggested` containing `--preview-id`. This is a notice, not another confirmation.
-- An older review file may return `delivery_preview_required`. The Agent reruns the returned review command, shows the regenerated list and follows its new bound send command; previously promoted review jobs are preserved and no new Discover charge is created.
+- Before any real delivery, review emits `agentmesh360.delivery_preview v1` with every pending job and stops with a structured confirmation. The Agent must show the complete table, or the exact text fallback, and wait for the user's choice.
+- The stable choices are `confirm_all`, `exclude_jobs`, and `cancel_delivery`. Exclusions use displayed job numbers, regenerate the complete list and require another final confirmation. The Agent never chooses on the user's behalf.
+- Only an accepted interaction creates `agentmesh360.delivery_authorization v1`. Send requires both its bound `--preview-id` and `--authorization-id`; missing, stale, cross-platform, cross-round or changed-list authorization fails before a recruiting page opens.
+- An older review file may return `delivery_preview_required` or `delivery_confirmation_required`. The Agent reruns only the returned review command, shows the regenerated list and waits for a fresh confirmation; prior user promotions are preserved and no new Discover charge is created.
 - `review` jobs are excluded unless the user explicitly promotes their job IDs with `--promote ... --confirm-promote`.
 - `rejected` jobs are never automatically promoted.
 - Boss review excludes jobs already recorded as successfully delivered, and the send command checks the audit history again before opening any job page.
-- Send commands intentionally have no per-platform confirmation flag.
+- A raw send command is not user authorization. Confirmation is completed only through the pending `interaction_required` response.
 - Recruiting-platform browser actions run serially in the product order shown above.
 - `jobagent round start` is the only command that creates a new round. A completed round stays completed until that explicit command runs.
-- Never pre-login future platforms. Enter only the current platform, finish its `login -> discover -> review -> delivery preview -> send -> audit` chain, and complete its audit before logging in to the next platform.
+- Never pre-login future platforms. Enter only the current platform, finish its `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain, and complete its audit before logging in to the next platform.
 - Completing one platform is not completing the round. The Agent must follow `workflow.next_suggested` until `workflow.workflow_complete=true`.
 - One send covers the complete reviewed selected list, up to 100 jobs. The default send limit is 100.
 - If the CLI reports login, CAPTCHA, verification or resume-selection intervention, the Agent must stop and ask the user to complete it.
@@ -224,7 +229,8 @@ Example review override:
 
 ```bash
 jobagent liepin apply review --promote <job-id> --confirm-promote
-jobagent liepin apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 ```
 
 ## Signed Decisions
@@ -251,7 +257,7 @@ The canonical agent workflow is in [docs/agent-onboarding.md](docs/agent-onboard
 ## Safety and Privacy
 
 - Never paste API Keys, browser cookies or complete resume text into issues.
-- Starting a job-search round authorizes automatic delivery of signed `selected` jobs; do not ask for another confirmation before each platform.
+- Starting a job-search round authorizes discovery and signed review. Each platform's final delivery list still requires explicit user confirmation.
 - Never auto-promote `review` jobs or send `rejected` jobs.
 - Do not run shared browser actions in parallel.
 - Stop immediately when the CLI requests user intervention.

@@ -33,6 +33,7 @@ def test_round_state_is_created_and_platform_skip_is_round_local(monkeypatch, tm
                 "discover",
                 "review",
                 "delivery_preview",
+                "delivery_confirmation",
                 "send",
                 "audit",
             ],
@@ -84,10 +85,10 @@ def test_round_workflow_continues_to_liepin_after_boss_completion(monkeypatch, t
     assert workflow["next_suggested"] == "jobagent liepin login --check"
     assert workflow["remaining_platforms"] == ["liepin", "zhilian", "51job"]
     assert workflow["delivery_policy"] == {
-        "selected": "auto",
+        "selected": "user_confirmed_after_preview",
         "review": "explicit_override_only",
         "rejected": "never",
-        "per_platform_confirmation": False,
+        "per_platform_confirmation": True,
     }
 
 

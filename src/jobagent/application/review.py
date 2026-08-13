@@ -2,13 +2,45 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
+from jobagent.application.delivery_confirmation import register_delivery_confirmation
 from jobagent.infra import rounds
+from jobagent.infra.account_state import current_account_ref
 from jobagent.infra.audit import AuditLog, boss_job_key
 from jobagent.infra.delivery_preview import build_delivery_preview
 from jobagent.infra.discovery_state import build_review, load_envelope, save_review
 from jobagent.infra.protocol import verify_stored_decision
+
+
+def _candidate_identity(item: dict[str, Any]) -> str:
+    for key in ("id", "job_id", "jobId", "url"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return ""
+
+
+def _preserve_delivery_exclusions(
+    envelope: dict[str, Any],
+    review: dict[str, Any],
+) -> None:
+    exclusions = [
+        item
+        for item in (envelope.get("user_delivery_exclusions") or [])
+        if isinstance(item, dict)
+    ]
+    if not exclusions:
+        return
+    excluded = {_candidate_identity(item) for item in exclusions}
+    excluded.discard("")
+    review["send_candidates"] = [
+        item
+        for item in review.get("send_candidates") or []
+        if _candidate_identity(item) not in excluded
+    ]
+    review["user_delivery_exclusions"] = exclusions
 
 
 def _exclude_delivered_boss_jobs(review: dict[str, Any]) -> None:
@@ -51,6 +83,7 @@ def review_decision(
         promoted_ids=requested_promoted_ids,
         confirm_promote=confirm_promote or bool(existing_promoted_ids),
     )
+    _preserve_delivery_exclusions(envelope, review)
     if platform == "boss":
         _exclude_delivered_boss_jobs(review)
     if platform in {"boss", "liepin"}:
@@ -82,10 +115,31 @@ def review_decision(
     )
     review["delivery_preview"] = delivery_preview
     path = save_review(review, str(path))
-    next_suggested = str(delivery_preview["continuation"]["action"])
+    workflow = rounds.round_status()
+    requires_confirmation = bool(delivery_preview["requires_user_confirmation"])
+    if requires_confirmation:
+        confirmation = register_delivery_confirmation(
+            platform=platform,
+            review_path=str(path),
+            review=review,
+            preview=delivery_preview,
+            round_id=str(workflow.get("round_id") or ""),
+            account_ref=current_account_ref(),
+        )
+        source = shlex.quote(str(path))
+        safe_resume = (
+            f"jobagent boss greet preview --input {source}"
+            if platform == "boss"
+            else f"jobagent {platform} apply review --input {source}"
+        )
+        next_suggested = str(confirmation["next_suggested"])
+    else:
+        confirmation = {}
+        safe_resume = str(delivery_preview["continuation"]["action"])
+        next_suggested = safe_resume
     rounds.set_platform_status(
         platform,
-        "reviewed",
+        "awaiting_delivery_confirmation" if requires_confirmation else "reviewed",
         command=(
             "jobagent boss greet preview"
             if platform == "boss"
@@ -96,10 +150,10 @@ def review_decision(
             "send_count": len(review["send_candidates"]),
             "preview_id": delivery_preview["preview_id"],
         },
-        next_suggested=next_suggested,
+        next_suggested=safe_resume,
     )
-    return {
-        "ok": True,
+    result = {
+        "ok": not requires_confirmation,
         "event": "delivery_preview",
         "platform": platform,
         "discover_id": manifest["discover_id"],
@@ -111,9 +165,18 @@ def review_decision(
         "skipped_delivered_count": len(review.get("skipped_delivered", [])),
         "send_count": len(review["send_candidates"]),
         "display_required": True,
-        "requires_user_action": False,
+        "requires_user_action": requires_confirmation,
         "delivery_preview": delivery_preview,
         "review_file": str(path),
         "next_suggested": next_suggested,
         "workflow": rounds.round_status(),
     }
+    if requires_confirmation:
+        result.update(
+            {
+                "error": "interaction_required",
+                "interaction": confirmation["interaction"],
+                "host_presentations": confirmation["host_presentations"],
+            }
+        )
+    return result

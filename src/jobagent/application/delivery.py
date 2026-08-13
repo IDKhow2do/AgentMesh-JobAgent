@@ -13,6 +13,11 @@ from jobagent.infra.delivery_preview import (
     preview_required_payload,
     validate_delivery_preview,
 )
+from jobagent.infra.delivery_authorization import (
+    DeliveryAuthorizationError,
+    confirmation_required_payload,
+    validate_delivery_authorization,
+)
 from jobagent.infra.discovery_state import load_envelope
 from jobagent.infra.diagnostics import emit_stage, progress_heartbeat
 from jobagent.infra.platform_lock import PlatformSessionLock
@@ -40,6 +45,7 @@ def _load_reviewed(
     input_path: str | None,
     *,
     preview_id: str | None,
+    authorization_id: str | None = None,
 ) -> dict[str, Any]:
     envelope = load_envelope(platform, input_path, reviewed=True if input_path is None else None)
     verify_stored_decision(envelope["manifest"], platform=platform)
@@ -65,6 +71,48 @@ def _load_reviewed(
         )
         payload["message"] = str(exc)
         raise DeliveryPreviewError(payload) from exc
+    send_candidates = list(envelope["send_candidates"])
+    if not send_candidates:
+        return envelope
+    authorization = envelope.get("delivery_authorization")
+    if not isinstance(authorization, dict) or not authorization_id:
+        raise DeliveryAuthorizationError(
+            confirmation_required_payload(
+                platform,
+                str(envelope.get("source_path") or input_path or ""),
+            )
+        )
+    from jobagent.infra.account_state import current_account_ref
+
+    account_ref = current_account_ref()
+    round_id = str(rounds.round_status().get("round_id") or "")
+    if not account_ref or not round_id:
+        raise DeliveryAuthorizationError(
+            confirmation_required_payload(
+                platform,
+                str(envelope.get("source_path") or input_path or ""),
+                message="The active account or delivery round no longer matches this confirmation.",
+            )
+        )
+    try:
+        validate_delivery_authorization(
+            authorization,
+            expected_authorization_id=authorization_id,
+            account_ref=account_ref,
+            round_id=round_id,
+            platform=platform,
+            discover_id=str(envelope["discover_id"]),
+            preview=preview,
+            send_candidates=send_candidates,
+        )
+    except DeliveryAuthorizationError as exc:
+        raise DeliveryAuthorizationError(
+            confirmation_required_payload(
+                platform,
+                str(envelope.get("source_path") or input_path or ""),
+                message=str(exc),
+            )
+        ) from exc
     return envelope
 
 
@@ -271,11 +319,17 @@ def send_reviewed(
     *,
     input_path: str | None = None,
     preview_id: str | None = None,
+    authorization_id: str | None = None,
     limit: int = 20,
     dry_run: bool = False,
     stop_on_failure: bool = True,
 ) -> dict[str, Any]:
-    reviewed = _load_reviewed(platform, input_path, preview_id=preview_id)
+    reviewed = _load_reviewed(
+        platform,
+        input_path,
+        preview_id=preview_id,
+        authorization_id=authorization_id,
+    )
     all_jobs = list(reviewed.get("send_candidates") or [])
     jobs = all_jobs[: max(1, min(100, limit))]
     if not jobs:
@@ -372,12 +426,14 @@ def send_reviewed(
         else (
             (
                 "jobagent boss greet send "
-                f"--input {reviewed['source_path']} --preview-id {preview_id} --limit 100"
+                f"--input {reviewed['source_path']} --preview-id {preview_id} "
+                f"--authorization-id {authorization_id} --limit 100"
             )
             if platform == "boss"
             else (
                 f"jobagent {platform} apply send "
-                f"--input {reviewed['source_path']} --preview-id {preview_id} --limit 100"
+                f"--input {reviewed['source_path']} --preview-id {preview_id} "
+                f"--authorization-id {authorization_id} --limit 100"
             )
         )
     )
@@ -399,6 +455,19 @@ def send_reviewed(
         },
         next_suggested=next_suggested,
     )
+    from jobagent.infra.interaction_state import (
+        clear_pending_interaction,
+        load_pending_interaction,
+    )
+
+    pending = load_pending_interaction()
+    if pending and str(pending.get("stage") or "") == "delivery_authorized":
+        context = pending.get("context") or {}
+        if (
+            str(context.get("platform") or "") == platform
+            and str(context.get("authorization_id") or "") == str(authorization_id or "")
+        ):
+            clear_pending_interaction()
     return {
         "ok": failed == 0,
         "platform": platform,

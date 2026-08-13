@@ -23,9 +23,10 @@
 | `state/profile.json` | 保留并校验 schema | 可兼容则原样保留；不兼容时阻断平台命令并要求重新分析简历 |
 | 四个平台 audit log | 永远保留 | 它们是投递、消息送达和去重证据，不参与缓存清理 |
 | `state/support_state.json` | 保留 | 首次投递后的单次提示状态不得因升级重置 |
-| `state/current_round.json` | 按 schema 迁移 | v2 活动 round 原样保留平台进度并标记 `legacy_implicit` 意图，不能在升级中途追加岗位确认；更旧且含义不明确的平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
+| `state/current_round.json` | 按 schema 迁移 | v2 活动 round 原样保留平台进度并标记 `legacy_implicit` 目标岗位意图；状态迁移 v4 将旧版尚未发送的 `reviewed` 平台退回 `awaiting_delivery_confirmation`，不得沿用旧自动发送命令；更旧且含义不明确的平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
 | `state/rounds/` | 保留 | 历史轮次不覆盖、不删除 |
-| `state/discoveries/` | 同协议保留，协议变化时归档 | 归档到 `state/archive/`，不得连同 audit 一起删除；`0.4.5` 起新增的 `pending-decision.json` 属于账户绑定的可恢复请求，成功后删除，旧安装缺失该文件无需迁移 |
+| `state/discoveries/` | 同协议保留，协议变化时归档 | 归档到 `state/archive/`，不得连同 audit 一起删除；状态迁移 v4 只移除旧 review 文件中的自动继续预览与旧授权，保留签名 manifest、`send_candidates`、用户提升项和 pending Discover，从 review 原地重建清单，不重新采集或收费 |
+| `state/pending_interaction.json` | 按交互类型迁移 | 目标岗位等仍有效交互原样保留；旧投递确认交互在迁移 v4 清除并从保留的 review 重新生成，避免旧交互 ID 授权新清单 |
 | release manifest cache | 自动清理 | 新版本重新获取并验证签名策略 |
 | platform tab / browser-session marker | 自动清理 | 只清理可重建的 CDP 映射，不触碰 Chrome cookies/profile |
 | last doctor / probe 输出 | 自动清理 | 旧诊断结论不应冒充新版状态 |
@@ -40,7 +41,7 @@
 1. 验证签名版本策略，受管安装按政策完成客户端更新；仅在真实发现新版时输出 `client_update_detected -> client_update_started -> client_update_completed -> client_command_resumed`，更新成功后自动恢复原命令。
 2. 检测 `client_version`、协议版本和状态迁移版本。
 3. 检查是否存在仍存活的 Job Agent 进程；有则记录 `migration_pending=true` 并停止迁移。
-4. 清理可重建状态、迁移旧 schema、按协议边界归档运行时决策。
+4. 清理可重建状态、迁移旧 schema、按协议边界归档运行时决策；旧版待发送平台必须回到完整预览与最终确认，不能继承自动发送权限。
 5. 校验 API Key 与画像兼容性。
 6. 从云端取得不可枚举的稳定 `account_ref`，校验本地业务状态归属；旧状态未认领或账户不匹配时阻断。
 7. 无冲突才允许 Boss、猎聘、智联和 51Job 的真实平台命令进入 dispatch。
@@ -71,6 +72,7 @@
 - 活锁场景：不修改运行时状态，返回 `active_process_lock`；进程结束后自动续做。
 - 过期 Key / 不兼容画像：平台 dispatch 不执行，恢复命令可执行。
 - 协议变化：旧 discoveries 可追溯归档，所有 audit 原地保留。
+- `0.5.7 -> 0.5.8`：签名决策、候选列表、用户提升项、画像、账户与 audit 原地保留；旧预览/授权失效，未发送平台重新展示清单并等待确认，不产生新 Discover 费用。
 - 损坏状态：原文件可追溯归档，后续命令不因 JSON 解析错误崩溃。
 - Release archive 校验固定 `tar.umask=002`，忽略系统级 Git 配置、全局 attributes 和 replace refs；发布机与客户机必须对同一 commit 得到相同 SHA256。
 - 旧客户端若返回 `release artifact hash mismatch`，不得关闭校验或删除 `~/.jobagent`。重新运行官方安装器一次以修复受管仓库配置，并保留账户状态、浏览器登录、画像、轮次和审计。

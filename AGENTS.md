@@ -36,10 +36,11 @@ This is the public Job Agent CLI repository in the AgentMesh ecosystem. It conta
 - When a cloud command returns `retryable=true` and `request_preserved=true`, execute its `next_suggested` command immediately without asking the user to retry, re-login or recollect jobs. Discover resumes the same signed request and locally preserved candidate set; do not start a replacement round or claim another charge.
 - For Zhilian, treat every `kw...` URL segment as opaque platform state. Never report it as the cloud search keyword, feed it back into another search, or use it as grounds to skip Zhilian; trust the CLI's readable `query`, machine-readable error and `next_suggested`.
 - Follow the persisted workflow and `next_suggested`; never invent a parallel or batch-login workflow.
-- Platforms run as complete vertical chains in this order: Boss -> Liepin -> Zhilian -> 51Job. Complete the current platform through audit before logging in to the next platform.
-- Starting a job-search round authorizes automatic delivery of cloud-signed `selected` jobs. Do not request another confirmation before each platform or send command.
-- When review returns `event=delivery_preview`, show every row in `delivery_preview.items` before any real platform action. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including its `--preview-id`; never invent, omit or reuse a preview ID from another platform or Discover.
-- If send returns `error=delivery_preview_required`, execute its review `next_suggested` immediately, display the regenerated preview, and then follow the new bound send command. This is compatibility recovery for older review files and does not require recollection, another Discover charge or user confirmation.
+- Platforms run as complete vertical chains in this order: Boss -> Liepin -> Zhilian -> 51Job. Complete the current platform's `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain before logging in to the next platform.
+- Starting a job-search round authorizes discovery and signed review, not final delivery. Each platform's complete final list requires a separate structured user confirmation before send.
+- When review returns `event=delivery_preview` with `error=interaction_required`, show every row in `delivery_preview.items`, then stop for the declared confirmation. Offer exactly `confirm_all`, `exclude_jobs`, and `cancel_delivery`; never choose for the user. Use the native card when callable, otherwise relay `delivery_preview.fallback_text` unchanged.
+- For exclusions, pass each displayed job number as `--exclude-index`, show the regenerated complete list, and stop for final confirmation again. Run send only after `interaction respond` returns `event=delivery_authorized` and an exact command containing both `--preview-id` and `--authorization-id`.
+- If send returns `delivery_preview_required` or `delivery_confirmation_required`, execute only its safe review recovery command. Preserve prior promotions and exclusions, do not recollect or recharge, and obtain a fresh user confirmation before delivery.
 - `review` jobs require explicit user-selected IDs and `--confirm-promote`. Never auto-promote `rejected` jobs.
 - Stop and relay the exact prompt whenever the CLI returns `requires_user_action=true`.
 - Never delete `~/.jobagent` or the Job Agent Chrome profile as a general upgrade fix. Follow `client_upgrade_required`, `conflicts`, and `next_suggested`.
@@ -67,5 +68,5 @@ This repository should remain a clean public distribution surface: installable C
 
 - Public wording and links are safe for GitHub.
 - `pytest` or a focused CLI smoke check was run, or the final answer explains why not.
-- README, onboarding, Skills, and CLI output agree on platform order, automatic signed-selected delivery, review overrides, upgrade recovery, and user-intervention points.
+- README, onboarding, Skills, and CLI output agree on platform order, user-confirmed delivery, review overrides, upgrade recovery, and user-intervention points.
 - The final handoff lists changed files, verification, and whether any real platform/session data was touched.

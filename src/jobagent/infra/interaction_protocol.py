@@ -134,19 +134,23 @@ def build_host_presentations(payload: dict[str, Any]) -> dict[str, Any]:
                         ]
                     },
                     "answer_mapping": answer_mapping,
-                    "free_text_other": {
-                        "field_id": str(field["field_id"]),
-                        "response_key": "other_text",
-                        "default_option_id": (
-                            "replace_roles"
-                            if "replace_roles"
-                            in {str(option["option_id"]) for option in options}
-                            else None
-                        ),
-                        "target_role_source": "other_text",
-                    },
                 }
             )
+            option_ids = {str(option["option_id"]) for option in options}
+            if "replace_roles" in option_ids:
+                codex["free_text_other"] = {
+                    "field_id": str(field["field_id"]),
+                    "response_key": "other_text",
+                    "default_option_id": "replace_roles",
+                    "target_role_source": "other_text",
+                }
+            elif "exclude_jobs" in option_ids:
+                codex["free_text_other"] = {
+                    "field_id": str(field["field_id"]),
+                    "response_key": "other_text",
+                    "default_option_id": "exclude_jobs",
+                    "exclude_indices_source": "other_text",
+                }
         else:
             codex["unsupported_reason"] = "current_interaction_requires_free_text"
     else:

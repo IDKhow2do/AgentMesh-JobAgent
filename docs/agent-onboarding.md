@@ -5,8 +5,8 @@ This is the public instruction source for an Agent operating Job Agent on behalf
 ## Non-Negotiable Rules
 
 1. Never invent, infer or fabricate an AgentMesh API Key.
-2. Starting a job-search round authorizes automatic delivery of every signed `selected` job. Do not ask for another confirmation before each platform or send command.
-3. Run recruiting platforms as complete vertical chains in this order: Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> delivery preview -> send -> audit` chain and complete its audit before logging in to the next platform.
+2. Starting a job-search round authorizes discovery and signed review, not final delivery. After each platform's complete delivery preview, stop and obtain the user's final list decision.
+3. Run recruiting platforms as complete vertical chains in this order: Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain and complete its audit before logging in to the next platform.
 4. When CLI output contains `requires_user_action=true`, stop immediately, relay `user_prompt` to the user and wait for their reply.
 5. Never treat `review` or `rejected` as automatically sendable. A `review` job needs an explicit user override; `rejected` remains excluded.
 6. Do not close the dedicated Job Agent Chrome window during a workflow.
@@ -15,16 +15,17 @@ This is the public instruction source for an Agent operating Job Agent on behalf
 9. Create a round only with `jobagent round start`. `doctor env`, `round status` and platform commands must never be treated as implicit authorization to create another round.
 10. When a cloud command returns `retryable=true` and `request_preserved=true`, immediately execute its `next_suggested` command. Do not ask the user to click retry, re-login or recollect jobs; the same signed Discover request is resumed without another charge.
 11. When output returns `error=interaction_required`, use the host's native prompt card only when that interface is callable in the current surface and mode. Codex must use the ready-to-call `host_presentations.adapters.codex.arguments` when its `request_user_input` tool is callable, then map the returned label with `answer_mapping`; map its automatically added free-text Other answer using `free_text_other`. Other hosts map the declared fields and options exactly. If the interface is unavailable in the current mode, show `interaction.fallback_text` unchanged; do not claim the host has no card capability. Continue every answer through `jobagent interaction respond` using the exact interaction ID. Do not create a round until the CLI accepts the required answer.
-12. When review returns `event=delivery_preview`, show every item in `delivery_preview.items` before running the send command. Prefer a compact table containing the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is a required notice and not a user decision: do not ask whether to proceed. Then execute the exact `next_suggested`, including its `--preview-id`.
-13. When send returns `error=delivery_preview_required`, immediately run its review `next_suggested`, display the regenerated preview, and follow the new bound send command. This upgrades an older review file in place and preserves prior user promotions; do not recollect jobs, start another Discover or ask for confirmation.
+12. When review returns `event=delivery_preview` with `error=interaction_required`, show every item in `delivery_preview.items`, then stop. Render the delivery-confirmation card or exact fallback and wait for the user to choose `confirm_all`, `exclude_jobs`, or `cancel_delivery`. Never select the recommended option automatically.
+13. Continue the user's answer through the exact interaction ID. For exclusions, pass each displayed job number as `--exclude-index`, show the regenerated complete list, and stop for final confirmation again. Run send only after the CLI returns `event=delivery_authorized` with both `--preview-id` and `--authorization-id` in its exact command.
+14. When send returns `delivery_preview_required` or `delivery_confirmation_required`, run only its safe review recovery command. Preserve prior promotions, do not recollect or recharge, and obtain a fresh user confirmation.
 
 ## Goal, Actions and Acceptance
 
 Before each platform, state:
 
-- Goal: complete one platform Discover and automatically deliver its signed `selected` jobs.
-- Actions: login check, Discover, signed review, complete delivery-preview display, automatic selected delivery, audit.
-- Acceptance: valid signed decision; every candidate classified once; previously delivered jobs excluded; every send candidate shown before action; only `selected` jobs attempted; audit records the actual result.
+- Goal: complete one platform Discover and let the user approve the exact final delivery list.
+- Actions: login check, Discover, signed review, complete delivery-preview display, user confirmation or exclusions, authorized delivery, audit.
+- Acceptance: valid signed decision; every candidate classified once; previously delivered jobs excluded; every send candidate shown before action; authorization matches the confirmed final list; only authorized jobs are attempted; audit records the actual result.
 
 At the start of a round, run:
 
@@ -143,7 +144,7 @@ jobagent resume analyze --file <resume-path> \
 
 Acceptance: output reports `ok=true` and a saved profile path.
 
-Then execute the returned `jobagent round start`. If it returns `interaction_required`, render its card or fallback text and wait for the target-role answer. Continue through `jobagent interaction respond`; only an accepted structured response or an already-explicit direct `round start` creates the four-platform round and authorizes automatic delivery of signed `selected` jobs.
+Then execute the returned `jobagent round start`. If it returns `interaction_required`, render its card or fallback text and wait for the target-role answer. Continue through `jobagent interaction respond`; only an accepted structured response or an already-explicit direct `round start` creates the four-platform round. Final delivery authorization is still collected separately after each platform preview.
 
 ## 4. Run One Platform
 
@@ -160,14 +161,19 @@ jobagent boss discover
 jobagent boss greet preview
 ```
 
-Report the `selected`, `review`, `rejected` and `skipped_delivered` counts. Then render the complete `delivery_preview.items` list as a compact table, or show `delivery_preview.fallback_text` unchanged. `skipped_delivered` jobs are not sendable. Do not ask whether to send. To include a review job, the user must independently choose its ID and authorize:
+Report the `selected`, `review`, `rejected` and `skipped_delivered` counts. Then render the complete `delivery_preview.items` list as a compact table, or show `delivery_preview.fallback_text` unchanged. `skipped_delivered` jobs are not sendable. Render the returned confirmation card and wait. To include a review job, the user must independently choose its ID and authorize:
 
 ```bash
 jobagent boss greet preview --promote <job-id> --confirm-promote
 ```
 
 ```bash
-jobagent boss greet send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+# Or request exclusions, then pass every displayed number:
+jobagent interaction respond --interaction-id "<id>" --choice exclude_jobs
+jobagent interaction respond --interaction-id "<follow-up-id>" --exclude-index 2 --exclude-index 5
+# Execute only the exact authorized command returned by the CLI:
+jobagent boss greet send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent boss audit
 ```
 
@@ -184,7 +190,8 @@ jobagent liepin apply review
 ```
 
 ```bash
-jobagent liepin apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent liepin audit
 ```
 
@@ -197,7 +204,8 @@ jobagent zhilian apply review
 ```
 
 ```bash
-jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent zhilian audit
 ```
 
@@ -212,7 +220,8 @@ jobagent 51job apply review
 ```
 
 ```bash
-jobagent 51job apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent 51job apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent 51job audit
 ```
 
@@ -230,7 +239,7 @@ jobagent <platform> apply review \
 
 For Boss, use `greet preview` instead of `apply review`.
 
-Report the resulting `send_count` and reviewed file, display the regenerated complete `delivery_preview`, then continue with its exact `next_suggested`. Never add IDs that the user did not select.
+Report the resulting `send_count` and reviewed file, display the regenerated complete `delivery_preview`, then stop for its delivery-confirmation interaction. Never add IDs that the user did not select or confirm delivery on the user's behalf.
 
 ## 6. User Intervention
 
