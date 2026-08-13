@@ -75,6 +75,53 @@ def test_loading_page_is_unknown_instead_of_login_required():
     assert status.error == "zhilian_session_state_unknown"
 
 
+class _AuthenticatedHomeWithPersistentLoginControlDriver:
+    def _exec_js(self, _script: str):
+        return {
+            "raw": json.dumps(
+                {
+                    "ok": True,
+                    "url": "https://www.zhaopin.com/",
+                    "title": "深圳招聘网_深圳人才网_2026年深圳最新招聘信息-智联招聘",
+                    "readyState": "complete",
+                    "navigationElapsedMs": 41000,
+                    "sessionEvidenceVersion": 2,
+                    "sessionState": "unknown",
+                    "sessionReason": "strong_account_overrides_weak_login_control",
+                    "loginRequired": False,
+                    "loginEvidence": ["visible_login_control"],
+                    "weakLoginEvidence": ["visible_login_control"],
+                    "strongLoginEvidence": [],
+                    "accountEvidence": ["account_navigation"],
+                    "strongAccountEvidence": [
+                        "resume_management",
+                        "application_activity",
+                    ],
+                    "contentEvidence": ["search_input", "job_results"],
+                    "bodySnippet": "个人中心 在线简历 上传附件 投递 12 面试 3",
+                }
+            )
+        }
+
+
+def test_complete_authenticated_home_ignores_persistent_weak_login_control():
+    status = ZhilianSessionGuide(
+        driver=_AuthenticatedHomeWithPersistentLoginControlDriver()
+    ).inspect_current_page(settle_timeout=0)
+
+    assert status.ok is True
+    assert status.logged_in is True
+    assert status.login_required is False
+    assert status.evidence["sessionState"] == "logged_in"
+    assert status.evidence["sessionReason"] == "strong_account_overrides_weak_login_control"
+    assert status.evidence["navigationElapsedMs"] == 41000
+    assert status.evidence["strongLoginEvidence"] == []
+    assert status.evidence["strongAccountEvidence"] == [
+        "resume_management",
+        "application_activity",
+    ]
+
+
 def test_selectors_expose_page_session_and_city_evidence():
     keyword = build_zhilian_keyword_search_script("产品经理")
     city = build_zhilian_city_filter_script("深圳")
@@ -82,5 +129,10 @@ def test_selectors_expose_page_session_and_city_evidence():
 
     assert "readyState" in keyword
     assert "sessionState" in keyword
+    assert "sessionEvidenceVersion" in keyword
+    assert "weakLoginEvidence" in keyword
+    assert "strongLoginEvidence" in keyword
+    assert "strongAccountEvidence" in keyword
+    assert "strong_account_overrides_weak_login_control" in keyword
     assert "accountEvidence" in city
     assert "visibleCity" in snapshot

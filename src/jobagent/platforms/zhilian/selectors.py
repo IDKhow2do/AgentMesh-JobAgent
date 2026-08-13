@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-13.1"
+ZHILIAN_SELECTOR_VERSION = "2026-08-13.2"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
         const href = location.href || '';
         const title = document.title || '';
         const readyState = document.readyState || 'unknown';
+        const navigationEntry = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+        const navigationElapsedMs = Math.round(
+          navigationEntry && Number.isFinite(navigationEntry.duration) && navigationEntry.duration > 0
+            ? navigationEntry.duration
+            : performance.now()
+        );
         const bodyText = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
         function clean(value){
           return String(value || '').replace(/\s+/g, ' ').trim();
@@ -25,9 +31,12 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
             && rect.width > 6
             && rect.height > 6;
         }
+        const sessionEvidenceVersion = 2;
         const authRoute = /passport|(?:^|[/._-])login(?:[/._?=-]|$)/i.test(href);
-        const loginEvidence = [];
+        const weakLoginEvidence = [];
+        const strongLoginEvidence = [];
         const accountEvidence = [];
+        const strongAccountEvidence = [];
         const controls = Array.from(document.querySelectorAll('a,button,[role="button"],[aria-label]'))
           .filter(visible);
         for (const el of controls){
@@ -35,13 +44,64 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
           const target = clean(el.getAttribute('href') || '');
           if (/^(登录|登录[/]注册|注册[/]登录|扫码登录|验证码登录|手机验证码)$/.test(text)
               || /passport|(?:^|[/._-])login(?:[/._?=-]|$)/i.test(target)) {
-            loginEvidence.push('visible_login_control');
+            weakLoginEvidence.push('visible_login_control');
           }
-          if (/^(我的|消息|个人中心|简历中心|我的简历|求职中心)$/.test(text)
+          if (/^(我的|消息|个人中心|简历中心|我的简历|在线简历|求职中心)$/.test(text)
               || (/[/](?:my|user|personal|account|resume|message)(?:[/._?=-]|$)/i.test(target)
                   && !/passport|login/i.test(target))) {
             accountEvidence.push('account_navigation');
           }
+        }
+        const visibleInputs = Array.from(document.querySelectorAll('input')).filter(visible);
+        const credentialInputs = visibleInputs.filter((el) => {
+          const type = clean(el.getAttribute('type') || '').toLowerCase();
+          const hint = clean([
+            el.getAttribute('name'),
+            el.getAttribute('placeholder'),
+            el.getAttribute('autocomplete'),
+            el.getAttribute('aria-label')
+          ].join(' '));
+          return type === 'password'
+            || /密码|手机号|手机号码|验证码|账号|username|password|one-time-code|tel/i.test(hint);
+        });
+        const authSurfaces = Array.from(document.querySelectorAll(
+          'form,[role="dialog"],[aria-modal="true"],[class*="login"],[class*="Login"],[class*="passport"]'
+        )).filter(visible).filter((el) => /登录|验证码|扫码|密码/.test(clean(el.innerText || el.textContent || '')));
+        if (authRoute) strongLoginEvidence.push('auth_route');
+        if (credentialInputs.some((input) => authSurfaces.some((surface) => surface.contains(input)))) {
+          strongLoginEvidence.push('visible_credential_form');
+        }
+        if (authSurfaces.some((surface) => {
+          const text = clean(surface.innerText || surface.textContent || '');
+          return /扫码登录|验证码登录|密码登录/.test(text)
+            && !!surface.querySelector('img,canvas,svg,[class*="qr"],[class*="Qr"]');
+        })) {
+          strongLoginEvidence.push('visible_login_challenge');
+        }
+        const identitySelectors = [
+          '[data-user-name]',
+          '[data-account-name]',
+          '[aria-label*="个人头像"]',
+          '[aria-label*="用户中心"]',
+          '[class*="user-info"] [class*="name"]',
+          '[class*="userInfo"] [class*="name"]'
+        ].join(',');
+        if (Array.from(document.querySelectorAll(identitySelectors)).some((el) => {
+          if (!visible(el)) return false;
+          const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          return !!text && !/登录|注册/.test(text);
+        })) {
+          strongAccountEvidence.push('profile_identity');
+        }
+        const resumeMarkers = ['在线简历', '上传附件', '我的简历', '简历中心', '简历管理']
+          .filter((marker) => bodyText.includes(marker));
+        if (new Set(resumeMarkers).size >= 2) {
+          strongAccountEvidence.push('resume_management');
+        }
+        const hasDeliveryActivity = /我的投递|投递记录|投递反馈|投递进度|投递统计|投递\s*\d+/.test(bodyText);
+        const hasInterviewActivity = /我的面试|面试邀请|面试通知|面试记录|面试统计|面试\s*\d+/.test(bodyText);
+        if (hasDeliveryActivity && hasInterviewActivity) {
+          strongAccountEvidence.push('application_activity');
         }
         const contentEvidence = [];
         const searchInput = Array.from(document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])'))
@@ -50,30 +110,68 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
         if (Array.from(document.querySelectorAll('a[href*="/jobdetail/"]')).some(visible)) {
           contentEvidence.push('job_results');
         }
+        const weakLogin = Array.from(new Set(weakLoginEvidence));
+        const strongLogin = Array.from(new Set(strongLoginEvidence));
+        const account = Array.from(new Set(accountEvidence));
+        const strongAccount = Array.from(new Set(strongAccountEvidence));
+        const hasAccountNavigation = account.includes('account_navigation');
+        const hasStrongAccount = strongAccount.length >= 2
+          || (hasAccountNavigation && strongAccount.length >= 1);
+        const hasStrongLogin = strongLogin.length > 0;
         let sessionState = 'unknown';
+        let sessionReason = 'insufficient_evidence';
         if (authRoute) {
           sessionState = 'login_required';
-          loginEvidence.push('auth_route');
+          sessionReason = 'authentication_route';
         } else if (readyState !== 'complete') {
           sessionState = 'loading';
-        } else if (loginEvidence.length && accountEvidence.length) {
+          sessionReason = 'document_loading';
+        } else if (hasStrongLogin && hasStrongAccount) {
           sessionState = 'unknown';
-        } else if (accountEvidence.length) {
-          sessionState = 'logged_in';
-        } else if (loginEvidence.length) {
+          sessionReason = 'strong_login_and_account_conflict';
+        } else if (hasStrongLogin) {
           sessionState = 'login_required';
+          sessionReason = 'strong_login_evidence';
+        } else if (hasStrongAccount) {
+          sessionState = 'logged_in';
+          sessionReason = weakLogin.length
+            ? 'strong_account_overrides_weak_login_control'
+            : 'strong_account_evidence';
+        } else if (weakLogin.length && account.length) {
+          sessionState = 'unknown';
+          sessionReason = 'weak_login_and_account_evidence';
+        } else if (weakLogin.length) {
+          sessionState = 'login_required';
+          sessionReason = 'weak_login_without_account_evidence';
+        } else if (account.length) {
+          sessionState = 'unknown';
+          sessionReason = 'account_evidence_below_threshold';
         } else if (contentEvidence.length) {
           sessionState = 'page_ready';
+          sessionReason = 'public_content_ready';
         }
         return {
           url: href,
           title,
           readyState,
+          navigationElapsedMs,
+          sessionEvidenceVersion,
           sessionState,
+          sessionReason,
           loginRequired: sessionState === 'login_required',
-          loginEvidence: Array.from(new Set(loginEvidence)),
-          accountEvidence: Array.from(new Set(accountEvidence)),
+          loginEvidence: Array.from(new Set([...weakLogin, ...strongLogin])),
+          weakLoginEvidence: weakLogin,
+          strongLoginEvidence: strongLogin,
+          accountEvidence: account,
+          strongAccountEvidence: strongAccount,
           contentEvidence: Array.from(new Set(contentEvidence)),
+          evidenceDecision: {
+            reason: sessionReason,
+            hasStrongLogin,
+            hasStrongAccount,
+            hasAccountNavigation,
+            strongAccountThreshold: hasAccountNavigation ? 1 : 2
+          },
           bodySnippet: bodyText.slice(0, 800)
         };
       }
@@ -568,9 +666,17 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         title,
         loginRequired,
         readyState: session.readyState,
+        navigationElapsedMs: session.navigationElapsedMs,
+        sessionEvidenceVersion: session.sessionEvidenceVersion,
         sessionState: session.sessionState,
+        sessionReason: session.sessionReason,
         loginEvidence: session.loginEvidence,
+        weakLoginEvidence: session.weakLoginEvidence,
+        strongLoginEvidence: session.strongLoginEvidence,
         accountEvidence: session.accountEvidence,
+        strongAccountEvidence: session.strongAccountEvidence,
+        contentEvidence: session.contentEvidence,
+        evidenceDecision: session.evidenceDecision,
         visibleCity,
         searchKeyword: searchInput ? clean(searchInput.value) : '',
         searchKeywordVisible: !!searchInput,

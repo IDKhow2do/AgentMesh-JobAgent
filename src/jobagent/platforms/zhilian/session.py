@@ -12,6 +12,7 @@ from jobagent.drivers.boss import create_driver
 from .collect import build_zhilian_search_url, normalize_zhilian_keyword
 from .constants import ZHILIAN_BROWSER_JS_USER_PROMPT, ZHILIAN_LOGIN_URL, ZHILIAN_LOGIN_USER_PROMPT
 from .selectors import build_zhilian_session_probe_script
+from .session_evidence import classify_zhilian_session_evidence
 
 
 ZHILIAN_SESSION_SETTLE_TIMEOUT_SECONDS = 45
@@ -170,14 +171,7 @@ def _browser_js_permission_required(error: str) -> bool:
 
 
 def _session_state(data: dict[str, Any]) -> str:
-    state = str(data.get("sessionState") or "")
-    if state:
-        return state
-    if data.get("loginRequired"):
-        return "login_required"
-    if data.get("loggedIn"):
-        return "logged_in"
-    return "unknown"
+    return classify_zhilian_session_evidence(data) or "unknown"
 
 
 def _status_from_probe(
@@ -200,9 +194,16 @@ def _status_from_probe(
 def _probe_evidence(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "readyState": data.get("readyState", ""),
+        "navigationElapsedMs": data.get("navigationElapsedMs"),
+        "sessionEvidenceVersion": data.get("sessionEvidenceVersion", 0),
         "sessionState": _session_state(data),
+        "sessionReason": data.get("sessionReason", ""),
         "loginEvidence": list(data.get("loginEvidence") or []),
+        "weakLoginEvidence": list(data.get("weakLoginEvidence") or []),
+        "strongLoginEvidence": list(data.get("strongLoginEvidence") or []),
         "accountEvidence": list(data.get("accountEvidence") or []),
+        "strongAccountEvidence": list(data.get("strongAccountEvidence") or []),
         "contentEvidence": list(data.get("contentEvidence") or []),
+        "evidenceDecision": data.get("evidenceDecision") or {},
         "bodySnippet": data.get("bodySnippet", ""),
     }

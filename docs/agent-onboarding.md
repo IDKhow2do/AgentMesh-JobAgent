@@ -213,7 +213,7 @@ jobagent zhilian audit
 
 智联结果页中的 `kw...` URL 片段属于平台内部状态，不代表云端签发的职位词。不要解析、回填或向用户展示它作为搜索条件；发生智联关键词错误时，报告 CLI 的可读 `query` 与机器错误，并遵循 `next_suggested`。没有用户明确批准，不得跳过智联。
 
-智联页面可能在导航完成前长时间保持 `loading`，也可能短暂同时出现登录入口和账号控件。`zhilian_session_state_unknown` 或 `zhilian_page_state_unknown` 不是未登录：不要要求用户重复登录，按 `retryable`、`request_preserved` 和精确 `next_suggested` 恢复。只有 `zhilian_login_required` 才请求用户介入。不要猜测或硬编码 `jl` 城市码；CLI 会根据页面标题、可见城市和岗位卡片的多源一致证据动态验证，证据不足则不返回候选且不收费。
+智联页面可能在导航完成前长时间保持 `loading`，也可能在已登录首页保留通用“登录/注册”入口。该入口是弱证据，不得压过个人中心导航与简历管理、投递活动等独立强账户证据；可见凭据表单或登录验证界面才是强未登录证据。强登录与强账户证据同时存在时仍保持 `unknown` 并安全停止。`zhilian_session_state_unknown` 或 `zhilian_page_state_unknown` 不是未登录：不要要求用户重复登录，按 `retryable`、`request_preserved` 和精确 `next_suggested` 恢复。只有 `zhilian_login_required` 才请求用户介入。不要猜测或硬编码 `jl` 城市码；CLI 会根据页面标题、可见城市和岗位卡片的多源一致证据动态验证，证据不足则不返回候选且不收费。
 
 ### 前程无忧 / 51Job
 
