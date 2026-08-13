@@ -10,6 +10,7 @@ from jobagent.infra.state import current_round_path, rounds_dir, save_json, load
 DEFAULT_PLATFORM_ORDER = ["boss", "liepin", "zhilian", "51job"]
 TERMINAL_PLATFORM_STATUSES = {"completed", "skipped_this_round"}
 ROUND_SCHEMA_VERSION = 3
+PLATFORM_LOGIN_VERIFICATION_TTL_SECONDS = 30 * 60
 DELIVERY_POLICY = {
     "selected": "user_confirmed_after_preview",
     "review": "explicit_override_only",
@@ -236,6 +237,54 @@ def mark_browser_session(session_id: str = "local-cdp-19222") -> dict[str, Any]:
     return state
 
 
+def recent_platform_login_verification(
+    platform: str,
+    *,
+    max_age_seconds: int = PLATFORM_LOGIN_VERIFICATION_TTL_SECONDS,
+) -> dict[str, Any] | None:
+    """Return a short-lived login receipt bound to this round and browser session."""
+
+    try:
+        state = ensure_current_round()
+    except RoundOrderError:
+        return None
+    item = (state.get("platforms") or {}).get(platform) or {}
+    login = ((item.get("evidence") or {}).get("login") or {})
+    if not isinstance(login, dict) or not login.get("logged_in"):
+        return None
+    if int(login.get("schema_version") or 0) != 1:
+        return None
+    if str(login.get("platform") or "") != platform:
+        return None
+    if str(login.get("round_id") or "") != str(state.get("round_id") or ""):
+        return None
+    if str(login.get("browser_session_id") or "") != str(
+        state.get("browser_session_id") or ""
+    ):
+        return None
+    try:
+        verified_at = datetime.fromisoformat(
+            str(login.get("verified_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    if verified_at.tzinfo is None:
+        verified_at = verified_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - verified_at).total_seconds()
+    if age_seconds < -300 or age_seconds > max(0, int(max_age_seconds)):
+        return None
+
+    receipt = dict(login)
+    receipt.update(
+        {
+            "valid": True,
+            "source": "recent_login_check",
+            "age_seconds": max(0, round(age_seconds, 3)),
+        }
+    )
+    return receipt
+
+
 def _default_next_command(platform: str, status: str) -> str:
     if status in {"pending", "active", "blocked"}:
         return f"jobagent {platform} login --check"
@@ -288,6 +337,7 @@ def round_status() -> dict[str, Any]:
                 "stages": list(ROUND_EXECUTION_POLICY["stages"]),
             },
             "platform_order": list(DEFAULT_PLATFORM_ORDER),
+            "browser_session_id": None,
             "platforms": {},
             "current_platform": None,
             "remaining_platforms": [],
@@ -330,6 +380,7 @@ def round_status() -> dict[str, Any]:
             "stages": list(ROUND_EXECUTION_POLICY["stages"]),
         },
         "platform_order": order,
+        "browser_session_id": state.get("browser_session_id"),
         "intent": state.get("intent"),
         "platforms": platforms,
         "current_platform": current_platform,

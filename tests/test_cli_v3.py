@@ -713,6 +713,34 @@ def test_successful_login_check_preserves_reviewed_progress(monkeypatch):
     )
 
 
+def test_successful_login_check_persists_bound_verification_receipt(monkeypatch):
+    captured: list[dict] = []
+    workflows = iter(
+        [
+            {
+                "round_id": "round-1",
+                "browser_session_id": "local-cdp-19222",
+                "platforms": {"zhilian": {"status": "pending"}},
+            },
+            {"next_suggested": "jobagent zhilian discover"},
+        ]
+    )
+    monkeypatch.setattr("jobagent.infra.rounds.round_status", lambda: next(workflows))
+    monkeypatch.setattr(
+        "jobagent.infra.rounds.set_platform_status",
+        lambda _platform, _status, **kwargs: captured.append(kwargs["evidence"]),
+    )
+
+    _with_login_workflow("zhilian", {"ok": True, "logged_in": True})
+
+    login = captured[0]["login"]
+    assert login["schema_version"] == 1
+    assert login["platform"] == "zhilian"
+    assert login["round_id"] == "round-1"
+    assert login["browser_session_id"] == "local-cdp-19222"
+    assert datetime.fromisoformat(login["verified_at"]).tzinfo is not None
+
+
 def test_login_reauthentication_restores_reviewed_progress(monkeypatch):
     statuses: list[tuple[str, str, dict, str]] = []
     workflow = {
@@ -1288,6 +1316,17 @@ def test_discover_renews_expired_start_plan_with_same_request_and_no_browser_gue
         "ensure_current_round",
         lambda: {"round_id": "round-1", "intent": intent},
     )
+    login_verification = {
+        "valid": True,
+        "platform": "zhilian",
+        "round_id": "round-1",
+        "browser_session_id": "local-cdp-19222",
+    }
+    monkeypatch.setattr(
+        application.rounds,
+        "recent_platform_login_verification",
+        lambda platform: login_verification if platform == "zhilian" else None,
+    )
     monkeypatch.setattr(
         "jobagent.infra.account_state.current_account_ref",
         lambda: "acct_account_a",
@@ -1314,7 +1353,10 @@ def test_discover_renews_expired_start_plan_with_same_request_and_no_browser_gue
     monkeypatch.setattr(
         application,
         "collect_from_search_plan",
-        lambda value, **_kwargs: calls["collect"].append(value) or candidates,
+        lambda value, **kwargs: calls["collect"].append(
+            {"plan": value, "kwargs": kwargs}
+        )
+        or candidates,
     )
     monkeypatch.setattr(
         application, "active_command", lambda *_args, **_kwargs: nullcontext()
@@ -1344,10 +1386,11 @@ def test_discover_renews_expired_start_plan_with_same_request_and_no_browser_gue
         }
     ]
     assert len(calls["collect"]) == 1
-    assert calls["collect"][0]["discover_id"] == discover_id
-    assert calls["collect"][0]["request_id"] == request_id
-    assert calls["collect"][0]["plan_revision"] == 2
-    assert "signature" not in calls["collect"][0]
+    assert calls["collect"][0]["plan"]["discover_id"] == discover_id
+    assert calls["collect"][0]["plan"]["request_id"] == request_id
+    assert calls["collect"][0]["plan"]["plan_revision"] == 2
+    assert "signature" not in calls["collect"][0]["plan"]
+    assert calls["collect"][0]["kwargs"]["login_verification"] == login_verification
     assert calls["decision"][0]["request_id"] == request_id
     assert calls["decision"][0]["plan"]["plan_revision"] == 2
 

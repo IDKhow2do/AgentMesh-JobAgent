@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,73 @@ def test_round_state_is_created_and_platform_skip_is_round_local(monkeypatch, tm
     assert "enabled" not in updated["platforms"]["liepin"]
     assert json.loads(current_path.read_text(encoding="utf-8"))["round_id"] == "round-1"
     assert (rounds_path / "round-1.json").exists()
+
+
+def test_recent_login_verification_is_bound_to_round_platform_and_browser_session(
+    monkeypatch,
+    tmp_path,
+):
+    current_path = tmp_path / "current_round.json"
+    rounds_path = tmp_path / "rounds"
+    monkeypatch.setattr(rounds, "current_round_path", lambda: current_path)
+    monkeypatch.setattr(rounds, "rounds_dir", lambda: rounds_path)
+    monkeypatch.setattr(rounds, "new_round_id", lambda: "round-1")
+
+    state = rounds.start_new_round()
+    verified_at = datetime.now(timezone.utc).isoformat()
+    rounds.set_platform_status(
+        "zhilian",
+        "login_verified",
+        evidence={
+            "login": {
+                "schema_version": 1,
+                "logged_in": True,
+                "platform": "zhilian",
+                "round_id": "round-1",
+                "browser_session_id": "local-cdp-19222",
+                "verified_at": verified_at,
+            }
+        },
+    )
+
+    receipt = rounds.recent_platform_login_verification("zhilian")
+
+    assert receipt is not None
+    assert receipt["round_id"] == state["round_id"]
+    assert receipt["browser_session_id"] == "local-cdp-19222"
+    assert receipt["age_seconds"] >= 0
+
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    current["browser_session_id"] = "local-cdp-19333"
+    current_path.write_text(json.dumps(current), encoding="utf-8")
+    assert rounds.recent_platform_login_verification("zhilian") is None
+
+
+def test_login_verification_expires_instead_of_becoming_permanent(monkeypatch, tmp_path):
+    current_path = tmp_path / "current_round.json"
+    rounds_path = tmp_path / "rounds"
+    monkeypatch.setattr(rounds, "current_round_path", lambda: current_path)
+    monkeypatch.setattr(rounds, "rounds_dir", lambda: rounds_path)
+    monkeypatch.setattr(rounds, "new_round_id", lambda: "round-1")
+
+    rounds.start_new_round()
+    stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    rounds.set_platform_status(
+        "zhilian",
+        "login_verified",
+        evidence={
+            "login": {
+                "schema_version": 1,
+                "logged_in": True,
+                "platform": "zhilian",
+                "round_id": "round-1",
+                "browser_session_id": "local-cdp-19222",
+                "verified_at": stale,
+            }
+        },
+    )
+
+    assert rounds.recent_platform_login_verification("zhilian") is None
 
 
 def test_round_status_and_platform_guard_do_not_create_a_round(monkeypatch, tmp_path):
@@ -304,6 +372,48 @@ def test_platform_session_lock_cleans_stale_lock(monkeypatch, tmp_path):
 
     assert not lock_path.exists()
     assert statuses == [("zhilian", "active")]
+
+
+def test_platform_session_lock_preserves_login_receipt_when_collection_fails(
+    monkeypatch,
+    tmp_path,
+):
+    lock_path = tmp_path / "browser-session.lock"
+    statuses: list[tuple[str, str, dict | None]] = []
+    login = {
+        "schema_version": 1,
+        "logged_in": True,
+        "platform": "zhilian",
+        "round_id": "round-1",
+        "browser_session_id": "local-cdp-19222",
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+    }
+    monkeypatch.setattr(platform_lock, "browser_session_lock_path", lambda: lock_path)
+    monkeypatch.setattr(
+        platform_lock,
+        "ensure_current_round",
+        lambda: {
+            "round_id": "round-1",
+            "platforms": {"zhilian": {"evidence": {"login": login}}},
+        },
+    )
+    monkeypatch.setattr(
+        platform_lock,
+        "set_platform_status",
+        lambda platform, status, **kwargs: statuses.append(
+            (platform, status, kwargs.get("evidence"))
+        ),
+    )
+
+    with pytest.raises(RuntimeError):
+        with platform_lock.PlatformSessionLock("zhilian", "jobagent zhilian discover"):
+            raise RuntimeError("zhilian_job_cards_not_found")
+
+    assert statuses[-1] == (
+        "zhilian",
+        "blocked",
+        {"login": login, "error": "zhilian_job_cards_not_found"},
+    )
 
 
 def test_dead_activity_lock_is_reclaimed(monkeypatch, tmp_path):

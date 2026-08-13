@@ -99,6 +99,18 @@ class ZhilianCollectResult:
                     "no_charge": True,
                 }
             )
+        elif self.error == "zhilian_job_cards_not_found":
+            payload.update(
+                {
+                    "message": (
+                        "Zhilian search results finished loading, but the current job-card "
+                        "structure could not be collected; no credits were charged."
+                    ),
+                    "retryable": True,
+                    "no_charge": True,
+                    "diagnostics": _safe_selector_diagnostics(self.snapshot),
+                }
+            )
         elif self.error in {
             "zhilian_keyword_input_not_found",
             "zhilian_keyword_submit_not_found",
@@ -118,9 +130,20 @@ class ZhilianCollectResult:
 class ZhilianReadOnlyCollector:
     """Collect Zhilian search cards without applying or sending messages."""
 
-    def __init__(self, driver: Any | None = None, *, city_cache_path: Path | None = None):
+    def __init__(
+        self,
+        driver: Any | None = None,
+        *,
+        city_cache_path: Path | None = None,
+        login_verification: dict[str, Any] | None = None,
+    ):
         self.driver = driver or create_driver(platform="zhilian")
         self.city_resolver = ZhilianCityResolver(city_cache_path)
+        self.login_verification = (
+            dict(login_verification)
+            if _valid_login_verification(login_verification, persisted_only=True)
+            else None
+        )
 
     def collect(
         self,
@@ -180,7 +203,15 @@ class ZhilianReadOnlyCollector:
                     error=str(open_result.get("error", "open_url_failed")),
                 )
             keyword_search = self._submit_keyword(search_query, wait_seconds=wait_seconds)
-            if keyword_search.get("loginRequired"):
+            if classify_zhilian_session_evidence(keyword_search) == "logged_in":
+                self.login_verification = {
+                    "valid": True,
+                    "source": "current_collection_homepage",
+                    "platform": "zhilian",
+                    "session_scope": "collector_instance",
+                    "age_seconds": 0,
+                }
+            if _login_required(keyword_search, self.login_verification):
                 return ZhilianCollectResult(
                     query=search_query,
                     city=city,
@@ -222,7 +253,7 @@ class ZhilianReadOnlyCollector:
             city_filter: dict[str, Any] = {}
             if city:
                 city_filter = self._apply_city_filter(city, wait_seconds=wait_seconds)
-                if city_filter.get("loginRequired"):
+                if _login_required(city_filter, self.login_verification):
                     return ZhilianCollectResult(
                         query=search_query,
                         city=city,
@@ -282,7 +313,10 @@ class ZhilianReadOnlyCollector:
             if pagination:
                 snapshot["pagination"] = pagination
             snapshots.append(snapshot)
-            failure = _snapshot_failure(snapshot)
+            failure = _snapshot_failure(
+                snapshot,
+                login_verification=self.login_verification,
+            )
             if failure:
                 return ZhilianCollectResult(
                     query=search_query,
@@ -325,7 +359,7 @@ class ZhilianReadOnlyCollector:
                 )
                 if not city_resolution["verified"] and resolved_city_code:
                     recovery_filter = self._apply_city_filter(city, wait_seconds=wait_seconds)
-                    if recovery_filter.get("loginRequired"):
+                    if _login_required(recovery_filter, self.login_verification):
                         return ZhilianCollectResult(
                             query=search_query,
                             city=city,
@@ -353,7 +387,10 @@ class ZhilianReadOnlyCollector:
                         recovered_snapshot["page"] = current_page
                         recovered_snapshot["requestedUrl"] = url
                         recovered_snapshot["cityFilter"] = recovery_filter
-                        recovered_failure = _snapshot_failure(recovered_snapshot)
+                        recovered_failure = _snapshot_failure(
+                            recovered_snapshot,
+                            login_verification=self.login_verification,
+                        )
                         if not recovered_failure:
                             snapshot = recovered_snapshot
                             snapshots[-1] = snapshot
@@ -547,9 +584,29 @@ class ZhilianReadOnlyCollector:
             attempts += 1
             result = self.driver._exec_js(script)
             last = _unwrap_js_result_with_error(result, parse_error=parse_error)
-            if not _page_state_pending(last):
-                return last
+            if not _page_state_pending(
+                last,
+                login_verification=self.login_verification,
+            ):
+                return _with_session_continuity(last, self.login_verification)
             if time.monotonic() >= deadline:
+                if _search_page_ready_with_continuity(
+                    last,
+                    self.login_verification,
+                ) and _zero_unexplained_candidates(last):
+                    return _with_session_continuity(
+                        {
+                            **last,
+                            "ok": False,
+                            "error": "zhilian_job_cards_not_found",
+                            "loginRequired": False,
+                            "sessionState": "search_ready",
+                            "retryable": True,
+                            "settleAttempts": attempts,
+                            "settleTimeoutSeconds": timeout,
+                        },
+                        self.login_verification,
+                    )
                 return {
                     **last,
                     "ok": False,
@@ -643,9 +700,32 @@ def _job_dedupe_key(job: Job, raw: dict[str, Any]) -> str:
     return f"text:{job.name}|{job.company}|{job.city}"
 
 
-def _snapshot_failure(snapshot: dict[str, Any]) -> str:
+def _snapshot_failure(
+    snapshot: dict[str, Any],
+    *,
+    login_verification: dict[str, Any] | None = None,
+) -> str:
     if snapshot.get("platformError"):
         return str(snapshot["platformError"])
+    if _strong_login_evidence(snapshot):
+        session_state = classify_zhilian_session_evidence(snapshot)
+        return (
+            "zhilian_page_state_unknown"
+            if session_state == "unknown"
+            else "zhilian_login_required"
+        )
+    if _search_page_ready_with_continuity(snapshot, login_verification):
+        if _zero_unexplained_candidates(snapshot):
+            return "zhilian_job_cards_not_found"
+        if snapshot.get("ok") is False:
+            error = str(snapshot.get("error") or "")
+            if error not in {
+                "zhilian_page_state_pending",
+                "zhilian_page_state_unknown",
+                "zhilian_login_required",
+            }:
+                return error or "zhilian_snapshot_failed"
+        return ""
     session_state = classify_zhilian_session_evidence(snapshot)
     if session_state in {"loading", "unknown"}:
         return "zhilian_page_state_unknown"
@@ -674,7 +754,15 @@ def _unwrap_js_result_with_error(result: Any, *, parse_error: str) -> dict[str, 
     return result if isinstance(result, dict) else {"ok": False, "error": "zhilian_js_empty_result"}
 
 
-def _page_state_pending(result: dict[str, Any]) -> bool:
+def _page_state_pending(
+    result: dict[str, Any],
+    *,
+    login_verification: dict[str, Any] | None = None,
+) -> bool:
+    if _strong_login_evidence(result):
+        return False
+    if _search_page_ready_with_continuity(result, login_verification):
+        return _zero_unexplained_candidates(result)
     state = str(result.get("sessionState") or "")
     ready_state = str(result.get("readyState") or "")
     if state in {"loading", "unknown"}:
@@ -682,6 +770,125 @@ def _page_state_pending(result: dict[str, Any]) -> bool:
     if result.get("error") == "zhilian_page_state_pending":
         return True
     return bool(ready_state and ready_state != "complete")
+
+
+def _valid_login_verification(
+    value: dict[str, Any] | None,
+    *,
+    persisted_only: bool = False,
+) -> bool:
+    if not isinstance(value, dict) or value.get("valid") is not True:
+        return False
+    source = value.get("source")
+    if source not in {"recent_login_check", "current_collection_homepage"}:
+        return False
+    if value.get("platform") != "zhilian":
+        return False
+    if source == "recent_login_check":
+        if not value.get("round_id") or not value.get("browser_session_id"):
+            return False
+    elif persisted_only or value.get("session_scope") != "collector_instance":
+        return False
+    try:
+        age_seconds = float(value.get("age_seconds"))
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age_seconds <= 30 * 60
+
+
+def _strong_login_evidence(result: dict[str, Any]) -> bool:
+    values = result.get("strongLoginEvidence")
+    return bool(isinstance(values, list) and any(values))
+
+
+def _search_page_ready_with_continuity(
+    result: dict[str, Any],
+    login_verification: dict[str, Any] | None,
+) -> bool:
+    if not _valid_login_verification(login_verification):
+        return False
+    if _strong_login_evidence(result):
+        return False
+    if str(result.get("readyState") or "") != "complete":
+        return False
+    url = str(result.get("url") or "").casefold()
+    title = str(result.get("title") or "")
+    if "passport" in url or "/login" in url or "登录" in title:
+        return False
+    evidence = {
+        str(item)
+        for item in (result.get("searchPageEvidence") or [])
+        if item
+    }
+    return "search_route" in evidence and bool(
+        evidence
+        & {"search_title", "search_input", "job_surface", "job_action", "no_results"}
+    )
+
+
+def _zero_unexplained_candidates(result: dict[str, Any]) -> bool:
+    if "candidateCount" not in result:
+        return False
+    try:
+        count = int(result.get("candidateCount") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return count == 0 and not bool(result.get("noResults"))
+
+
+def _with_session_continuity(
+    result: dict[str, Any],
+    login_verification: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not _search_page_ready_with_continuity(result, login_verification):
+        return result
+    receipt = login_verification or {}
+    return {
+        **result,
+        "loginRequired": False,
+        "sessionContinuity": {
+            "used": True,
+            "source": receipt.get("source"),
+            "ageSeconds": receipt.get("age_seconds"),
+        },
+    }
+
+
+def _login_required(
+    result: dict[str, Any],
+    login_verification: dict[str, Any] | None,
+) -> bool:
+    if _strong_login_evidence(result):
+        return True
+    return bool(
+        result.get("loginRequired")
+        and not _search_page_ready_with_continuity(result, login_verification)
+    )
+
+
+def _safe_selector_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
+    current = snapshot
+    pages = snapshot.get("pages") if isinstance(snapshot, dict) else None
+    if isinstance(pages, list) and pages and isinstance(pages[-1], dict):
+        current = pages[-1]
+    mapping = {
+        "selectorVersion": "selector_version",
+        "readyState": "ready_state",
+        "sessionState": "session_state",
+        "sessionReason": "session_reason",
+        "candidateCount": "candidate_count",
+        "jobLinkCount": "job_link_count",
+        "jobSurfaceCount": "job_surface_count",
+        "jobActionCount": "job_action_count",
+        "noResults": "no_results",
+        "navigationElapsedMs": "navigation_elapsed_ms",
+        "searchPageEvidence": "search_page_evidence",
+    }
+    return {
+        output: current[source]
+        for source, output in mapping.items()
+        if source in current
+    }
 
 
 def _city_filter_applied(result: dict[str, Any]) -> bool:

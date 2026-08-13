@@ -19,6 +19,17 @@ def _probe(**overrides):
     return payload
 
 
+def _recent_login_verification():
+    return {
+        "valid": True,
+        "source": "recent_login_check",
+        "platform": "zhilian",
+        "round_id": "round-1",
+        "browser_session_id": "local-cdp-19222",
+        "age_seconds": 12,
+    }
+
+
 def test_strong_account_evidence_overrides_a_persistent_weak_login_control():
     payload = _probe(
         loginRequired=True,
@@ -48,6 +59,32 @@ def test_strong_login_evidence_without_authenticated_account_requires_login():
 
     assert classify_zhilian_session_evidence(payload) == "login_required"
     assert _snapshot_failure(payload) == "zhilian_login_required"
+
+
+def test_recent_login_verification_can_bridge_a_ready_search_page_without_account_ui():
+    payload = _probe(
+        url="https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+        title="深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+        weakLoginEvidence=["visible_login_control"],
+        searchPageEvidence=["search_route", "search_title"],
+        candidateCount=1,
+    )
+
+    assert _snapshot_failure(payload, login_verification=_recent_login_verification()) == ""
+
+
+def test_recent_login_verification_never_overrides_strong_login_evidence():
+    payload = _probe(
+        url="https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+        title="深圳热门职位招聘 - 智联招聘",
+        strongLoginEvidence=["visible_credential_form"],
+        searchPageEvidence=["search_route", "search_title"],
+    )
+
+    assert (
+        _snapshot_failure(payload, login_verification=_recent_login_verification())
+        == "zhilian_login_required"
+    )
 
 
 def test_authentication_route_is_authoritative_even_before_document_complete():

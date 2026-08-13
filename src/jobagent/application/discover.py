@@ -464,6 +464,7 @@ def run_discover(
         query_count=len(verified_plan.get("queries") or []),
     )
     emit_stage("browser_collection_started", platform=platform)
+    login_verification = rounds.recent_platform_login_verification(platform)
     try:
         with progress_heartbeat("browser_collection_in_progress", platform=platform):
             with active_command(f"jobagent {platform} discover"):
@@ -474,6 +475,7 @@ def run_discover(
                         verified_plan,
                         wait_seconds=wait_seconds,
                         page_delay=page_delay,
+                        login_verification=login_verification,
                     )
     except CollectionError as exc:
         details = dict(exc.details or {})
@@ -520,6 +522,7 @@ def run_discover(
 def _collection_error_retryable(code: str) -> bool:
     return code in {
         "zhilian_page_state_unknown",
+        "zhilian_job_cards_not_found",
         "page_state_unknown",
         "no_candidates",
     }

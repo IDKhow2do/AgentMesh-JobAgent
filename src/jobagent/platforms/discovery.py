@@ -140,6 +140,7 @@ def _collect_web_platform(
     limit: int,
     driver,
     wait_seconds: int,
+    login_verification: dict[str, Any] | None = None,
 ) -> list[Job]:
     if platform == "liepin":
         from jobagent.platforms.liepin.collect import LiepinReadOnlyCollector
@@ -148,7 +149,10 @@ def _collect_web_platform(
     elif platform == "zhilian":
         from jobagent.platforms.zhilian.collect import ZhilianReadOnlyCollector
 
-        collector = ZhilianReadOnlyCollector(driver=driver)
+        collector = ZhilianReadOnlyCollector(
+            driver=driver,
+            login_verification=login_verification,
+        )
     elif platform == "51job":
         from jobagent.platforms.job51.collect import Job51ReadOnlyCollector
 
@@ -181,6 +185,7 @@ def collect_from_search_plan(
     wait_seconds: int = 6,
     page_delay: float = 2.0,
     driver=None,
+    login_verification: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from jobagent.drivers.boss import create_driver
     from jobagent.infra.exceptions import (
@@ -223,6 +228,7 @@ def collect_from_search_plan(
                         remaining,
                         driver,
                         wait_seconds,
+                        login_verification,
                     )
                 for job in jobs:
                     candidate = job_to_candidate(platform, job)
