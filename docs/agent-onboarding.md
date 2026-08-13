@@ -13,7 +13,7 @@ This is the public instruction source for an Agent operating Job Agent on behalf
 7. Do not stop after one platform. Read the `workflow` object after every command and continue while `workflow.continue_required=true`.
 8. Report the overall round complete only when `workflow.workflow_complete=true`. Skipping a platform requires the user's explicit approval and `jobagent round skip --platform <platform> --confirm-skip`.
 9. Create a round only with `jobagent round start`. `doctor env`, `round status` and platform commands must never be treated as implicit authorization to create another round.
-10. When a cloud command returns `retryable=true` and `request_preserved=true`, immediately execute its `next_suggested` command. Do not ask the user to click retry, re-login or recollect jobs; the same signed Discover request is resumed without another charge.
+10. When a cloud command returns `retryable=true` and `request_preserved=true`, immediately execute its exact `next_suggested` command. Do not ask the user to click retry, re-login or recollect jobs. A failed start reuses its persisted `request_id` with `billing_status=not_charged`; a failed decision reuses its `discover_id` and candidates without an additional charge.
 11. When output returns `error=interaction_required`, use the host's native prompt card only when that interface is callable in the current surface and mode. Codex must use the ready-to-call `host_presentations.adapters.codex.arguments` when its `request_user_input` tool is callable, then map the returned label with `answer_mapping`; map its automatically added free-text Other answer using `free_text_other`. Other hosts map the declared fields and options exactly. If the interface is unavailable in the current mode, show `interaction.fallback_text` unchanged; do not claim the host has no card capability. Continue every answer through `jobagent interaction respond` using the exact interaction ID. Do not create a round until the CLI accepts the required answer.
 12. When review returns `event=delivery_preview` with `error=interaction_required`, show every item in `delivery_preview.items`, then stop. Render the delivery-confirmation card or exact fallback and wait for the user to choose `confirm_all`, `exclude_jobs`, or `cancel_delivery`. Never select the recommended option automatically.
 13. Continue the user's answer through the exact interaction ID. For exclusions, pass each displayed job number as `--exclude-index`, show the regenerated complete list, and stop for final confirmation again. Run send only after the CLI returns `event=delivery_authorized` with both `--preview-id` and `--authorization-id` in its exact command.
@@ -61,7 +61,9 @@ Do not collect logins as a separate setup phase. At round start, log in to Boss 
 
 One completed platform Discover accepts at most 100 candidate jobs and costs a fixed 10 credits. Cloud resume analysis costs 5 credits. The signed cloud response is authoritative for charges and refunds: pre-decision browser failures are not charged, cloud-decision failures are refunded, and retrying the same task does not charge twice. Registration, API Key creation, and the open-source client are free; new accounts start with zero cloud credits. The optional AgentMesh360 monthly pass costs CNY 29, lasts 30 days, and includes 1,000 shared credits without automatic renewal. Previously issued signup-trial credits remain usable until their original expiry.
 
-Discover automatically retries bounded transient TLS, connection and gateway failures. After retries are exhausted, `request_preserved=true` means the signed plan and collected candidate set are still available locally. Run the returned `next_suggested` command immediately; it resumes cloud decision before any new browser collection. Do not replace this handoff with repeated health checks or a request for user confirmation.
+Discover automatically retries bounded transient TLS, connection and gateway failures. Stable codes distinguish `tls_connection_eof`, `network_timeout`, `cloud_gateway_unavailable` and the non-retryable `tls_certificate_verification_failed`. After retries are exhausted, run the exact `next_suggested` command immediately. At start, `request_preserved=true` means the same persisted `request_id` will be used and no charge has occurred. At decision, it means the same `discover_id` and collected candidates will be used and a retry cannot add a duplicate charge. Do not replace this handoff with repeated health checks or user confirmation.
+
+When `/v1/me` is temporarily unreachable, `round status` and a user-confirmed `round skip` may continue from key-bound local state. Treat `offline=true, stale=true` as an explicit freshness marker, not as a new round or a successful cloud check. Report a skip only after that command returns `ok=true`, then follow its local `workflow.next_suggested`. On `offline_account_proof_required` or `offline_account_proof_mismatch`, stop and follow the returned recovery; never edit account-state files or delete Job Agent state or its Chrome profile.
 
 ## 1. Install
 
@@ -210,6 +212,8 @@ jobagent zhilian audit
 ```
 
 智联结果页中的 `kw...` URL 片段属于平台内部状态，不代表云端签发的职位词。不要解析、回填或向用户展示它作为搜索条件；发生智联关键词错误时，报告 CLI 的可读 `query` 与机器错误，并遵循 `next_suggested`。没有用户明确批准，不得跳过智联。
+
+智联页面可能在导航完成前长时间保持 `loading`，也可能短暂同时出现登录入口和账号控件。`zhilian_session_state_unknown` 或 `zhilian_page_state_unknown` 不是未登录：不要要求用户重复登录，按 `retryable`、`request_preserved` 和精确 `next_suggested` 恢复。只有 `zhilian_login_required` 才请求用户介入。不要猜测或硬编码 `jl` 城市码；CLI 会根据页面标题、可见城市和岗位卡片的多源一致证据动态验证，证据不足则不返回候选且不收费。
 
 ### 前程无忧 / 51Job
 

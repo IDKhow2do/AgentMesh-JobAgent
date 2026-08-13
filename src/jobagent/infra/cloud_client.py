@@ -23,6 +23,16 @@ _NON_RETRYABLE_502_CODES = frozenset(
     }
 )
 _RETRY_DELAYS_SECONDS = (1.0, 3.0)
+_TRANSIENT_TRANSPORT_CODES = frozenset(
+    {
+        "cloud_gateway_unavailable",
+        "network_connection_error",
+        "network_connection_interrupted",
+        "network_timeout",
+        "tls_connection_eof",
+        "tls_connection_error",
+    }
+)
 
 
 class CloudError(Exception):
@@ -48,6 +58,82 @@ class NotConfiguredError(CloudError):
     pass
 
 
+def is_transient_transport_error(error: CloudError) -> bool:
+    """Return whether a local control command may use verified cached state."""
+
+    return bool(error.retryable and error.code in _TRANSIENT_TRANSPORT_CODES)
+
+
+def _network_diagnostic(
+    *,
+    operation: str,
+    failure_type: str,
+    attempts: int,
+    started_at: float,
+    request_id: str | None = None,
+    status: int | None = None,
+) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "service": "agentmesh_cloud",
+        "operation": operation,
+        "failure_type": failure_type,
+        "attempts": attempts,
+        "elapsed_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+    }
+    if request_id:
+        diagnostic["request_id"] = request_id
+    if status is not None:
+        diagnostic["http_status"] = status
+    return diagnostic
+
+
+def _transport_failure(error: BaseException) -> tuple[str, str, bool, str]:
+    """Map transport exceptions to stable, non-secret client error contracts."""
+
+    normalized = str(error).upper()
+    if isinstance(error, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in normalized:
+        return (
+            "tls_certificate_verification_failed",
+            "tls_certificate",
+            False,
+            "TLS certificate verification failed.",
+        )
+    if isinstance(error, ssl.SSLEOFError) or "UNEXPECTED_EOF_WHILE_READING" in normalized:
+        return (
+            "tls_connection_eof",
+            "tls_eof",
+            True,
+            "TLS connection ended unexpectedly while reading the cloud response.",
+        )
+    if isinstance(error, TimeoutError) or "TIMED OUT" in normalized:
+        return (
+            "network_timeout",
+            "timeout",
+            True,
+            "The cloud request timed out.",
+        )
+    if isinstance(error, ssl.SSLError):
+        return (
+            "tls_connection_error",
+            "tls",
+            True,
+            "The TLS connection to AgentMesh cloud failed.",
+        )
+    if isinstance(error, (ConnectionError, http.client.HTTPException)):
+        return (
+            "network_connection_interrupted",
+            "connection_interrupted",
+            True,
+            "The cloud connection was interrupted.",
+        )
+    return (
+        "network_connection_error",
+        "connection",
+        True,
+        "The AgentMesh cloud service could not be reached.",
+    )
+
+
 def _request(
     method: str,
     path: str,
@@ -57,6 +143,8 @@ def _request(
     api_key: str | None = None,
     timeout: int = 180,
     max_attempts: int = 1,
+    operation: str = "cloud_request",
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
@@ -73,6 +161,7 @@ def _request(
         headers["Authorization"] = f"Bearer {key}"
     encoded_body = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     max_attempts = max(1, max_attempts)
+    started_at = time.monotonic()
     for attempt in range(1, max_attempts + 1):
         request = urllib.request.Request(
             api_base_url() + path,
@@ -102,38 +191,74 @@ def _request(
             if retryable and attempt < max_attempts:
                 time.sleep(_RETRY_DELAYS_SECONDS[min(attempt - 1, len(_RETRY_DELAYS_SECONDS) - 1)])
                 continue
+            semantic_failure = bool(
+                exc.code == 502 and code in _NON_RETRYABLE_502_CODES
+            )
+            stable_code = (
+                str(code)
+                if semantic_failure
+                else "cloud_gateway_unavailable"
+                if exc.code in _TRANSIENT_HTTP_STATUSES
+                else code
+            )
+            details = {}
+            if exc.code in _TRANSIENT_HTTP_STATUSES:
+                details["network_diagnostic"] = _network_diagnostic(
+                    operation=operation,
+                    failure_type="gateway",
+                    attempts=attempt,
+                    started_at=started_at,
+                    request_id=request_id,
+                    status=exc.code,
+                )
             raise CloudError(
                 message,
                 status=exc.code,
-                code=code,
+                code=stable_code,
                 retryable=retryable,
                 attempts=attempt,
+                details=details,
             ) from exc
         except urllib.error.URLError as exc:
             reason = exc.reason
-            retryable = not isinstance(reason, ssl.SSLCertVerificationError)
+            code, failure_type, retryable, message = _transport_failure(reason)
             if retryable and attempt < max_attempts:
                 time.sleep(_RETRY_DELAYS_SECONDS[min(attempt - 1, len(_RETRY_DELAYS_SECONDS) - 1)])
                 continue
-            raise CloudError(
-                f"Network error: {reason}",
-                retryable=retryable,
-                attempts=attempt,
-            ) from exc
-        except (TimeoutError, ssl.SSLError, ConnectionError, http.client.HTTPException) as exc:
-            retryable = not isinstance(exc, ssl.SSLCertVerificationError)
-            if retryable and attempt < max_attempts:
-                time.sleep(_RETRY_DELAYS_SECONDS[min(attempt - 1, len(_RETRY_DELAYS_SECONDS) - 1)])
-                continue
-            message = (
-                f"Request timed out after {timeout}s"
-                if isinstance(exc, TimeoutError)
-                else f"Network error: {exc}"
-            )
             raise CloudError(
                 message,
+                code=code,
                 retryable=retryable,
                 attempts=attempt,
+                details={
+                    "network_diagnostic": _network_diagnostic(
+                        operation=operation,
+                        failure_type=failure_type,
+                        attempts=attempt,
+                        started_at=started_at,
+                        request_id=request_id,
+                    )
+                },
+            ) from exc
+        except (TimeoutError, ssl.SSLError, ConnectionError, http.client.HTTPException) as exc:
+            code, failure_type, retryable, message = _transport_failure(exc)
+            if retryable and attempt < max_attempts:
+                time.sleep(_RETRY_DELAYS_SECONDS[min(attempt - 1, len(_RETRY_DELAYS_SECONDS) - 1)])
+                continue
+            raise CloudError(
+                message,
+                code=code,
+                retryable=retryable,
+                attempts=attempt,
+                details={
+                    "network_diagnostic": _network_diagnostic(
+                        operation=operation,
+                        failure_type=failure_type,
+                        attempts=attempt,
+                        started_at=started_at,
+                        request_id=request_id,
+                    )
+                },
             ) from exc
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -145,11 +270,25 @@ def _request(
 
 
 def health() -> dict[str, Any]:
-    return _request("GET", "/v1/health", require_auth=False, timeout=15, max_attempts=2)
+    return _request(
+        "GET",
+        "/v1/health",
+        require_auth=False,
+        timeout=15,
+        max_attempts=2,
+        operation="cloud_health",
+    )
 
 
 def me(*, api_key: str | None = None) -> dict[str, Any]:
-    return _request("GET", "/v1/me", api_key=api_key, timeout=20, max_attempts=2)
+    return _request(
+        "GET",
+        "/v1/me",
+        api_key=api_key,
+        timeout=20,
+        max_attempts=2,
+        operation="account_verification",
+    )
 
 
 def resume_analyze(
@@ -162,7 +301,13 @@ def resume_analyze(
         body["file_name"] = file_name
     if hints:
         body["hints"] = hints
-    return _request("POST", "/v1/resume/analyze", body, timeout=180)
+    return _request(
+        "POST",
+        "/v1/resume/analyze",
+        body,
+        timeout=180,
+        operation="resume_analyze",
+    )
 
 
 def discovery_start(
@@ -185,7 +330,15 @@ def discovery_start(
     if round_intent and round_intent.get("status") == "confirmed":
         body["round_intent"] = round_intent
         body["intent_digest"] = digest_payload(round_intent)
-    return _request("POST", "/v1/discovery/start", body, timeout=60, max_attempts=3)
+    return _request(
+        "POST",
+        "/v1/discovery/start",
+        body,
+        timeout=60,
+        max_attempts=3,
+        operation="discovery_start",
+        request_id=request_id,
+    )
 
 
 def discovery_decide(
@@ -204,4 +357,6 @@ def discovery_decide(
         },
         timeout=600,
         max_attempts=3,
+        operation="discovery_decide",
+        request_id=discover_id,
     )

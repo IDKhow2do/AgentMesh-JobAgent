@@ -11,6 +11,11 @@ from jobagent.drivers.boss import create_driver
 
 from .collect import build_zhilian_search_url, normalize_zhilian_keyword
 from .constants import ZHILIAN_BROWSER_JS_USER_PROMPT, ZHILIAN_LOGIN_URL, ZHILIAN_LOGIN_USER_PROMPT
+from .selectors import build_zhilian_session_probe_script
+
+
+ZHILIAN_SESSION_SETTLE_TIMEOUT_SECONDS = 45
+ZHILIAN_SESSION_POLL_INTERVAL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,9 @@ class ZhilianSessionGuide:
                 error=str(open_result.get("error", "open_url_failed")),
                 evidence={"open_result": open_result},
             )
-        return self.inspect_current_page()
+        return self.inspect_current_page(
+            settle_timeout=max(ZHILIAN_SESSION_SETTLE_TIMEOUT_SECONDS, wait_seconds)
+        )
 
     def open_login(self, wait_seconds: int = 3) -> ZhilianSessionStatus:
         open_result = self.driver.open_url_in_new_tab(ZHILIAN_LOGIN_URL, wait_seconds=wait_seconds)
@@ -74,7 +81,7 @@ class ZhilianSessionGuide:
                 error=str(open_result.get("error", "open_url_failed")),
                 evidence={"open_result": open_result},
             )
-        return self.inspect_current_page()
+        return self.inspect_current_page(settle_timeout=max(0, wait_seconds))
 
     def wait_for_login(
         self,
@@ -92,7 +99,7 @@ class ZhilianSessionGuide:
         last = status
         while time.time() < deadline:
             time.sleep(max(1, poll_interval))
-            last = self.inspect_current_page()
+            last = self.inspect_current_page(settle_timeout=0)
             if last.logged_in:
                 return last
 
@@ -106,44 +113,45 @@ class ZhilianSessionGuide:
             evidence=last.evidence,
         )
 
-    def inspect_current_page(self) -> ZhilianSessionStatus:
-        js = """
-        (function(){
-          const href = location.href || '';
-          const title = document.title || '';
-          const bodyText = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
-          const snippet = bodyText.slice(0, 800);
-          const loginRequired = /passport|login/.test(href)
-            || /登录[/]注册|请登录|扫码登录|验证码登录|手机验证码|安全验证|滑块/.test(title + '\\n' + snippet);
-          return JSON.stringify({
-            ok: true,
-            url: href,
-            title,
-            loginRequired,
-            bodySnippet: snippet
-          });
-        })()
-        """
-        result = self.driver._exec_js(js)
-        data = _unwrap_js_result(result)
-        if not data.get("ok"):
-            error = str(data.get("error", "zhilian_session_inspect_failed"))
-            return ZhilianSessionStatus(
-                ok=False,
-                logged_in=False,
-                login_required=not _browser_js_permission_required(error),
-                error=error,
-                evidence=data,
-            )
+    def inspect_current_page(
+        self,
+        *,
+        settle_timeout: float = 0,
+        poll_interval: float = ZHILIAN_SESSION_POLL_INTERVAL_SECONDS,
+    ) -> ZhilianSessionStatus:
+        deadline = time.monotonic() + max(0.0, float(settle_timeout))
+        last: dict[str, Any] = {}
+        while True:
+            result = self.driver._exec_js(build_zhilian_session_probe_script())
+            data = _unwrap_js_result(result)
+            last = data
+            if not data.get("ok"):
+                error = str(data.get("error", "zhilian_session_inspect_failed"))
+                return ZhilianSessionStatus(
+                    ok=False,
+                    logged_in=False,
+                    login_required=False,
+                    error=error,
+                    evidence=data,
+                )
 
-        login_required = bool(data.get("loginRequired"))
+            state = _session_state(data)
+            if state == "logged_in":
+                return _status_from_probe(data, ok=True, logged_in=True, login_required=False)
+            if state == "login_required":
+                return _status_from_probe(data, ok=True, logged_in=False, login_required=True)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(0.05, float(poll_interval)))
+
         return ZhilianSessionStatus(
-            ok=True,
-            logged_in=not login_required,
-            login_required=login_required,
-            url=str(data.get("url", "")),
-            title=str(data.get("title", "")),
-            evidence={"bodySnippet": data.get("bodySnippet", "")},
+            ok=False,
+            logged_in=False,
+            login_required=False,
+            url=str(last.get("url", "")),
+            title=str(last.get("title", "")),
+            error="zhilian_session_state_unknown",
+            evidence=_probe_evidence(last),
         )
 
 
@@ -159,3 +167,42 @@ def _unwrap_js_result(result: Any) -> dict[str, Any]:
 
 def _browser_js_permission_required(error: str) -> bool:
     return "JavaScript through AppleScript is turned off" in error or "Allow JavaScript from Apple Events" in error
+
+
+def _session_state(data: dict[str, Any]) -> str:
+    state = str(data.get("sessionState") or "")
+    if state:
+        return state
+    if data.get("loginRequired"):
+        return "login_required"
+    if data.get("loggedIn"):
+        return "logged_in"
+    return "unknown"
+
+
+def _status_from_probe(
+    data: dict[str, Any],
+    *,
+    ok: bool,
+    logged_in: bool,
+    login_required: bool,
+) -> ZhilianSessionStatus:
+    return ZhilianSessionStatus(
+        ok=ok,
+        logged_in=logged_in,
+        login_required=login_required,
+        url=str(data.get("url", "")),
+        title=str(data.get("title", "")),
+        evidence=_probe_evidence(data),
+    )
+
+
+def _probe_evidence(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "readyState": data.get("readyState", ""),
+        "sessionState": _session_state(data),
+        "loginEvidence": list(data.get("loginEvidence") or []),
+        "accountEvidence": list(data.get("accountEvidence") or []),
+        "contentEvidence": list(data.get("contentEvidence") or []),
+        "bodySnippet": data.get("bodySnippet", ""),
+    }

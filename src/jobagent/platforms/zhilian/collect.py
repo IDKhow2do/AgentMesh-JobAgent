@@ -31,6 +31,8 @@ from .selectors import (
 # itself starts from the public entry page and uses visible form controls.
 _ZHILIAN_CITY_CODES = BUNDLED_CITY_CODES
 ZHILIAN_SEARCH_ENTRY_URL = "https://www.zhaopin.com/"
+ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS = 45
+ZHILIAN_PAGE_POLL_INTERVAL_SECONDS = 0.5
 
 
 def build_zhilian_search_url(
@@ -85,6 +87,17 @@ class ZhilianCollectResult:
             payload["next_suggested"] = "jobagent zhilian login"
         elif self.ok:
             payload["next_suggested"] = "jobagent zhilian rank --input <zhilian.raw.json> --output <zhilian.ranked.json>"
+        elif self.error == "zhilian_page_state_unknown":
+            payload.update(
+                {
+                    "message": (
+                        "Zhilian was still loading or showed conflicting session evidence; "
+                        "the session was not classified as logged out and no credits were charged."
+                    ),
+                    "retryable": True,
+                    "no_charge": True,
+                }
+            )
         elif self.error in {
             "zhilian_keyword_input_not_found",
             "zhilian_keyword_submit_not_found",
@@ -227,25 +240,6 @@ class ZhilianReadOnlyCollector:
                         ok=False,
                         error="zhilian_login_required",
                     )
-                if not _city_filter_applied(city_filter):
-                    return ZhilianCollectResult(
-                        query=search_query,
-                        city=city,
-                        url=str(city_filter.get("url") or open_result.get("url") or url),
-                        jobs=jobs,
-                        snapshot=_combined_snapshot(
-                            snapshots,
-                            {
-                                "error": "zhilian_city_filter_failed",
-                                "cityFilter": city_filter,
-                                "page": current_page,
-                            },
-                        ),
-                        page=start_page,
-                        pages=page_count,
-                        ok=False,
-                        error="zhilian_city_filter_failed",
-                    )
             pagination: dict[str, Any] = {}
             if current_page > 1:
                 pagination = self._select_page(current_page, wait_seconds=wait_seconds)
@@ -275,12 +269,15 @@ class ZhilianReadOnlyCollector:
                     )
 
             remaining = max(1, limit - len(jobs))
-            snapshot = self._extract_snapshot(limit=remaining)
+            snapshot = self._extract_snapshot(limit=remaining, wait_seconds=wait_seconds)
             snapshot["page"] = current_page
             snapshot["requestedUrl"] = url
             snapshot["keywordSearch"] = keyword_search
             if city_filter:
                 snapshot["cityFilter"] = city_filter
+                snapshot.setdefault("visibleCity", city_filter.get("observedCity") or "")
+                if not _city_filter_applied(city_filter):
+                    snapshot["cityFilterDegraded"] = True
             if pagination:
                 snapshot["pagination"] = pagination
             snapshots.append(snapshot)
@@ -348,7 +345,10 @@ class ZhilianReadOnlyCollector:
                             error="zhilian_login_required",
                         )
                     if _city_filter_applied(recovery_filter):
-                        recovered_snapshot = self._extract_snapshot(limit=remaining)
+                        recovered_snapshot = self._extract_snapshot(
+                            limit=remaining,
+                            wait_seconds=wait_seconds,
+                        )
                         recovered_snapshot["page"] = current_page
                         recovered_snapshot["requestedUrl"] = url
                         recovered_snapshot["cityFilter"] = recovery_filter
@@ -392,6 +392,10 @@ class ZhilianReadOnlyCollector:
                         city,
                         resolved_city_code,
                         evidence_url=str(city_resolution["observedUrl"]),
+                        evidence_sources=list(city_resolution.get("evidenceSources") or []),
+                        verification_source=str(
+                            city_resolution.get("verificationSource") or "dynamic_multi_source"
+                        ),
                     )
 
             cards = snapshot.get("cards", []) if isinstance(snapshot, dict) else []
@@ -446,20 +450,20 @@ class ZhilianReadOnlyCollector:
             pages=page_count,
         )
 
-    def _extract_snapshot(self, limit: int = 20) -> dict[str, Any]:
+    def _extract_snapshot(self, limit: int = 20, wait_seconds: int = 8) -> dict[str, Any]:
         js = build_zhilian_snapshot_script(limit=limit)
-        result = self.driver._exec_js(js)
-        if isinstance(result, dict) and "raw" in result:
-            try:
-                parsed = json.loads(result["raw"])
-                return parsed if isinstance(parsed, dict) else {}
-            except (json.JSONDecodeError, TypeError):
-                return {"ok": False, "error": "snapshot_parse_failed", "raw": result["raw"]}
-        return result if isinstance(result, dict) else {}
+        return self._exec_ui_script_until_settled(
+            js,
+            wait_seconds=wait_seconds,
+            parse_error="snapshot_parse_failed",
+        )
 
     def _submit_keyword(self, keyword: str, wait_seconds: int = 8) -> dict[str, Any]:
-        result = self.driver._exec_js(build_zhilian_keyword_search_script(keyword))
-        data = _unwrap_js_result(result)
+        data = self._exec_ui_script_until_settled(
+            build_zhilian_keyword_search_script(keyword),
+            wait_seconds=wait_seconds,
+            parse_error="zhilian_js_parse_failed",
+        )
         if not data.get("ok"):
             return data
         click_point = data.get("clickPoint") if isinstance(data.get("clickPoint"), dict) else None
@@ -503,8 +507,11 @@ class ZhilianReadOnlyCollector:
     def _apply_city_filter(self, city: str, wait_seconds: int = 8) -> dict[str, Any]:
         last: dict[str, Any] = {}
         for attempt in range(2):
-            result = self.driver._exec_js(build_zhilian_city_filter_script(city))
-            last = _unwrap_js_result(result)
+            last = self._exec_ui_script_until_settled(
+                build_zhilian_city_filter_script(city),
+                wait_seconds=wait_seconds,
+                parse_error="zhilian_js_parse_failed",
+            )
             if last.get("loginRequired"):
                 time.sleep(min(max(wait_seconds, 1), 4))
                 return last
@@ -523,6 +530,36 @@ class ZhilianReadOnlyCollector:
                 continue
             return last
         return last
+
+    def _exec_ui_script_until_settled(
+        self,
+        script: str,
+        *,
+        wait_seconds: int,
+        parse_error: str,
+    ) -> dict[str, Any]:
+        timeout = max(float(wait_seconds), float(ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS))
+        deadline = time.monotonic() + timeout
+        last: dict[str, Any] = {}
+        attempts = 0
+        while True:
+            attempts += 1
+            result = self.driver._exec_js(script)
+            last = _unwrap_js_result_with_error(result, parse_error=parse_error)
+            if not _page_state_pending(last):
+                return last
+            if time.monotonic() >= deadline:
+                return {
+                    **last,
+                    "ok": False,
+                    "error": "zhilian_page_state_unknown",
+                    "loginRequired": False,
+                    "sessionState": "unknown",
+                    "retryable": True,
+                    "settleAttempts": attempts,
+                    "settleTimeoutSeconds": timeout,
+                }
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
 
     def _hydrate_from_details(
         self,
@@ -608,7 +645,10 @@ def _job_dedupe_key(job: Job, raw: dict[str, Any]) -> str:
 def _snapshot_failure(snapshot: dict[str, Any]) -> str:
     if snapshot.get("platformError"):
         return str(snapshot["platformError"])
-    if snapshot.get("loginRequired"):
+    session_state = str(snapshot.get("sessionState") or "")
+    if session_state in {"loading", "unknown"}:
+        return "zhilian_page_state_unknown"
+    if session_state == "login_required" or snapshot.get("loginRequired"):
         return "zhilian_login_required"
     url = str(snapshot.get("url", ""))
     title = str(snapshot.get("title", ""))
@@ -620,13 +660,27 @@ def _snapshot_failure(snapshot: dict[str, Any]) -> str:
 
 
 def _unwrap_js_result(result: Any) -> dict[str, Any]:
+    return _unwrap_js_result_with_error(result, parse_error="zhilian_js_parse_failed")
+
+
+def _unwrap_js_result_with_error(result: Any, *, parse_error: str) -> dict[str, Any]:
     if isinstance(result, dict) and "raw" in result:
         try:
             parsed = json.loads(result["raw"])
             return parsed if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError):
-            return {"ok": False, "error": "zhilian_js_parse_failed"}
+            return {"ok": False, "error": parse_error}
     return result if isinstance(result, dict) else {"ok": False, "error": "zhilian_js_empty_result"}
+
+
+def _page_state_pending(result: dict[str, Any]) -> bool:
+    state = str(result.get("sessionState") or "")
+    ready_state = str(result.get("readyState") or "")
+    if state in {"loading", "unknown"}:
+        return True
+    if result.get("error") == "zhilian_page_state_pending":
+        return True
+    return bool(ready_state and ready_state != "complete")
 
 
 def _city_filter_applied(result: dict[str, Any]) -> bool:

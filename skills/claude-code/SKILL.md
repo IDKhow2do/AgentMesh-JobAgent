@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching and recruiter greetings.
-version: 0.5.8
+version: 0.5.9
 ---
 
 # Job Agent
@@ -32,7 +32,8 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
 - Forward `client_update_detected -> client_update_started -> client_update_completed -> client_command_resumed` once in the user's language. Do not ask permission for a managed signed update and do not stop after success; continue the original command. Stop only on `client_update_failed`, report its `message`, and follow `next_suggested`. Older clients may first emit only the compatibility completion/resume pair.
 - For `client_update_failed` with `error_code=release_artifact_hash_mismatch`, run the returned official-installer recovery command once and repeat the original command. It preserves Job Agent state and browser sessions; never disable the signature/tag/commit/archive checks or delete the managed profile.
-- When a cloud command returns `retryable=true` and `request_preserved=true`, do not ask the user to retry, re-login or recollect jobs. Run the returned `next_suggested` command immediately; Discover resumes the same signed request and candidate set without another charge.
+- When a cloud command returns `retryable=true` and `request_preserved=true`, do not ask the user to retry, re-login or recollect jobs. Run the exact `next_suggested` command immediately. A failed start reuses its persisted `request_id` and has `billing_status=not_charged`; a failed decision reuses its `discover_id` and preserved candidates without an additional charge.
+- `round status` and a user-confirmed `round skip` may return `offline=true, stale=true` during a transient cloud outage after the CLI verifies the current API Key against its local account proof. Continue from the returned local workflow. Never claim a platform was skipped unless the skip command itself returns `ok=true`. On `offline_account_proof_required` or `offline_account_proof_mismatch`, stop and use the declared recovery; never edit or delete local state.
 - Profiles, rounds, decisions and audits are account-bound. On `local_state_owner_required`, ask the user to confirm ownership and run `jobagent account bind --confirm-legacy`. On `local_state_account_mismatch`, ask the user to confirm the account switch and run `jobagent account switch --new-state`. Never edit the owner file manually.
 - For browser slowness or conflicting login evidence, run `jobagent browser diagnose --platform <platform>` before asking for another login. It is read-only; `login.state=unknown` or `conflicting` is not `login_required`.
 - Forward progress stages and heartbeats during long operations. Use `jobagent round audit` for the compact result; use `--failures-only` or `--details` only when investigation requires records.
@@ -105,6 +106,7 @@ jobagent zhilian audit
 ```
 
 Treat any Zhilian `kw...` URL segment as opaque platform state, never as the cloud-issued role keyword. Do not parse it, feed it back into search, or skip Zhilian because of it; follow the CLI's readable `query`, error and `next_suggested`.
+Treat `zhilian_session_state_unknown` and `zhilian_page_state_unknown` as slow-loading or conflicting evidence, not as logged out. Follow their preserved-request recovery and ask the user to log in only for `zhilian_login_required`. Never guess or hard-code a `jl` city code: the CLI verifies changed codes from independent readable page evidence and returns no candidates/no charge when city evidence is insufficient.
 
 ## 51Job
 

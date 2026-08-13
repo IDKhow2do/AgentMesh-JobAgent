@@ -9,16 +9,19 @@ from jobagent.infra import cloud_client, rounds
 from jobagent.infra.activity import active_command
 from jobagent.infra.discovery_state import (
     clear_pending_decision,
+    clear_pending_start,
     load_pending_decision,
+    load_pending_start,
     save_manifest,
     save_pending_decision,
+    save_pending_start,
 )
 from jobagent.infra.diagnostics import emit_stage, progress_heartbeat
 from jobagent.infra.platform_lock import PlatformSessionLock
 from jobagent.infra.profile_contract import require_compatible_profile
-from jobagent.infra.protocol import verify_decision_manifest, verify_search_plan
+from jobagent.infra.protocol import digest_payload, verify_decision_manifest, verify_search_plan
 from jobagent.infra.state import load_json, profile_path
-from jobagent.platforms.discovery import collect_from_search_plan
+from jobagent.platforms.discovery import CollectionError, collect_from_search_plan
 
 
 def _decision_result(
@@ -52,6 +55,12 @@ def _decision_result(
                 "request_preserved": True,
                 "discover_id": discover_id,
                 "next_suggested": f"jobagent {platform} discover",
+                "billing_status": "response_pending_reconciliation",
+                "billing": {
+                    "status": "response_pending_reconciliation",
+                    "retry_reuses_discover_id": True,
+                    "additional_charge_on_retry": False,
+                },
             }
         )
         raise
@@ -144,6 +153,51 @@ def _resume_pending_decision(
         return None
 
 
+def _start_context(
+    platform: str,
+    *,
+    profile: dict[str, Any],
+    active_round: dict[str, Any],
+    round_intent: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from jobagent.infra.account_state import current_account_ref
+
+    intent_digest = (
+        digest_payload(round_intent)
+        if round_intent and round_intent.get("status") == "confirmed"
+        else None
+    )
+    return {
+        "platform": platform,
+        "round_id": str(active_round["round_id"]),
+        "profile_digest": digest_payload(profile),
+        "intent_digest": intent_digest,
+        "account_ref": current_account_ref(),
+    }
+
+
+def _preserved_request_id(context: dict[str, Any]) -> str:
+    platform = str(context["platform"])
+    pending = load_pending_start(platform)
+    comparable = ("round_id", "profile_digest", "intent_digest", "account_ref")
+    if pending and all(pending.get(field) == context.get(field) for field in comparable):
+        return str(pending["request_id"])
+    if pending:
+        clear_pending_start(platform, request_id=str(pending.get("request_id") or ""))
+    request_id = f"{platform}:{uuid.uuid4().hex}"
+    save_pending_start(
+        platform,
+        request_id=request_id,
+        round_id=str(context["round_id"]),
+        profile_digest=str(context["profile_digest"]),
+        intent_digest=(
+            str(context["intent_digest"]) if context.get("intent_digest") else None
+        ),
+        account_ref=(str(context["account_ref"]) if context.get("account_ref") else None),
+    )
+    return request_id
+
+
 def run_discover(
     platform: str,
     *,
@@ -163,15 +217,38 @@ def run_discover(
     )
     if resumed is not None:
         return resumed
-    request_id = f"{platform}:{uuid.uuid4().hex}"
+    context = _start_context(
+        platform,
+        profile=profile,
+        active_round=active_round,
+        round_intent=round_intent,
+    )
+    request_id = _preserved_request_id(context)
     emit_stage("search_plan_requested", platform=platform)
-    with progress_heartbeat("search_plan_waiting", platform=platform):
-        plan = cloud_client.discovery_start(
-            platform=platform,
-            profile=profile,
-            request_id=request_id,
-            round_intent=round_intent,
+    try:
+        with progress_heartbeat("search_plan_waiting", platform=platform):
+            plan = cloud_client.discovery_start(
+                platform=platform,
+                profile=profile,
+                request_id=request_id,
+                round_intent=round_intent,
+            )
+    except cloud_client.CloudError as exc:
+        exc.details.update(
+            {
+                "request_preserved": True,
+                "request_id": request_id,
+                "next_suggested": f"jobagent {platform} discover",
+                "no_charge": True,
+                "billing_status": "not_charged",
+                "billing": {
+                    "status": "not_charged",
+                    "retry_reuses_request_id": True,
+                    "additional_charge_on_retry": False,
+                },
+            }
         )
+        raise
     verified_plan = verify_search_plan(
         plan,
         platform=platform,
@@ -184,19 +261,48 @@ def run_discover(
         query_count=len(verified_plan.get("queries") or []),
     )
     emit_stage("browser_collection_started", platform=platform)
-    with progress_heartbeat("browser_collection_in_progress", platform=platform):
-        with active_command(f"jobagent {platform} discover"):
-            with PlatformSessionLock(platform=platform, command=f"jobagent {platform} discover"):
-                candidates = collect_from_search_plan(
-                    verified_plan,
-                    wait_seconds=wait_seconds,
-                    page_delay=page_delay,
-                )
+    try:
+        with progress_heartbeat("browser_collection_in_progress", platform=platform):
+            with active_command(f"jobagent {platform} discover"):
+                with PlatformSessionLock(platform=platform, command=f"jobagent {platform} discover"):
+                    candidates = collect_from_search_plan(
+                        verified_plan,
+                        wait_seconds=wait_seconds,
+                        page_delay=page_delay,
+                    )
+    except CollectionError as exc:
+        details = dict(exc.details or {})
+        details.update(
+            {
+                "request_preserved": True,
+                "request_id": request_id,
+                "no_charge": True,
+                "billing_status": "not_charged",
+                "billing": {
+                    "status": "not_charged",
+                    "retry_reuses_request_id": True,
+                    "additional_charge_on_retry": False,
+                },
+            }
+        )
+        details.setdefault("next_suggested", f"jobagent {platform} discover")
+        details.setdefault("retryable", _collection_error_retryable(exc.code))
+        exc.details = details
+        raise
     emit_stage("browser_collection_completed", platform=platform, candidate_count=len(candidates))
     save_pending_decision(platform, plan=plan, jobs=candidates)
+    clear_pending_start(platform, request_id=request_id)
     return _decision_result(
         platform,
         plan=verified_plan,
         candidates=candidates,
         resumed=False,
     )
+
+
+def _collection_error_retryable(code: str) -> bool:
+    return code in {
+        "zhilian_page_state_unknown",
+        "page_state_unknown",
+        "no_candidates",
+    }
