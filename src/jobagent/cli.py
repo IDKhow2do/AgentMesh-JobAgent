@@ -41,7 +41,11 @@ def _add_send(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", "-i", help="Reviewed decision file; defaults to latest")
     parser.add_argument(
         "--preview-id",
-        help="Delivery-preview handoff ID emitted by review; this is not a user confirmation",
+        help="Delivery-preview handoff ID emitted by review",
+    )
+    parser.add_argument(
+        "--authorization-id",
+        help="User-confirmed delivery authorization emitted by interaction respond",
     )
     parser.add_argument("--limit", type=int, default=100, help="Maximum jobs in this send batch")
     parser.add_argument("--dry-run", action="store_true", help="Plan without touching platform buttons")
@@ -104,13 +108,27 @@ def build_parser() -> argparse.ArgumentParser:
     interaction_respond.add_argument("--interaction-id", required=True)
     interaction_respond.add_argument(
         "--choice",
-        choices=["accept_suggested", "append_roles", "replace_roles"],
+        choices=[
+            "accept_suggested",
+            "append_roles",
+            "replace_roles",
+            "confirm_all",
+            "exclude_jobs",
+            "cancel_delivery",
+        ],
     )
     interaction_respond.add_argument(
         "--target-role",
         action="append",
         default=[],
         help="Target role supplied for append or replace choices; repeat for multiple roles",
+    )
+    interaction_respond.add_argument(
+        "--exclude-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Displayed job number to exclude; repeat for multiple jobs",
     )
 
     delivery_round = sub.add_parser("round", help="View or update the multi-platform round")
@@ -449,6 +467,26 @@ def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
     from jobagent.infra.state import current_round_path, load_json, profile_path
 
     interaction_id = str(args.interaction_id or "").strip()
+    pending = load_pending_interaction()
+    if pending and str(pending.get("kind") or "").startswith("delivery_"):
+        if str(pending.get("interaction_id") or "") != interaction_id:
+            return {
+                "ok": False,
+                "error": "interaction_not_pending",
+                "message": "This delivery interaction is no longer waiting for that answer.",
+                "next_suggested": str(
+                    (pending.get("interaction") or {}).get("fallback_text") or ""
+                ),
+            }
+        from jobagent.application.delivery_confirmation import (
+            respond_delivery_confirmation,
+        )
+
+        return respond_delivery_confirmation(
+            pending,
+            choice=str(args.choice or pending.get("choice") or ""),
+            exclude_indices=list(args.exclude_index or []),
+        )
     profile = load_json(profile_path())
     if not profile:
         return {
@@ -458,7 +496,6 @@ def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
             "next_suggested": "jobagent resume analyze --file <resume>",
         }
 
-    pending = load_pending_interaction()
     current = load_json(current_round_path()) or {}
     receipt = current.get("interaction_receipt") or {}
     receipt_ids = {
@@ -610,7 +647,12 @@ def _with_login_workflow(platform: str, payload: dict[str, Any]) -> dict[str, An
     )
     status_before = str(platform_before.get("status") or "pending")
     evidence_before = dict(platform_before.get("evidence") or {})
-    resumable_statuses = {"discovered", "reviewed", "sent"}
+    resumable_statuses = {
+        "discovered",
+        "awaiting_delivery_confirmation",
+        "reviewed",
+        "sent",
+    }
     stored_next = str(platform_before.get("next_suggested") or "")
 
     inferred_status = ""
@@ -1030,6 +1072,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         platform,
         input_path=args.input,
         preview_id=args.preview_id,
+        authorization_id=args.authorization_id,
         limit=args.limit,
         dry_run=args.dry_run,
         stop_on_failure=not args.continue_on_failure,
@@ -1062,9 +1105,11 @@ def main() -> None:
         try:
             from jobagent.application.delivery import UserInterventionRequired
             from jobagent.infra.delivery_preview import DeliveryPreviewError
+            from jobagent.infra.delivery_authorization import DeliveryAuthorizationError
         except ImportError:
             UserInterventionRequired = ()  # type: ignore[assignment,misc]
             DeliveryPreviewError = ()  # type: ignore[assignment,misc]
+            DeliveryAuthorizationError = ()  # type: ignore[assignment,misc]
         if isinstance(exc, AccountStateError):
             payload = exc.payload
         elif isinstance(exc, UpgradeCompatibilityError):
@@ -1086,6 +1131,8 @@ def main() -> None:
                 "user_prompt": exc.prompt,
             }
         elif DeliveryPreviewError and isinstance(exc, DeliveryPreviewError):
+            payload = exc.payload
+        elif DeliveryAuthorizationError and isinstance(exc, DeliveryAuthorizationError):
             payload = exc.payload
         elif isinstance(exc, PlatformLockError):
             payload = exc.payload

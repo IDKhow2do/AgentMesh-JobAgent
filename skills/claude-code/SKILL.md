@@ -1,7 +1,7 @@
 ---
 name: job-agent
-description: AgentMesh Job Agent for resume-driven job discovery, review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching, recruiter greetings and application audit.
-version: 0.5.7
+description: AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching and recruiter greetings.
+version: 0.5.8
 ---
 
 # Job Agent
@@ -13,11 +13,12 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - Never invent an AgentMesh360 API Key. Without one, ask the user to create a universal Key at `https://agentmesh360.com/app/` and wait. Registration and Key creation are free; cloud capabilities require available credits.
 - After configuring the Key, run `jobagent doctor env`. Read `environment_healthy` and `workflow.ready` separately. If `cloud_access.usable=true`, briefly report the active balance source and run the top-level `next_suggested` immediately. Never block on `Pass: not purchased`; ask for a purchase only when `paid_pass_required=true` or a real cloud command returns `insufficient_credits`.
 - New accounts start with zero cloud credits. For grandfathered `signup_trial_active`, tell the user: `你的 AgentMesh360 账户仍有此前发放的体验额度：剩余 {credit} credits，有效期至 {expires_at}。无需购买通行证，我现在继续执行下一步。` Then execute `next_suggested` without asking for confirmation.
-- Run platforms as complete vertical chains: Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> send -> audit` chain and complete its audit before logging in to the next platform.
+- Run platforms as complete vertical chains: Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain and complete its audit before logging in to the next platform.
 - When output contains `requires_user_action=true`, stop, relay `user_prompt` and wait for the user.
-- Report `selected / review / rejected`, then automatically deliver signed `selected` jobs without asking again for each platform.
-- On `event=delivery_preview`, show every row in `delivery_preview.items` before real delivery. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including `--preview-id`.
-- On `error=delivery_preview_required`, immediately run the returned review `next_suggested`, display the regenerated preview, and follow its newly bound send command. Preserve existing user promotions; do not recollect, recharge or ask for confirmation.
+- Report `selected / review / rejected`, then show the complete final `selected` list and stop for the user's delivery decision.
+- On `event=delivery_preview` with `error=interaction_required`, show every row in `delivery_preview.items`, then render the returned confirmation card. Never choose for the user. Map `confirm_all`, `exclude_jobs` or `cancel_delivery` through the exact interaction ID.
+- For `exclude_jobs`, collect displayed job numbers and pass each as `--exclude-index`. Show the regenerated complete preview and stop for final confirmation again. Run send only after `event=delivery_authorized`, using the exact command containing both `--preview-id` and `--authorization-id`.
+- On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - `review` is excluded by default. Promote only IDs named by the user and always pass `--confirm-promote`.
 - Never automatically promote `rejected`.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.
@@ -70,7 +71,8 @@ jobagent boss greet preview
 Report the signed decision, show the complete delivery preview, then continue with the exact bound command:
 
 ```bash
-jobagent boss greet send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent boss greet send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent boss audit
 ```
 
@@ -83,7 +85,8 @@ jobagent liepin apply review
 ```
 
 ```bash
-jobagent liepin apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent liepin audit
 ```
 
@@ -96,7 +99,8 @@ jobagent zhilian apply review
 ```
 
 ```bash
-jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent zhilian audit
 ```
 
@@ -111,7 +115,8 @@ jobagent 51job apply review
 ```
 
 ```bash
-jobagent 51job apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent 51job apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent 51job audit
 ```
 

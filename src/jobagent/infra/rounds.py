@@ -11,16 +11,24 @@ DEFAULT_PLATFORM_ORDER = ["boss", "liepin", "zhilian", "51job"]
 TERMINAL_PLATFORM_STATUSES = {"completed", "skipped_this_round"}
 ROUND_SCHEMA_VERSION = 3
 DELIVERY_POLICY = {
-    "selected": "auto",
+    "selected": "user_confirmed_after_preview",
     "review": "explicit_override_only",
     "rejected": "never",
-    "per_platform_confirmation": False,
+    "per_platform_confirmation": True,
 }
 ROUND_EXECUTION_POLICY = {
     "mode": "vertical_end_to_end",
     "prelogin_future_platforms": False,
     "advance_only_after": "audit",
-    "stages": ["login", "discover", "review", "delivery_preview", "send", "audit"],
+    "stages": [
+        "login",
+        "discover",
+        "review",
+        "delivery_preview",
+        "delivery_confirmation",
+        "send",
+        "audit",
+    ],
 }
 
 
@@ -234,6 +242,12 @@ def _default_next_command(platform: str, status: str) -> str:
     if status == "login_verified":
         return f"jobagent {platform} discover"
     if status == "discovered":
+        return (
+            "jobagent boss greet preview"
+            if platform == "boss"
+            else f"jobagent {platform} apply review"
+        )
+    if status == "awaiting_delivery_confirmation":
         return (
             "jobagent boss greet preview"
             if platform == "boss"

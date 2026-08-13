@@ -117,6 +117,14 @@ def state_owner_status(account_ref: str, *, app_dir: Path | None = None) -> dict
     }
 
 
+def current_account_ref(*, app_dir: Path | None = None) -> str | None:
+    """Return the opaque account bound to the active local state."""
+
+    owner = _read_json(_owner_path(_root(app_dir))) or {}
+    account_ref = str(owner.get("account_ref") or "")
+    return account_ref if _ACCOUNT_REF.fullmatch(account_ref) else None
+
+
 def _bind(root: Path, account_ref: str, *, reason: str) -> dict[str, Any]:
     _write_json(
         _owner_path(root),

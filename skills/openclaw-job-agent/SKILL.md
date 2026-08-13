@@ -1,7 +1,7 @@
 ---
 name: job-agent
-description: Use AgentMesh Job Agent for resume-driven job discovery, signed review and automatic selected delivery on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.7
+description: Use AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job.
+version: 0.5.8
 metadata:
   openclaw:
     emoji: "💼"
@@ -24,14 +24,15 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - Never invent an API Key. Ask the user to create an AgentMesh360 universal Key at `https://agentmesh360.com/app/` and wait. Registration and Key creation are free; cloud capabilities require available credits.
 - After configuring the Key, run `jobagent doctor env`. Read `environment_healthy` and `workflow.ready` separately. If `cloud_access.usable=true`, briefly report the active balance source and run the top-level `next_suggested` immediately. Never block on `Pass: not purchased`; ask for a purchase only when `paid_pass_required=true` or a real cloud command returns `insufficient_credits`.
 - New accounts start with zero cloud credits. For grandfathered `signup_trial_active`, tell the user: `你的 AgentMesh360 账户仍有此前发放的体验额度：剩余 {credit} credits，有效期至 {expires_at}。无需购买通行证，我现在继续执行下一步。` Then execute `next_suggested` without asking for confirmation.
-- Run Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job as complete vertical chains. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> send -> audit` chain and complete its audit before logging in to the next platform. Never operate their shared browser concurrently.
+- Run Boss直聘 -> 猎聘 -> 智联招聘 -> 51Job as complete vertical chains. Never pre-login future platforms; complete the current platform's `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain and complete its audit before logging in to the next platform. Never operate their shared browser concurrently.
 - Stop whenever `requires_user_action=true`; relay `user_prompt` exactly and wait.
-- Report `selected / review / rejected`, then automatically deliver the signed `selected` list without asking again.
-- On `event=delivery_preview`, show every row in `delivery_preview.items` before any real platform action. Prefer a compact table using the declared columns; otherwise relay `delivery_preview.fallback_text` unchanged. This is required notice, not another confirmation. Then execute the exact top-level `next_suggested`, including `--preview-id`.
-- On `error=delivery_preview_required`, immediately run the returned review `next_suggested`, display the regenerated preview, and follow its newly bound send command. Preserve existing user promotions; do not recollect, recharge or ask for confirmation.
+- Report `selected / review / rejected`, then show the complete final `selected` list and stop for the user's delivery decision.
+- On `event=delivery_preview` with `error=interaction_required`, show every row in `delivery_preview.items`, then render the returned confirmation card. Never choose for the user. Map `confirm_all`, `exclude_jobs` or `cancel_delivery` through the exact interaction ID.
+- For `exclude_jobs`, collect displayed job numbers and pass each as `--exclude-index`. Show the regenerated complete preview and stop for final confirmation again. Run send only after `event=delivery_authorized`, using the exact command containing both `--preview-id` and `--authorization-id`.
+- On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.
 - Never promote `review` without IDs chosen by the user and `--confirm-promote`. Never auto-promote `rejected`.
-- Starting the round authorizes real actions for `selected`; send commands have no per-platform confirmation flag.
+- Starting the round authorizes discovery and signed review. Each platform's final list requires its own structured confirmation before real delivery.
 - On Boss, a platform default introduction is not the reviewed greeting. Require the CLI's exact personalized-delivery verification.
 - Never stop after one platform. Follow `workflow.next_suggested` while `workflow.continue_required=true`; only `workflow.workflow_complete=true` ends the round.
 - Create a round only by executing `jobagent round start`. Never infer that `doctor env`, `round status` or a platform command created or authorized a new round.
@@ -89,7 +90,8 @@ Boss直聘:
 jobagent boss login --check
 jobagent boss discover
 jobagent boss greet preview
-jobagent boss greet send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent boss greet send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent boss audit
 ```
 
@@ -99,7 +101,8 @@ jobagent boss audit
 jobagent liepin login --check
 jobagent liepin discover
 jobagent liepin apply review
-jobagent liepin apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent liepin audit
 ```
 
@@ -109,7 +112,8 @@ jobagent liepin audit
 jobagent zhilian login --check
 jobagent zhilian discover
 jobagent zhilian apply review
-jobagent zhilian apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent zhilian audit
 ```
 
@@ -121,11 +125,12 @@ Treat any Zhilian `kw...` URL segment as opaque platform state, never as the clo
 jobagent 51job login --check
 jobagent 51job discover
 jobagent 51job apply review
-jobagent 51job apply send --input <review_file> --preview-id <preview_id>
+jobagent interaction respond --interaction-id "<id>" --choice confirm_all
+jobagent 51job apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
 jobagent 51job audit
 ```
 
-Run each send line automatically after review. Do not ask for per-platform approval. 猎聘 must verify both the account resume and the exact signed personalized greeting; a platform default introduction is not enough. 智联 and 51Job submit resumes only. 51Job's web chat is QR-only.
+Run each send line only after the CLI has accepted the user's final list confirmation. 猎聘 must verify both the account resume and the exact signed personalized greeting; a platform default introduction is not enough. 智联 and 51Job submit resumes only. 51Job's web chat is QR-only.
 
 Boss and 猎聘 greetings must be signed, non-empty and at most 100 characters before preview or delivery. Never describe a 智联 or 51Job review note as a sent greeting.
 

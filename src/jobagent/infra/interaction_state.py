@@ -14,11 +14,12 @@ def save_pending_interaction(
     interaction: dict[str, Any],
     *,
     stage: str,
-    profile_digest: str,
-    suggested_roles: list[str],
-    previous_round_id: str | None,
+    profile_digest: str = "",
+    suggested_roles: list[str] | None = None,
+    previous_round_id: str | None = None,
     root_interaction_id: str | None = None,
     choice: str | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "schema_version": PENDING_INTERACTION_SCHEMA_VERSION,
@@ -29,11 +30,13 @@ def save_pending_interaction(
         "root_interaction_id": root_interaction_id or str(interaction["interaction_id"]),
         "choice": choice,
         "profile_digest": profile_digest,
-        "suggested_roles": list(suggested_roles),
+        "suggested_roles": list(suggested_roles or []),
         "previous_round_id": previous_round_id,
         "created_at": utc_now(),
         "interaction": interaction,
     }
+    if context is not None:
+        payload["context"] = dict(context)
     state.save_json(state.pending_interaction_path(), payload)
     return payload
 

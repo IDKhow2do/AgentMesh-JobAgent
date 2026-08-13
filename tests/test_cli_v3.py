@@ -575,7 +575,7 @@ def test_browser_open_failure_is_not_misreported_as_login_required(guide_class):
     assert "requires_user_action" not in payload
 
 
-def test_selected_send_runs_without_per_platform_confirmation(monkeypatch):
+def test_send_dispatch_passes_delivery_authorization_handoff(monkeypatch):
     calls = []
     monkeypatch.setattr("jobagent.infra.rounds.assert_platform_turn", lambda platform: None)
     monkeypatch.setattr(
@@ -591,6 +591,7 @@ def test_selected_send_runs_without_per_platform_confirmation(monkeypatch):
             {
                 "input_path": None,
                 "preview_id": None,
+                "authorization_id": None,
                 "limit": 100,
                 "dry_run": False,
                 "stop_on_failure": True,
@@ -599,16 +600,22 @@ def test_selected_send_runs_without_per_platform_confirmation(monkeypatch):
     ]
 
 
-def test_public_docs_do_not_restore_per_platform_send_confirmation():
+def test_public_docs_require_user_confirmed_delivery_authorization():
     root = Path(__file__).resolve().parents[1]
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    claude_guide = (root / "skills/claude-code/README.md").read_text(encoding="utf-8")
+    docs = [
+        (root / "AGENTS.md").read_text(encoding="utf-8"),
+        (root / "README.md").read_text(encoding="utf-8"),
+        (root / "docs/agent-onboarding.md").read_text(encoding="utf-8"),
+        (root / "skills/claude-code/SKILL.md").read_text(encoding="utf-8"),
+        (root / "skills/openclaw-job-agent/SKILL.md").read_text(encoding="utf-8"),
+    ]
 
-    assert "confirmed send" not in readme
-    assert "without the user's explicit confirmation" not in readme
-    assert readme.count("automatic selected delivery") == 4
-    assert "Starting a job-search round authorizes automatic delivery" in readme
-    assert "automatic selected delivery" in claude_guide
+    for text in docs:
+        assert "confirm_all" in text
+        assert "exclude_jobs" in text
+        assert "cancel_delivery" in text
+        assert "--authorization-id" in text
+        assert "automatic selected delivery" not in text
 
 
 def test_public_readme_identifies_the_official_product_site():
@@ -1200,6 +1207,14 @@ def test_review_requires_confirmation_to_promote_and_never_promotes_rejected(tmp
         "jobagent.application.review.rounds.round_status",
         lambda: {"round_id": "round-1", "next_suggested": "jobagent liepin apply send"},
     )
+    monkeypatch.setattr(
+        "jobagent.infra.state.pending_interaction_path",
+        lambda: tmp_path / "pending-interaction.json",
+    )
+    monkeypatch.setattr(
+        "jobagent.application.review.current_account_ref",
+        lambda: "acct_delivery_test",
+    )
     result = review_decision(
         "liepin",
         input_path=str(source),
@@ -1209,20 +1224,24 @@ def test_review_requires_confirmation_to_promote_and_never_promotes_rejected(tmp
     )
     reviewed = json.loads(output.read_text(encoding="utf-8"))
     assert result["send_count"] == 2
+    assert result["ok"] is False
+    assert result["error"] == "interaction_required"
     assert result["event"] == "delivery_preview"
     assert result["display_required"] is True
-    assert result["requires_user_action"] is False
+    assert result["requires_user_action"] is True
     assert result["delivery_preview"]["protocol"] == "agentmesh360.delivery_preview"
-    assert result["delivery_preview"]["requires_user_confirmation"] is False
+    assert result["delivery_preview"]["requires_user_confirmation"] is True
     assert [item["title"] for item in result["delivery_preview"]["items"]] == [
         "Selected",
         "Review",
     ]
-    assert result["delivery_preview"]["preview_id"] in result["next_suggested"]
+    assert result["interaction"]["kind"] == "delivery_confirmation"
+    assert result["delivery_preview"]["preview_id"] in result["interaction"]["interaction_id"]
     assert reviewed["delivery_preview"] == result["delivery_preview"]
+    assert "delivery_authorization" not in reviewed
     assert [item["id"] for item in reviewed["send_candidates"]] == ["s", "r"]
     assert reviewed["user_overrides"] == [{"job_id": "r", "from": "review", "to": "selected"}]
-    assert statuses == [("liepin", "reviewed")]
+    assert statuses == [("liepin", "awaiting_delivery_confirmation")]
     assert result["workflow"]["round_id"] == "round-1"
 
 
@@ -1299,6 +1318,90 @@ def test_reviewing_an_old_review_file_preserves_existing_promotions(tmp_path, mo
     ]
     assert result["promoted"] == [
         {"job_id": "promoted", "from": "review", "to": "selected"}
+    ]
+
+
+def test_reviewing_an_adjusted_review_file_preserves_delivery_exclusions(
+    tmp_path, monkeypatch
+):
+    import jobagent.infra.protocol as protocol
+    from jobagent.application.review import review_decision
+
+    private, public = _key_pair()
+    monkeypatch.setattr(protocol, "DECISION_SIGNING_PUBLIC_KEY", public)
+    manifest = _sign(
+        private,
+        {
+            "manifest_type": "decision_manifest",
+            "protocol_version": 1,
+            "manifest_id": "dm_adjusted_review",
+            "discover_id": "dis_adjusted_review",
+            "platform": "zhilian",
+            "candidate_digest": "sha256:" + "a" * 64,
+            "input_count": 2,
+            "deduplicated_count": 2,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": _future(24),
+            "selected": [
+                {
+                    "id": "keep",
+                    "title": "数据分析师",
+                    "classification": "selected",
+                },
+                {
+                    "id": "exclude",
+                    "title": "AI 产品经理",
+                    "classification": "selected",
+                },
+            ],
+            "review": [],
+            "rejected": [],
+            "billing": {"action": "jobagent.discover", "credits": 10, "transaction_id": "1"},
+        },
+    )
+    old_review = tmp_path / "adjusted.review.json"
+    old_review.write_text(
+        json.dumps(
+            {
+                "platform": "zhilian",
+                "discover_id": "dis_adjusted_review",
+                "manifest": manifest,
+                "user_overrides": [],
+                "user_delivery_exclusions": [
+                    {
+                        "id": "exclude",
+                        "job_id": "exclude",
+                        "title": "AI 产品经理",
+                    }
+                ],
+                "send_candidates": [{"id": "keep", "job_id": "keep"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jobagent.application.review.rounds.set_platform_status",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "jobagent.application.review.rounds.round_status",
+        lambda: {"round_id": "round-1"},
+    )
+
+    output = tmp_path / "regenerated.review.json"
+    result = review_decision(
+        "zhilian",
+        input_path=str(old_review),
+        output_path=str(output),
+    )
+
+    reviewed = json.loads(output.read_text(encoding="utf-8"))
+    assert [item["title"] for item in result["delivery_preview"]["items"]] == [
+        "数据分析师"
+    ]
+    assert [item["id"] for item in reviewed["send_candidates"]] == ["keep"]
+    assert [item["id"] for item in reviewed["user_delivery_exclusions"]] == [
+        "exclude"
     ]
 
 
