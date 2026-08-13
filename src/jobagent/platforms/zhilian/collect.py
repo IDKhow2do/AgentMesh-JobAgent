@@ -25,6 +25,7 @@ from .selectors import (
     build_zhilian_pagination_script,
     build_zhilian_snapshot_script,
 )
+from .session_evidence import classify_zhilian_session_evidence
 
 
 # Keep the bundled city codes only as post-submit verification evidence. Search
@@ -645,10 +646,10 @@ def _job_dedupe_key(job: Job, raw: dict[str, Any]) -> str:
 def _snapshot_failure(snapshot: dict[str, Any]) -> str:
     if snapshot.get("platformError"):
         return str(snapshot["platformError"])
-    session_state = str(snapshot.get("sessionState") or "")
+    session_state = classify_zhilian_session_evidence(snapshot)
     if session_state in {"loading", "unknown"}:
         return "zhilian_page_state_unknown"
-    if session_state == "login_required" or snapshot.get("loginRequired"):
+    if session_state == "login_required":
         return "zhilian_login_required"
     url = str(snapshot.get("url", ""))
     title = str(snapshot.get("title", ""))
