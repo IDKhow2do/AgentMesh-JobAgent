@@ -28,6 +28,66 @@ def pending_decision_path(platform: str) -> Path:
     return _platform_dir(platform) / "pending-decision.json"
 
 
+def pending_start_path(platform: str) -> Path:
+    return _platform_dir(platform) / "pending-start.json"
+
+
+def save_pending_start(
+    platform: str,
+    *,
+    request_id: str,
+    round_id: str,
+    profile_digest: str,
+    intent_digest: str | None,
+    account_ref: str | None,
+) -> Path:
+    path = pending_start_path(platform)
+    payload = {
+        "schema_version": 1,
+        "platform": platform,
+        "request_id": request_id,
+        "round_id": round_id,
+        "profile_digest": profile_digest,
+        "intent_digest": intent_digest,
+        "account_ref": account_ref,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+    return path
+
+
+def load_pending_start(platform: str) -> dict[str, Any] | None:
+    path = pending_start_path(platform)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read pending discovery start file: {path}") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("platform") != platform
+        or not str(payload.get("request_id") or "").startswith(f"{platform}:")
+        or not str(payload.get("round_id") or "")
+        or not str(payload.get("profile_digest") or "")
+    ):
+        raise ValueError(f"Invalid pending discovery start file: {path}")
+    return payload
+
+
+def clear_pending_start(platform: str, *, request_id: str | None = None) -> None:
+    path = pending_start_path(platform)
+    if not path.exists():
+        return
+    if request_id is not None:
+        payload = load_pending_start(platform)
+        if payload and str(payload.get("request_id")) != request_id:
+            return
+    path.unlink()
+
+
 def save_pending_decision(
     platform: str,
     *,
@@ -105,6 +165,8 @@ def latest_path(platform: str, *, reviewed: bool | None = None) -> Path:
     root = _platform_dir(platform)
     candidates = []
     for path in root.glob("*.json"):
+        if path.name.startswith("pending-"):
+            continue
         is_review = path.name.endswith(".review.json")
         if reviewed is True and not is_review:
             continue

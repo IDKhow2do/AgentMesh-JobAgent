@@ -245,7 +245,10 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
         payload["account"] = account
         payload["cloud_access"] = _cloud_access(account, profile_exists=False)
         try:
-            payload["local_state"] = ensure_account_state(account)
+            payload["local_state"] = ensure_account_state(
+                account,
+                api_key=args.key.strip(),
+            )
         except AccountStateError as exc:
             payload.update(exc.payload)
             payload["credentials_path"] = str(path)
@@ -270,8 +273,10 @@ def _account(args: argparse.Namespace) -> dict[str, Any]:
         state_owner_status,
         switch_account_state,
     )
+    from jobagent.infra.credentials import load_api_key
 
     account_response = cloud_client.me()
+    api_key = load_api_key()
     if args.account_command == "status":
         account_ref = account_ref_from_response(account_response)
         return {
@@ -283,18 +288,44 @@ def _account(args: argparse.Namespace) -> dict[str, Any]:
         return bind_legacy_state(
             account_response,
             confirm_legacy=args.confirm_legacy,
+            api_key=api_key,
         )
-    return switch_account_state(account_response, new_state=args.new_state)
+    return switch_account_state(
+        account_response,
+        new_state=args.new_state,
+        api_key=api_key,
+    )
 
 
-def _verify_state_owner_for_command(args: argparse.Namespace) -> None:
+def _offline_local_control_allowed(args: argparse.Namespace) -> bool:
+    return bool(
+        args.command == "round"
+        and (
+            args.round_command == "status"
+            or (args.round_command == "skip" and args.confirm_skip)
+        )
+    )
+
+
+def _verify_state_owner_for_command(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.command in {"account", "doctor", "init", "platforms", "update", "upgrade-check"}:
-        return
+        return None
+    if (
+        args.command == "round"
+        and args.round_command == "skip"
+        and not args.confirm_skip
+    ):
+        return None
     from jobagent.infra import cloud_client
-    from jobagent.infra.account_state import AccountStateError, ensure_account_state
+    from jobagent.infra.account_state import (
+        AccountStateError,
+        ensure_account_state,
+        verify_offline_account_state,
+    )
     from jobagent.infra.credentials import load_api_key
 
-    if not load_api_key():
+    api_key = load_api_key()
+    if not api_key:
         raise AccountStateError(
             {
                 "ok": False,
@@ -303,7 +334,31 @@ def _verify_state_owner_for_command(args: argparse.Namespace) -> None:
                 "next_suggested": "jobagent init --key <your_api_key>",
             }
         )
-    ensure_account_state(cloud_client.me())
+    try:
+        local_state = ensure_account_state(
+            cloud_client.me(),
+            api_key=api_key,
+        )
+    except cloud_client.CloudError as exc:
+        if not (
+            _offline_local_control_allowed(args)
+            and cloud_client.is_transient_transport_error(exc)
+        ):
+            raise
+        proof = verify_offline_account_state(api_key)
+        return {
+            "mode": "offline",
+            "offline": True,
+            "stale": True,
+            "verified_at": proof.get("verified_at"),
+            "reason_code": exc.code,
+        }
+    return {
+        "mode": "online",
+        "offline": False,
+        "stale": False,
+        "verified_at": local_state.get("verified_at"),
+    }
 
 
 def _doctor_env() -> dict[str, Any]:
@@ -350,7 +405,10 @@ def _doctor_env() -> dict[str, Any]:
         from jobagent.infra.account_state import AccountStateError, ensure_account_state
 
         try:
-            local_state = ensure_account_state(account_response)
+            local_state = ensure_account_state(
+                account_response,
+                api_key=key,
+            )
         except AccountStateError as exc:
             local_state = {
                 key: value
@@ -1082,11 +1140,19 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    account_verification: dict[str, Any] | None = None
     try:
         _maybe_update(args)
         _prepare_client_upgrade(args)
-        _verify_state_owner_for_command(args)
+        account_verification = _verify_state_owner_for_command(args)
         result = _dispatch(args)
+        if account_verification and account_verification.get("offline"):
+            result = {
+                **result,
+                "offline": True,
+                "stale": True,
+                "account_verification": account_verification,
+            }
         _print(result)
         if result.get("ok") is False:
             raise SystemExit(2)
@@ -1115,13 +1181,17 @@ def main() -> None:
         elif isinstance(exc, UpgradeCompatibilityError):
             payload = exc.payload
         elif isinstance(exc, CollectionError):
+            details = dict(exc.details or {})
             payload = {
+                **details,
                 "ok": False,
                 "error": exc.code,
                 "message": exc.message,
                 "no_charge": True,
-                "requires_user_action": bool(exc.user_prompt),
-                "user_prompt": exc.user_prompt or None,
+                "requires_user_action": bool(
+                    exc.user_prompt or details.get("requires_user_action")
+                ),
+                "user_prompt": exc.user_prompt or details.get("user_prompt") or None,
             }
         elif UserInterventionRequired and isinstance(exc, UserInterventionRequired):
             payload = {
@@ -1159,6 +1229,13 @@ def main() -> None:
                 "error": type(exc).__name__,
                 "message": str(exc),
                 "diagnostic_log": str(log_path),
+            }
+        if account_verification and account_verification.get("offline"):
+            payload = {
+                **payload,
+                "offline": True,
+                "stale": True,
+                "account_verification": account_verification,
             }
         _print(payload, stream=sys.stderr)
         raise SystemExit(2) from exc

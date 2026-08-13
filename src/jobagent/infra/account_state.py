@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import re
 import shutil
 from datetime import datetime, timezone
@@ -11,7 +14,8 @@ from typing import Any
 
 from jobagent.infra.state import APP_DIR
 
-OWNER_SCHEMA_VERSION = 1
+OWNER_SCHEMA_VERSION = 2
+_KEY_FINGERPRINT_CONTEXT = b"jobagent-state-owner-v1\0"
 _ACCOUNT_REF = re.compile(r"^acct_[A-Za-z0-9_-]{8,}$")
 _ACCOUNT_OWNED_PATHS = (
     "profile.json",
@@ -42,6 +46,27 @@ class AccountStateError(RuntimeError):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _key_fingerprint(api_key: str) -> str:
+    return hashlib.sha256(_KEY_FINGERPRINT_CONTEXT + api_key.encode("utf-8")).hexdigest()
+
+
+def _credential_mtime(path: Path) -> float:
+    return path.stat().st_mtime
+
+
+def _timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _root(app_dir: Path | None) -> Path:
@@ -114,6 +139,8 @@ def state_owner_status(account_ref: str, *, app_dir: Path | None = None) -> dict
         "api_account_ref": account_ref,
         "state_account_ref": state_ref or None,
         "has_account_owned_state": has_state,
+        "offline_capable": bool(owner.get("key_fingerprint")) and status == "ready",
+        "verified_at": owner.get("verified_at") if status == "ready" else None,
     }
 
 
@@ -125,25 +152,60 @@ def current_account_ref(*, app_dir: Path | None = None) -> str | None:
     return account_ref if _ACCOUNT_REF.fullmatch(account_ref) else None
 
 
-def _bind(root: Path, account_ref: str, *, reason: str) -> dict[str, Any]:
-    _write_json(
-        _owner_path(root),
-        {
-            "schema_version": OWNER_SCHEMA_VERSION,
-            "account_ref": account_ref,
-            "bound_at": _utc_now(),
-            "reason": reason,
-        },
-    )
+def _bind(
+    root: Path,
+    account_ref: str,
+    *,
+    reason: str,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    now = _utc_now()
+    payload: dict[str, Any] = {
+        "schema_version": OWNER_SCHEMA_VERSION,
+        "account_ref": account_ref,
+        "bound_at": now,
+        "reason": reason,
+    }
+    if api_key:
+        payload.update(
+            {
+                "key_fingerprint": _key_fingerprint(api_key),
+                "verified_at": now,
+                "proof_source": "online_account_verification",
+            }
+        )
+    _write_json(_owner_path(root), payload)
     return state_owner_status(account_ref, app_dir=root)
 
 
-def ensure_account_state(account_response: dict[str, Any], *, app_dir: Path | None = None) -> dict[str, Any]:
+def _refresh_online_proof(root: Path, account_ref: str, api_key: str) -> dict[str, Any]:
+    owner = _read_json(_owner_path(root)) or {}
+    owner.update(
+        {
+            "schema_version": OWNER_SCHEMA_VERSION,
+            "account_ref": account_ref,
+            "key_fingerprint": _key_fingerprint(api_key),
+            "verified_at": _utc_now(),
+            "proof_source": "online_account_verification",
+        }
+    )
+    owner.setdefault("bound_at", owner["verified_at"])
+    owner.setdefault("reason", "verified_existing_state")
+    _write_json(_owner_path(root), owner)
+    return state_owner_status(account_ref, app_dir=root)
+
+
+def ensure_account_state(
+    account_response: dict[str, Any],
+    *,
+    api_key: str | None = None,
+    app_dir: Path | None = None,
+) -> dict[str, Any]:
     account_ref = account_ref_from_response(account_response)
     root = _root(app_dir)
     status = state_owner_status(account_ref, app_dir=root)
     if status["status"] == "empty_unbound":
-        return _bind(root, account_ref, reason="new_empty_state")
+        return _bind(root, account_ref, reason="new_empty_state", api_key=api_key)
     if status["status"] == "legacy_unbound":
         raise AccountStateError(
             {
@@ -164,13 +226,123 @@ def ensure_account_state(account_response: dict[str, Any], *, app_dir: Path | No
                 "next_suggested": "jobagent account switch --new-state",
             }
         )
+    if api_key:
+        return _refresh_online_proof(root, account_ref, api_key)
     return status
+
+
+def verify_offline_account_state(
+    api_key: str,
+    *,
+    app_dir: Path | None = None,
+    credential_file: Path | None = None,
+    env_key_in_use: bool | None = None,
+) -> dict[str, Any]:
+    """Authorize local control state without cloud access using a key-bound proof.
+
+    Schema-1 owners can migrate only when the saved credentials file is provably
+    older than the online binding. A subsequently replaced key is never allowed
+    to claim the previous account's local state while offline.
+    """
+
+    root = _root(app_dir)
+    owner_path = _owner_path(root)
+    owner = _read_json(owner_path) or {}
+    account_ref = str(owner.get("account_ref") or "")
+    if not _ACCOUNT_REF.fullmatch(account_ref):
+        raise AccountStateError(
+            {
+                "ok": False,
+                "error": "offline_account_proof_required",
+                "message": (
+                    "Cloud account verification is unavailable and this local state has no "
+                    "verified account binding for offline control."
+                ),
+                "offline": True,
+                "stale": True,
+                "next_suggested": "jobagent doctor env",
+            }
+        )
+
+    fingerprint = str(owner.get("key_fingerprint") or "")
+    if fingerprint:
+        if not hmac.compare_digest(fingerprint, _key_fingerprint(api_key)):
+            raise AccountStateError(
+                {
+                    "ok": False,
+                    "error": "offline_account_proof_mismatch",
+                    "message": (
+                        "The configured API key does not match the key-bound proof for the "
+                        "active local state. Online account verification is required."
+                    ),
+                    "offline": True,
+                    "stale": True,
+                    "next_suggested": "jobagent account status",
+                }
+            )
+    else:
+        env_active = (
+            bool(os.environ.get("JOBAGENT_API_KEY"))
+            if env_key_in_use is None
+            else env_key_in_use
+        )
+        credentials = credential_file or (root / "credentials")
+        bound_timestamp = _timestamp(owner.get("bound_at"))
+        migration_safe = bool(
+            int(owner.get("schema_version") or 1) == 1
+            and not env_active
+            and credentials.exists()
+            and bound_timestamp is not None
+        )
+        if migration_safe:
+            try:
+                saved_key = credentials.read_text(encoding="utf-8").strip()
+                migration_safe = bool(
+                    saved_key
+                    and hmac.compare_digest(saved_key, api_key)
+                    and _credential_mtime(credentials) <= float(bound_timestamp)
+                )
+            except OSError:
+                migration_safe = False
+        if not migration_safe:
+            raise AccountStateError(
+                {
+                    "ok": False,
+                    "error": "offline_account_proof_required",
+                    "message": (
+                        "Cloud account verification is unavailable and the existing local "
+                        "binding cannot be safely upgraded to a key-bound offline proof."
+                    ),
+                    "offline": True,
+                    "stale": True,
+                    "next_suggested": "jobagent doctor env",
+                }
+            )
+        owner.update(
+            {
+                "schema_version": OWNER_SCHEMA_VERSION,
+                "key_fingerprint": _key_fingerprint(api_key),
+                "verified_at": owner.get("bound_at"),
+                "proof_source": "legacy_bound_credentials",
+            }
+        )
+        _write_json(owner_path, owner)
+
+    return {
+        "status": "offline_verified",
+        "ready": True,
+        "offline": True,
+        "stale": True,
+        "verified_at": owner.get("verified_at") or owner.get("bound_at"),
+        "proof_source": owner.get("proof_source") or "key_fingerprint",
+    }
 
 
 def bind_legacy_state(
     account_response: dict[str, Any],
     *,
     confirm_legacy: bool,
+    api_key: str | None = None,
     app_dir: Path | None = None,
 ) -> dict[str, Any]:
     account_ref = account_ref_from_response(account_response)
@@ -198,7 +370,12 @@ def bind_legacy_state(
                 "next_suggested": "jobagent account bind --confirm-legacy",
             }
         )
-    bound = _bind(root, account_ref, reason="confirmed_legacy_state")
+    bound = _bind(
+        root,
+        account_ref,
+        reason="confirmed_legacy_state",
+        api_key=api_key,
+    )
     return {"ok": True, "local_state": bound, "changed": True}
 
 
@@ -229,12 +406,15 @@ def switch_account_state(
     account_response: dict[str, Any],
     *,
     new_state: bool,
+    api_key: str | None = None,
     app_dir: Path | None = None,
 ) -> dict[str, Any]:
     account_ref = account_ref_from_response(account_response)
     root = _root(app_dir)
     status = state_owner_status(account_ref, app_dir=root)
     if status["status"] == "ready":
+        if api_key:
+            status = _refresh_online_proof(root, account_ref, api_key)
         return {"ok": True, "local_state": status, "changed": False}
     if status["status"] == "legacy_unbound":
         raise AccountStateError(
@@ -247,7 +427,7 @@ def switch_account_state(
             }
         )
     if status["status"] == "empty_unbound":
-        bound = _bind(root, account_ref, reason="new_empty_state")
+        bound = _bind(root, account_ref, reason="new_empty_state", api_key=api_key)
         return {"ok": True, "local_state": bound, "changed": True, "restored": []}
     if not new_state:
         raise AccountStateError(
@@ -272,7 +452,7 @@ def switch_account_state(
             marker = active / relative
             if marker.exists():
                 marker.unlink()
-        bound = _bind(root, account_ref, reason="account_switch")
+        bound = _bind(root, account_ref, reason="account_switch", api_key=api_key)
     except Exception:
         for source, destination in reversed(journal):
             if source.exists() and not destination.exists():

@@ -66,13 +66,20 @@ def test_city_resolver_persists_verified_dynamic_mapping(tmp_path):
     resolver = ZhilianCityResolver(cache)
     snapshot = {
         "url": "https://sou.zhaopin.com/?jl=653&kw=AI",
+        "title": "杭州热门职位招聘 - 智联招聘",
         "cards": [{"cityName": "杭州"}],
     }
 
     verified = resolver.verify_snapshot(
         "杭州市", snapshot, expected_code=None, source="visible_filter_recovery"
     )
-    resolver.remember("杭州市", verified["observedCode"], evidence_url=verified["observedUrl"])
+    resolver.remember(
+        "杭州市",
+        verified["observedCode"],
+        evidence_url=verified["observedUrl"],
+        evidence_sources=verified["evidenceSources"],
+        verification_source=verified["verificationSource"],
+    )
 
     assert verified["verified"] is True
     assert resolver.lookup("杭州") == ("653", "verified_cache")
@@ -93,6 +100,41 @@ def test_city_resolver_tolerates_recommendations_outside_verified_city():
     assert verified["verified"] is True
     assert verified["matchingCards"] == 1
     assert verified["mismatchedCardCities"] == ["上海"]
+
+
+def test_city_resolver_rejects_untrusted_url_code_without_semantic_evidence():
+    verified = ZhilianCityResolver().verify_snapshot(
+        "深圳",
+        {
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            "title": "智联招聘",
+            "cards": [],
+        },
+        expected_code="489",
+        source="bundled_seed",
+    )
+
+    assert verified["verified"] is False
+    assert verified["observedCode"] == "765"
+    assert verified["evidenceSources"] == []
+
+
+def test_city_resolver_accepts_changed_code_only_with_independent_city_evidence():
+    verified = ZhilianCityResolver().verify_snapshot(
+        "深圳",
+        {
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            "title": "深圳热门职位招聘 - 智联招聘",
+            "visibleCity": "深圳",
+            "cards": [{"cityName": "深圳"}, {"cityName": "深圳"}],
+        },
+        expected_code="489",
+        source="bundled_seed",
+    )
+
+    assert verified["verified"] is True
+    assert verified["codeChanged"] is True
+    assert verified["evidenceSources"] == ["job_cards", "page_title", "visible_city"]
 
 
 class _DynamicCityDriver:
@@ -134,9 +176,10 @@ class _DynamicCityDriver:
                 if self.verified
                 else "https://www.zhaopin.com/sou/kw01300K004004338VHKHKTEG/p1"
             ),
-            "title": "智联招聘",
+            "title": "杭州热门职位招聘 - 智联招聘" if self.verified else "智联招聘",
             "loginRequired": False,
             "searchKeyword": "AI产品经理",
+            "visibleCity": "杭州" if self.verified else "",
             "cards": [
                 {
                     "positionId": "HZ-1",
@@ -214,6 +257,139 @@ def test_collector_replaces_stale_cached_city_code_after_visible_recovery(tmp_pa
     assert driver.calls[0] == "https://www.zhaopin.com/"
     assert driver.snapshot_count == 2
     assert resolver.lookup("杭州") == ("653", "verified_cache")
+
+
+class _ChangedShenzhenCityDriver(_DynamicCityDriver):
+    def __init__(self, *, corroborated: bool = True):
+        super().__init__()
+        self.corroborated = corroborated
+        self.city_filter_calls = 0
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" in script:
+            return super()._exec_js(script)
+        if "zhilian_city_filter" in script:
+            self.city_filter_calls += 1
+            return {
+                "ok": False,
+                "mode": "zhilian_city_filter",
+                "error": "zhilian_city_option_not_found",
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            }
+        return {
+            "ok": True,
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            "title": "深圳热门职位招聘 - 智联招聘" if self.corroborated else "智联招聘",
+            "readyState": "complete",
+            "sessionState": "logged_in",
+            "loginRequired": False,
+            "searchKeyword": "AI产品经理",
+            "visibleCity": "深圳" if self.corroborated else "",
+            "cards": [
+                {
+                    "positionId": "SZ-NEW-1",
+                    "jobTitle": "AI产品经理",
+                    "companyName": "深圳示例科技",
+                    "cityName": "深圳" if self.corroborated else "",
+                    "jobUrl": "https://www.zhaopin.com/jobdetail/SZ-NEW-1.htm",
+                }
+            ],
+        }
+
+
+class _SlowLoadingShenzhenDriver(_ChangedShenzhenCityDriver):
+    def __init__(self, *, settle: bool = True):
+        super().__init__()
+        self.settle = settle
+        self.keyword_probe_count = 0
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" not in script:
+            return super()._exec_js(script)
+        self.keyword_probe_count += 1
+        if not self.settle or self.keyword_probe_count == 1:
+            return {
+                "ok": False,
+                "error": "zhilian_page_state_pending",
+                "readyState": "loading",
+                "sessionState": "loading",
+                # A transient header control must not become login_required.
+                "loginRequired": True,
+                "loginEvidence": ["header_login_link"],
+                "accountEvidence": [],
+            }
+        if self.keyword_probe_count == 2:
+            return {
+                "ok": False,
+                "error": "zhilian_page_state_pending",
+                "readyState": "complete",
+                "sessionState": "unknown",
+                "loginRequired": False,
+                "loginEvidence": ["header_login_link"],
+                "accountEvidence": ["account_navigation"],
+            }
+        return super()._exec_js(script)
+
+
+def test_collector_waits_past_default_window_for_slow_loading_page(tmp_path, monkeypatch):
+    driver = _SlowLoadingShenzhenDriver()
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=8)
+
+    assert result.ok is True
+    assert driver.keyword_probe_count == 3
+    assert result.jobs[0].city == "深圳"
+
+
+def test_collector_reports_unknown_not_login_when_loading_never_settles(tmp_path, monkeypatch):
+    driver = _SlowLoadingShenzhenDriver(settle=False)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=0)
+
+    assert result.ok is False
+    assert result.error == "zhilian_page_state_unknown"
+    assert result.error != "zhilian_login_required"
+
+
+def test_collector_learns_changed_shenzhen_code_after_city_dom_change(tmp_path):
+    cache = tmp_path / "cities.json"
+    driver = _ChangedShenzhenCityDriver()
+
+    result = ZhilianReadOnlyCollector(driver=driver, city_cache_path=cache).collect(
+        query="AI产品经理", city="深圳", limit=5, wait_seconds=1
+    )
+
+    assert result.ok is True
+    assert result.jobs[0].city == "深圳"
+    assert driver.city_filter_calls >= 1
+    assert ZhilianCityResolver(cache).lookup("深圳") == ("765", "verified_cache")
+    cached = json.loads(cache.read_text(encoding="utf-8"))["cities"]["深圳"]
+    assert cached["verification_source"] == "dynamic_multi_source"
+    assert cached["evidence_sources"] == ["job_cards", "page_title", "visible_city"]
+
+
+def test_collector_fails_closed_after_city_dom_change_when_only_url_code_is_known(tmp_path):
+    result = ZhilianReadOnlyCollector(
+        driver=_ChangedShenzhenCityDriver(corroborated=False),
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=1)
+
+    assert result.ok is False
+    assert result.error == "zhilian_city_resolution_unverified"
+    assert result.jobs == []
 
 
 class _RejectedKeywordDriver(_DynamicCityDriver):

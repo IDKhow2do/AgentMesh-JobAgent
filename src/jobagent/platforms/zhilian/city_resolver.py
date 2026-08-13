@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from jobagent.infra.state import APP_DIR
 
-CITY_CACHE_SCHEMA_VERSION = 1
+CITY_CACHE_SCHEMA_VERSION = 2
 BUNDLED_CITY_CODES = {
     "北京": "530",
     "上海": "538",
@@ -56,7 +56,15 @@ class ZhilianCityResolver:
         bundled = BUNDLED_CITY_CODES.get(normalized)
         return (bundled, "bundled_seed") if bundled else (None, "unresolved")
 
-    def remember(self, city: str, code: str, *, evidence_url: str) -> None:
+    def remember(
+        self,
+        city: str,
+        code: str,
+        *,
+        evidence_url: str,
+        evidence_sources: list[str] | None = None,
+        verification_source: str = "legacy_verified",
+    ) -> None:
         normalized = normalize_city_name(city)
         if not normalized or not code.isdigit():
             return
@@ -67,6 +75,8 @@ class ZhilianCityResolver:
             "code": code,
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "evidence_url": evidence_url,
+            "evidence_sources": sorted(set(evidence_sources or [])),
+            "verification_source": verification_source,
         }
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
@@ -84,6 +94,8 @@ class ZhilianCityResolver:
         normalized = normalize_city_name(city)
         observed_url = str(snapshot.get("url") or "")
         observed_code = city_code_from_url(observed_url)
+        observed_title = str(snapshot.get("title") or "")
+        visible_values = _visible_city_values(snapshot)
         matching = 0
         mismatches: list[str] = []
         for card in snapshot.get("cards") or []:
@@ -96,9 +108,40 @@ class ZhilianCityResolver:
                 matching += 1
             else:
                 mismatches.append(card_city)
-        code_matches = bool(observed_code and (not expected_code or observed_code == expected_code))
-        cards_match = matching > 0 or not (snapshot.get("cards") or [])
-        verified = bool(code_matches and cards_match)
+        card_cities_present = bool(matching or mismatches)
+        all_cards_other_city = bool(card_cities_present and matching == 0)
+        evidence_sources: list[str] = []
+        if normalized and normalized in normalize_city_name(observed_title):
+            evidence_sources.append("page_title")
+        if normalized and normalized in visible_values:
+            evidence_sources.append("visible_city")
+        if matching:
+            evidence_sources.append("job_cards")
+        evidence_sources.sort()
+
+        code_changed = bool(observed_code and expected_code and observed_code != expected_code)
+        trusted_code_match = bool(
+            observed_code
+            and expected_code
+            and observed_code == expected_code
+            and source in {"bundled_seed", "verified_cache"}
+        )
+        if not observed_code or all_cards_other_city:
+            verified = False
+        elif code_changed or not expected_code:
+            # A newly observed code is only learned when two independent,
+            # human-readable page signals agree on the requested city.
+            verified = len(evidence_sources) >= 2
+        else:
+            # Existing seeds/cache still require at least one semantic signal;
+            # the URL code alone is never sufficient.
+            verified = bool(trusted_code_match and evidence_sources)
+
+        verification_source = (
+            "dynamic_multi_source" if verified and (code_changed or not expected_code)
+            else "trusted_mapping_with_page_evidence" if verified
+            else "unverified"
+        )
         return {
             "ok": verified,
             "mode": "zhilian_city_resolution",
@@ -107,7 +150,28 @@ class ZhilianCityResolver:
             "expectedCode": expected_code,
             "observedCode": observed_code,
             "observedUrl": observed_url,
+            "observedTitle": observed_title,
+            "visibleCities": visible_values,
             "matchingCards": matching,
             "mismatchedCardCities": sorted(set(mismatches)),
+            "allCardsOtherCity": all_cards_other_city,
+            "codeChanged": code_changed,
+            "evidenceSources": evidence_sources,
+            "verificationSource": verification_source,
             "verified": verified,
         }
+
+
+def _visible_city_values(snapshot: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in ("visibleCity", "currentCity", "selectedCity"):
+        if snapshot.get(key):
+            values.append(snapshot[key])
+    if isinstance(snapshot.get("visibleCities"), list):
+        values.extend(snapshot["visibleCities"])
+    normalized = {
+        normalize_city_name(str(value))
+        for value in values
+        if normalize_city_name(str(value))
+    }
+    return sorted(normalized)

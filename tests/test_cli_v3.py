@@ -17,6 +17,7 @@ from jobagent.cli import (
     _login,
     _maybe_update,
     _prepare_client_upgrade,
+    _verify_state_owner_for_command,
     _with_login_workflow,
     build_parser,
 )
@@ -190,7 +191,7 @@ def test_init_verifies_new_api_key_before_saving(monkeypatch):
     )
     monkeypatch.setattr(
         "jobagent.infra.account_state.ensure_account_state",
-        lambda _account: {"status": "ready", "ready": True},
+        lambda _account, **_kwargs: {"status": "ready", "ready": True},
     )
     args = build_parser().parse_args(["init", "--key", "jobagent_live_new"])
 
@@ -265,7 +266,7 @@ def test_doctor_env_treats_signup_trial_as_immediately_usable(tmp_path, monkeypa
     monkeypatch.setattr("jobagent.infra.state.profile_path", lambda: tmp_path / "profile.json")
     monkeypatch.setattr(
         "jobagent.infra.account_state.ensure_account_state",
-        lambda _account: {"status": "ready", "ready": True},
+        lambda _account, **_kwargs: {"status": "ready", "ready": True},
     )
     monkeypatch.setattr(
         "jobagent.infra.rounds.round_status",
@@ -314,7 +315,7 @@ def test_doctor_env_reports_healthy_environment_when_credits_are_insufficient(
     )
     monkeypatch.setattr(
         "jobagent.infra.account_state.ensure_account_state",
-        lambda _account: {"status": "ready", "ready": True},
+        lambda _account, **_kwargs: {"status": "ready", "ready": True},
     )
     monkeypatch.setattr("jobagent.infra.state.profile_path", lambda: tmp_path / "profile.json")
     monkeypatch.setattr(
@@ -369,6 +370,214 @@ def test_round_skip_updates_only_current_round(monkeypatch):
     assert updates == [("zhilian", "skipped_this_round")]
     assert result["ok"] is True
     assert result["workflow"]["current_platform"] == "zhilian"
+
+
+def test_round_status_uses_key_bound_local_state_during_transient_outage(monkeypatch):
+    from jobagent.infra import account_state, cloud_client
+
+    monkeypatch.setattr(
+        "jobagent.infra.credentials.load_api_key",
+        lambda: "agentmesh_live_account_a_secret",
+    )
+    monkeypatch.setattr(
+        cloud_client,
+        "me",
+        lambda: (_ for _ in ()).throw(
+            cloud_client.CloudError(
+                "TLS connection ended unexpectedly",
+                code="tls_connection_eof",
+                retryable=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        account_state,
+        "verify_offline_account_state",
+        lambda _key: {
+            "ready": True,
+            "offline": True,
+            "stale": True,
+            "verified_at": "2026-08-13T08:00:00+00:00",
+        },
+    )
+    args = build_parser().parse_args(["round", "status"])
+
+    verification = _verify_state_owner_for_command(args)
+
+    assert verification == {
+        "mode": "offline",
+        "offline": True,
+        "stale": True,
+        "verified_at": "2026-08-13T08:00:00+00:00",
+        "reason_code": "tls_connection_eof",
+    }
+
+
+def test_round_status_does_not_fallback_on_certificate_failure(monkeypatch):
+    from jobagent.infra import account_state, cloud_client
+
+    monkeypatch.setattr(
+        "jobagent.infra.credentials.load_api_key",
+        lambda: "agentmesh_live_account_a_secret",
+    )
+    monkeypatch.setattr(
+        cloud_client,
+        "me",
+        lambda: (_ for _ in ()).throw(
+            cloud_client.CloudError(
+                "TLS certificate verification failed",
+                code="tls_certificate_verification_failed",
+                retryable=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        account_state,
+        "verify_offline_account_state",
+        lambda _key: pytest.fail("certificate failure used offline local state"),
+    )
+    args = build_parser().parse_args(["round", "status"])
+
+    with pytest.raises(cloud_client.CloudError) as error:
+        _verify_state_owner_for_command(args)
+
+    assert error.value.code == "tls_certificate_verification_failed"
+
+
+def test_confirmed_round_skip_can_write_after_offline_proof(monkeypatch):
+    from jobagent.infra import account_state, cloud_client
+
+    updates: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "jobagent.infra.credentials.load_api_key",
+        lambda: "agentmesh_live_account_a_secret",
+    )
+    monkeypatch.setattr(
+        cloud_client,
+        "me",
+        lambda: (_ for _ in ()).throw(
+            cloud_client.CloudError(
+                "gateway unavailable",
+                status=503,
+                code="cloud_gateway_unavailable",
+                retryable=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        account_state,
+        "verify_offline_account_state",
+        lambda _key: {
+            "ready": True,
+            "offline": True,
+            "stale": True,
+            "verified_at": "2026-08-13T08:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.rounds.assert_platform_turn",
+        lambda platform: {"current_platform": platform},
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.rounds.set_platform_status",
+        lambda platform, status, **_kwargs: updates.append((platform, status)),
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.rounds.round_status",
+        lambda: {
+            "round_id": "round-1",
+            "current_platform": "51job",
+            "next_suggested": "jobagent 51job login --check",
+        },
+    )
+    args = build_parser().parse_args(
+        ["round", "skip", "--platform", "zhilian", "--confirm-skip"]
+    )
+
+    verification = _verify_state_owner_for_command(args)
+    result = _dispatch(args)
+
+    assert verification["mode"] == "offline"
+    assert updates == [("zhilian", "skipped_this_round")]
+    assert result["workflow"]["current_platform"] == "51job"
+
+
+def test_main_marks_offline_round_status_as_stale(monkeypatch, capsys):
+    from jobagent import cli
+
+    monkeypatch.setattr(cli, "_maybe_update", lambda _args: None)
+    monkeypatch.setattr(cli, "_prepare_client_upgrade", lambda _args: None)
+    monkeypatch.setattr(
+        cli,
+        "_verify_state_owner_for_command",
+        lambda _args: {
+            "mode": "offline",
+            "offline": True,
+            "stale": True,
+            "verified_at": "2026-08-13T08:00:00+00:00",
+            "reason_code": "network_timeout",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_dispatch",
+        lambda _args: {"ok": True, "workflow": {"current_platform": "zhilian"}},
+    )
+    monkeypatch.setattr("sys.argv", ["jobagent", "round", "status"])
+
+    cli.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["offline"] is True
+    assert payload["stale"] is True
+    assert payload["account_verification"]["reason_code"] == "network_timeout"
+
+
+def test_main_marks_offline_round_control_error_as_stale(monkeypatch, capsys):
+    from jobagent import cli
+    from jobagent.infra.rounds import RoundOrderError
+
+    verification = {
+        "mode": "offline",
+        "offline": True,
+        "stale": True,
+        "verified_at": "2026-08-13T08:00:00+00:00",
+        "reason_code": "cloud_gateway_unavailable",
+    }
+    monkeypatch.setattr(cli, "_maybe_update", lambda _args: None)
+    monkeypatch.setattr(cli, "_prepare_client_upgrade", lambda _args: None)
+    monkeypatch.setattr(
+        cli,
+        "_verify_state_owner_for_command",
+        lambda _args: verification,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_dispatch",
+        lambda _args: (_ for _ in ()).throw(
+            RoundOrderError(
+                {
+                    "ok": False,
+                    "error": "platform_out_of_order",
+                    "workflow": {"current_platform": "zhilian"},
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jobagent", "round", "skip", "--platform", "51job", "--confirm-skip"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    assert error.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"] == "platform_out_of_order"
+    assert payload["offline"] is True
+    assert payload["stale"] is True
+    assert payload["account_verification"] == verification
 
 
 def test_dispatch_checks_round_order_before_opening_platform_browser(monkeypatch):
@@ -716,6 +925,11 @@ def test_public_agent_docs_require_automatic_discover_transport_recovery():
         assert "retryable=true" in text
         assert "request_preserved=true" in text
         assert "next_suggested" in text
+        assert "billing_status=not_charged" in text
+        assert "offline=true" in text
+        assert "stale=true" in text
+        assert "offline_account_proof_required" in text
+        assert "offline_account_proof_mismatch" in text
 
 
 def test_public_agent_docs_require_native_interaction_and_text_fallback():
@@ -974,7 +1188,22 @@ def test_discover_verifies_both_signatures_and_discards_raw_candidates(tmp_path,
     monkeypatch.setattr(application, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
     pending_writes: list[dict] = []
     pending_clears: list[str | None] = []
+    pending_start_writes: list[dict] = []
+    pending_start_clears: list[str | None] = []
     monkeypatch.setattr(application, "load_pending_decision", lambda _platform: None)
+    monkeypatch.setattr(application, "load_pending_start", lambda _platform: None)
+    monkeypatch.setattr(
+        application,
+        "save_pending_start",
+        lambda platform, **payload: pending_start_writes.append(
+            {"platform": platform, **payload}
+        ),
+    )
+    monkeypatch.setattr(
+        application,
+        "clear_pending_start",
+        lambda _platform, *, request_id=None: pending_start_clears.append(request_id),
+    )
     monkeypatch.setattr(
         application,
         "save_pending_decision",
@@ -1021,6 +1250,9 @@ def test_discover_verifies_both_signatures_and_discards_raw_candidates(tmp_path,
     assert pending_writes == [
         {"platform": "51job", "plan": plan, "jobs": candidates}
     ]
+    assert len(pending_start_writes) == 1
+    assert pending_start_writes[0]["request_id"].startswith("51job:")
+    assert pending_start_clears == [pending_start_writes[0]["request_id"]]
     assert pending_clears == [discover_id]
     assert result["workflow"]["round_id"] == "round-1"
     persisted = json.loads(output.read_text(encoding="utf-8"))
@@ -1057,6 +1289,190 @@ def test_discover_verifies_both_signatures_and_discards_raw_candidates(tmp_path,
     assert recovered["resumed"] is True
     assert recovered["discover_id"] == discover_id
     assert pending_clears == [discover_id, discover_id]
+
+
+def test_discover_start_failure_preserves_and_reuses_request_id(
+    tmp_path,
+    monkeypatch,
+):
+    import jobagent.application.discover as application
+    import jobagent.infra.discovery_state as discovery_state
+
+    profile = {
+        "schema_version": 1,
+        "preferences": {"targetRoles": [{"title": "数据运营经理"}]},
+    }
+    request_ids: list[str] = []
+    monkeypatch.setattr(application, "profile_path", lambda: tmp_path / "profile.json")
+    monkeypatch.setattr(application, "load_json", lambda _path: profile)
+    monkeypatch.setattr(application, "require_compatible_profile", lambda _profile: None)
+    monkeypatch.setattr(application, "load_pending_decision", lambda _platform: None)
+    monkeypatch.setattr(discovery_state, "discoveries_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        application.rounds,
+        "ensure_current_round",
+        lambda: {
+            "round_id": "round-1",
+            "intent": {
+                "status": "confirmed",
+                "target_roles": ["数据运营经理"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.account_state.current_account_ref",
+        lambda: "acct_account_a",
+    )
+
+    def fail_start(**kwargs):
+        request_ids.append(kwargs["request_id"])
+        raise application.cloud_client.CloudError(
+            "TLS connection ended unexpectedly",
+            code="tls_connection_eof",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(application.cloud_client, "discovery_start", fail_start)
+    monkeypatch.setattr(
+        application,
+        "collect_from_search_plan",
+        lambda *_args, **_kwargs: pytest.fail("failed start reached browser collection"),
+    )
+
+    errors = []
+    for _attempt in range(2):
+        with pytest.raises(application.cloud_client.CloudError) as error:
+            application.run_discover("zhilian", page_delay=0)
+        errors.append(error.value)
+
+    assert len(request_ids) == 2
+    assert request_ids[0] == request_ids[1]
+    assert request_ids[0].startswith("zhilian:")
+    assert errors[-1].details == {
+        "request_preserved": True,
+        "request_id": request_ids[0],
+        "next_suggested": "jobagent zhilian discover",
+        "no_charge": True,
+        "billing_status": "not_charged",
+        "billing": {
+            "status": "not_charged",
+            "retry_reuses_request_id": True,
+            "additional_charge_on_retry": False,
+        },
+    }
+    pending = discovery_state.load_pending_start("zhilian")
+    assert pending is not None
+    assert pending["request_id"] == request_ids[0]
+    assert pending["round_id"] == "round-1"
+    assert pending["account_ref"] == "acct_account_a"
+
+
+def test_discover_collection_failure_preserves_request_and_no_charge(
+    tmp_path,
+    monkeypatch,
+):
+    import jobagent.application.discover as application
+    import jobagent.infra.discovery_state as discovery_state
+
+    profile = {"schema_version": 1, "preferences": {"targetRoles": [{"title": "产品经理"}]}}
+    plan = {"platform": "zhilian", "discover_id": "dis_city_recovery", "queries": [{}]}
+    request_ids: list[str] = []
+    monkeypatch.setattr(application, "profile_path", lambda: tmp_path / "profile.json")
+    monkeypatch.setattr(application, "load_json", lambda _path: profile)
+    monkeypatch.setattr(application, "require_compatible_profile", lambda _profile: None)
+    monkeypatch.setattr(application, "load_pending_decision", lambda _platform: None)
+    monkeypatch.setattr(discovery_state, "discoveries_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        application.rounds,
+        "ensure_current_round",
+        lambda: {
+            "round_id": "round-1",
+            "intent": {"status": "confirmed", "target_roles": ["产品经理"]},
+        },
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.account_state.current_account_ref",
+        lambda: "acct_account_a",
+    )
+    monkeypatch.setattr(
+        application,
+        "verify_search_plan",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(application, "active_command", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(application, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
+
+    def start(**kwargs):
+        request_ids.append(kwargs["request_id"])
+        return plan
+
+    def fail_collection(*_args, **_kwargs):
+        raise application.CollectionError(
+            "zhilian_page_state_unknown",
+            "Zhilian page state stayed unknown",
+            details={"retryable": True},
+        )
+
+    monkeypatch.setattr(application.cloud_client, "discovery_start", start)
+    monkeypatch.setattr(application, "collect_from_search_plan", fail_collection)
+
+    errors = []
+    for _attempt in range(2):
+        with pytest.raises(application.CollectionError) as error:
+            application.run_discover("zhilian", page_delay=0)
+        errors.append(error.value)
+
+    assert request_ids[0] == request_ids[1]
+    assert errors[-1].details == {
+        "retryable": True,
+        "request_preserved": True,
+        "request_id": request_ids[0],
+        "no_charge": True,
+        "billing_status": "not_charged",
+        "billing": {
+            "status": "not_charged",
+            "retry_reuses_request_id": True,
+            "additional_charge_on_retry": False,
+        },
+        "next_suggested": "jobagent zhilian discover",
+    }
+    pending = discovery_state.load_pending_start("zhilian")
+    assert pending is not None
+    assert pending["request_id"] == request_ids[0]
+
+
+def test_discovery_decision_failure_preserves_idempotent_billing_recovery(monkeypatch):
+    import jobagent.application.discover as application
+
+    def fail_decision(**_kwargs):
+        raise application.cloud_client.CloudError(
+            "gateway unavailable",
+            status=503,
+            code="cloud_gateway_unavailable",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(application.cloud_client, "discovery_decide", fail_decision)
+
+    with pytest.raises(application.cloud_client.CloudError) as error:
+        application._decision_result(
+            "zhilian",
+            plan={"discover_id": "dis_stable"},
+            candidates=[{"id": "job-1"}],
+            resumed=False,
+        )
+
+    assert error.value.details == {
+        "request_preserved": True,
+        "discover_id": "dis_stable",
+        "next_suggested": "jobagent zhilian discover",
+        "billing_status": "response_pending_reconciliation",
+        "billing": {
+            "status": "response_pending_reconciliation",
+            "retry_reuses_discover_id": True,
+            "additional_charge_on_retry": False,
+        },
+    }
 
 
 def test_unexpected_cli_error_writes_diagnostic_log(tmp_path, monkeypatch, capsys):
@@ -1111,6 +1527,51 @@ def test_cli_reports_delivery_preview_recovery_without_diagnostic_log(
     reported = json.loads(capsys.readouterr().err)
     assert reported == payload
     assert "diagnostic_log" not in reported
+
+
+def test_cli_reports_collection_recovery_contract(monkeypatch, capsys):
+    from jobagent import cli
+    from jobagent.platforms.discovery import CollectionError
+
+    recovery = {
+        "retryable": True,
+        "request_preserved": True,
+        "request_id": "zhilian:req-stable",
+        "next_suggested": "jobagent zhilian discover",
+        "billing_status": "not_charged",
+        "billing": {
+            "status": "not_charged",
+            "retry_reuses_request_id": True,
+            "additional_charge_on_retry": False,
+        },
+    }
+    monkeypatch.setattr(cli, "_maybe_update", lambda _args: None)
+    monkeypatch.setattr(cli, "_prepare_client_upgrade", lambda _args: None)
+    monkeypatch.setattr(cli, "_verify_state_owner_for_command", lambda _args: None)
+    monkeypatch.setattr(
+        cli,
+        "_dispatch",
+        lambda _args: (_ for _ in ()).throw(
+            CollectionError(
+                "zhilian_page_state_unknown",
+                "Zhilian page state stayed unknown",
+                details=recovery,
+            )
+        ),
+    )
+    monkeypatch.setattr("sys.argv", ["jobagent", "zhilian", "discover"])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    reported = json.loads(capsys.readouterr().err)
+    assert reported["error"] == "zhilian_page_state_unknown"
+    assert reported["request_preserved"] is True
+    assert reported["request_id"] == "zhilian:req-stable"
+    assert reported["next_suggested"] == "jobagent zhilian discover"
+    assert reported["no_charge"] is True
+    assert reported["billing"]["additional_charge_on_retry"] is False
 
 
 def test_cli_blocks_platform_dispatch_when_upgrade_requires_recovery(monkeypatch, capsys):

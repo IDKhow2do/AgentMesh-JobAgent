@@ -4,7 +4,89 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-07-24.1"
+ZHILIAN_SELECTOR_VERSION = "2026-08-13.1"
+
+_ZHILIAN_SESSION_PROBE_JS = r"""
+      function zhilianSessionProbe(){
+        const href = location.href || '';
+        const title = document.title || '';
+        const readyState = document.readyState || 'unknown';
+        const bodyText = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
+        function clean(value){
+          return String(value || '').replace(/\s+/g, ' ').trim();
+        }
+        function visible(el){
+          if (!el || !(el instanceof Element)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && Number(style.opacity || '1') !== 0
+            && rect.width > 6
+            && rect.height > 6;
+        }
+        const authRoute = /passport|(?:^|[/._-])login(?:[/._?=-]|$)/i.test(href);
+        const loginEvidence = [];
+        const accountEvidence = [];
+        const controls = Array.from(document.querySelectorAll('a,button,[role="button"],[aria-label]'))
+          .filter(visible);
+        for (const el of controls){
+          const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const target = clean(el.getAttribute('href') || '');
+          if (/^(登录|登录[/]注册|注册[/]登录|扫码登录|验证码登录|手机验证码)$/.test(text)
+              || /passport|(?:^|[/._-])login(?:[/._?=-]|$)/i.test(target)) {
+            loginEvidence.push('visible_login_control');
+          }
+          if (/^(我的|消息|个人中心|简历中心|我的简历|求职中心)$/.test(text)
+              || (/[/](?:my|user|personal|account|resume|message)(?:[/._?=-]|$)/i.test(target)
+                  && !/passport|login/i.test(target))) {
+            accountEvidence.push('account_navigation');
+          }
+        }
+        const contentEvidence = [];
+        const searchInput = Array.from(document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])'))
+          .find(visible);
+        if (searchInput) contentEvidence.push('search_input');
+        if (Array.from(document.querySelectorAll('a[href*="/jobdetail/"]')).some(visible)) {
+          contentEvidence.push('job_results');
+        }
+        let sessionState = 'unknown';
+        if (authRoute) {
+          sessionState = 'login_required';
+          loginEvidence.push('auth_route');
+        } else if (readyState !== 'complete') {
+          sessionState = 'loading';
+        } else if (loginEvidence.length && accountEvidence.length) {
+          sessionState = 'unknown';
+        } else if (accountEvidence.length) {
+          sessionState = 'logged_in';
+        } else if (loginEvidence.length) {
+          sessionState = 'login_required';
+        } else if (contentEvidence.length) {
+          sessionState = 'page_ready';
+        }
+        return {
+          url: href,
+          title,
+          readyState,
+          sessionState,
+          loginRequired: sessionState === 'login_required',
+          loginEvidence: Array.from(new Set(loginEvidence)),
+          accountEvidence: Array.from(new Set(accountEvidence)),
+          contentEvidence: Array.from(new Set(contentEvidence)),
+          bodySnippet: bodyText.slice(0, 800)
+        };
+      }
+"""
+
+
+def build_zhilian_session_probe_script() -> str:
+    return f"""
+    (function(){{
+      {_ZHILIAN_SESSION_PROBE_JS}
+      return JSON.stringify({{ok: true, ...zhilianSessionProbe()}});
+    }})()
+    """
 
 
 def build_zhilian_keyword_search_script(keyword: str) -> str:
@@ -13,10 +95,11 @@ def build_zhilian_keyword_search_script(keyword: str) -> str:
     (function(){{
       const mode = 'zhilian_keyword_search';
       const keyword = {safe_keyword};
-      const href = location.href || '';
-      const title = document.title || '';
+      {_ZHILIAN_SESSION_PROBE_JS}
+      const session = zhilianSessionProbe();
+      const href = session.url;
+      const title = session.title;
       const bodyText = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
-      const loginRequired = /passport|login|登录[/]注册|请登录|扫码登录|验证码登录|手机验证码|安全验证|滑块/.test(href + '\\n' + title + '\\n' + bodyText.slice(0, 800));
       function clean(value){{
         return String(value || '').replace(/\\s+/g, ' ').trim();
       }}
@@ -40,8 +123,11 @@ def build_zhilian_keyword_search_script(keyword: str) -> str:
           text: clean(el.innerText || el.textContent || '')
         }};
       }}
-      if (loginRequired) {{
-        return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', loginRequired: true, url: href, title}});
+      if (session.loginRequired) {{
+        return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', ...session}});
+      }}
+      if (session.sessionState === 'loading' || session.sessionState === 'unknown') {{
+        return JSON.stringify({{ok: false, mode, error: 'zhilian_page_state_pending', ...session}});
       }}
       const inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])'))
         .filter(visible)
@@ -104,7 +190,7 @@ def build_zhilian_keyword_search_script(keyword: str) -> str:
         targetNormalized,
         clickPoint: clickPoint(button),
         urlBefore: href,
-        title
+        ...session
       }});
     }})()
     """
@@ -172,15 +258,19 @@ def build_zhilian_city_filter_script(city: str) -> str:
     (function(){{
       const mode = 'zhilian_city_filter';
       const targetCity = {safe_city};
-      const href = location.href || '';
-      const title = document.title || '';
+      {_ZHILIAN_SESSION_PROBE_JS}
+      const session = zhilianSessionProbe();
+      const href = session.url;
+      const title = session.title;
       const bodyText = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
-      const loginRequired = /passport|login|登录[/]注册|请登录|扫码登录|验证码登录|手机验证码|安全验证|滑块/.test(href + '\\n' + title + '\\n' + bodyText.slice(0, 800));
       if (!targetCity) {{
         return JSON.stringify({{ok: true, mode, skipped: true}});
       }}
-      if (loginRequired) {{
-        return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', loginRequired: true, url: href, title}});
+      if (session.loginRequired) {{
+        return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', ...session}});
+      }}
+      if (session.sessionState === 'loading' || session.sessionState === 'unknown') {{
+        return JSON.stringify({{ok: false, mode, error: 'zhilian_page_state_pending', ...session}});
       }}
       function clean(value){{
         return String(value || '').replace(/\\s+/g, ' ').trim();
@@ -357,10 +447,12 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
     (function(){{
       const selectorVersion = "{ZHILIAN_SELECTOR_VERSION}";
       const limit = {safe_limit};
+      {_ZHILIAN_SESSION_PROBE_JS}
+      const session = zhilianSessionProbe();
       const text = (document.body && (document.body.innerText || document.body.textContent) || '').trim();
-      const title = document.title || '';
-      const href = location.href || '';
-      const loginRequired = /passport|login|登录[/]注册|请登录|扫码登录|验证码登录|手机验证码|安全验证|滑块/.test(href + '\\n' + title + '\\n' + text.slice(0, 800));
+      const title = session.title;
+      const href = session.url;
+      const loginRequired = session.loginRequired;
       function visible(el){{
         const style = window.getComputedStyle(el);
         const rect = el.getBoundingClientRect();
@@ -423,6 +515,23 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         ? 'zhilian_keyword_rejected'
         : '';
       const navLabels = new Set(['首页', '职位推荐', '城市频道', '政企招聘', '校园招聘', '高端职位', '海外招聘', '驻外专区', '测评及培训', '职Q社区', '我要招人']);
+      const cityNames = ['北京','上海','广州','深圳','天津','武汉','西安','成都','大连','长春','沈阳','南京','济南','青岛','杭州','苏州','无锡','宁波','重庆','郑州','长沙','福州','厦门','哈尔滨'];
+      const selectedCityCandidates = Array.from(document.querySelectorAll('body *'))
+        .filter(visible)
+        .filter((el) => cityNames.includes(clean(el.innerText || el.textContent || '')))
+        .filter((el) => {{
+          const className = String(el.className || '') + ' ' + String(el.parentElement && el.parentElement.className || '');
+          return /active|selected|checked|current/i.test(className)
+            || el.getAttribute('aria-selected') === 'true'
+            || el.getAttribute('aria-current') === 'true';
+        }})
+        .map((el) => ({{
+          city: clean(el.innerText || el.textContent || ''),
+          rect: el.getBoundingClientRect()
+        }}))
+        .filter((item) => item.rect.top < 420)
+        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+      const visibleCity = selectedCityCandidates.length ? selectedCityCandidates[0].city : '';
       const cards = [];
       const seen = new Set();
       for (const anchor of anchors) {{
@@ -458,6 +567,11 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         url: href,
         title,
         loginRequired,
+        readyState: session.readyState,
+        sessionState: session.sessionState,
+        loginEvidence: session.loginEvidence,
+        accountEvidence: session.accountEvidence,
+        visibleCity,
         searchKeyword: searchInput ? clean(searchInput.value) : '',
         searchKeywordVisible: !!searchInput,
         platformError,

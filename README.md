@@ -138,7 +138,9 @@ Every platform command returns a `workflow` object. A platform audit does not en
 jobagent round skip --platform <platform> --confirm-skip
 ```
 
-Long Discover and delivery operations emit timestamped stage events and periodic heartbeats. Transient TLS, connection and gateway failures are retried automatically for idempotent Discover requests. If all bounded attempts fail, the CLI returns `retryable=true`, `request_preserved=true` and one `next_suggested` command. The Agent must execute it directly: Job Agent resumes the same signed Discover and locally preserved candidate set instead of reopening the platform, recollecting jobs or charging again.
+Long Discover and delivery operations emit timestamped stage events and periodic heartbeats. Transient TLS, connection and gateway failures are retried automatically for idempotent Discover requests. If all bounded attempts fail, the CLI returns a stable machine code, `retryable=true`, `request_preserved=true` and one exact `next_suggested` command. Before a SearchPlan arrives, the persisted `request_id` is reused and `billing_status=not_charged`; after candidate collection, the same `discover_id` and local candidate set are reused without an additional charge. Do not create a replacement round, reopen the platform or recollect jobs.
+
+If only cloud account verification is temporarily unreachable, `jobagent round status` and a user-confirmed `jobagent round skip ... --confirm-skip` can use key-bound local state. Their output is explicitly marked `offline=true` and `stale=true`; the next platform is available only after the skip command itself returns `ok=true`. Missing or mismatched local proof returns `offline_account_proof_required` or `offline_account_proof_mismatch` without exposing round state. Do not edit account files or delete `~/.jobagent` or its Chrome profile.
 
 Audits are compact by default:
 
@@ -192,6 +194,8 @@ jobagent zhilian audit
 ```
 
 智联结果页中的 `kw...` URL 片段是平台内部状态，不是云端生成的职位搜索词。Agent 必须以 CLI 返回的可读 `query`、错误码和 `next_suggested` 为准，不得把该片段重新用于搜索，也不得据此自行跳过智联。
+
+智联慢导航期间，`loading` 或登录/账号证据冲突只会返回 `unknown`，不会要求用户重复登录。只有稳定的 `zhilian_login_required` 才需要用户介入。城市筛选控件改版或旧城市 seed 失效时，CLI 会继续读取只读快照，并用页面标题、可见城市和岗位卡片等独立证据验证新城市码；单独一个 `jl` URL 码不会被信任。证据不足时流程关闭且不收费。若返回 `zhilian_page_state_unknown`、`retryable=true` 和 `request_preserved=true`，直接执行精确的 `next_suggested`，原 `request_id` 会被复用。
 
 ### 前程无忧 / 51Job
 
