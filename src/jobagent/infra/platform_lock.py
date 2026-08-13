@@ -105,5 +105,14 @@ class PlatformSessionLock:
     def __exit__(self, exc_type, exc, tb) -> None:
         if exc_type is not None:
             status = "blocked" if self.platform else "failed"
-            set_platform_status(self.platform, status, command=self.command, evidence={"error": str(exc)})
+            state = ensure_current_round()
+            item = ((state.get("platforms") or {}).get(self.platform) or {})
+            evidence = dict(item.get("evidence") or {})
+            evidence["error"] = str(exc)
+            set_platform_status(
+                self.platform,
+                status,
+                command=self.command,
+                evidence=evidence,
+            )
         self.release()

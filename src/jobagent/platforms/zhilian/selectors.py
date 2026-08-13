@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-13.2"
+ZHILIAN_SELECTOR_VERSION = "2026-08-13.3"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -107,9 +107,40 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
         const searchInput = Array.from(document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])'))
           .find(visible);
         if (searchInput) contentEvidence.push('search_input');
-        if (Array.from(document.querySelectorAll('a[href*="/jobdetail/"]')).some(visible)) {
+        function jobUrl(value){
+          try {
+            const parsed = new URL(String(value || ''), href);
+            return /[/](?:jobdetail|job|position)[/]/i.test(parsed.pathname)
+              || /(?:^|[.])jobs[.]zhaopin[.]com$/i.test(parsed.hostname)
+              || /(?:positionId|jobId)=/i.test(parsed.search);
+          } catch (_error) {
+            return false;
+          }
+        }
+        const jobLinks = Array.from(document.querySelectorAll('a[href]'))
+          .filter(visible)
+          .filter((el) => jobUrl(el.getAttribute('href') || el.href || ''));
+        const jobSurfaces = Array.from(document.querySelectorAll(
+          '[data-position-id],[data-positionid],[data-job-id],[data-jobid],[data-job-number],[class*="job-card"],[class*="jobCard"],[class*="position-card"],[class*="positionCard"]'
+        )).filter(visible);
+        const jobActions = controls.filter((el) => /^(立即投递|投递简历|申请职位|立即沟通|继续沟通)$/.test(
+          clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+        ));
+        const noResults = /暂无.{0,12}职位|没有找到.{0,12}职位|未找到.{0,12}职位|无匹配职位|换个关键词/.test(bodyText);
+        if (jobLinks.length || jobSurfaces.length) {
           contentEvidence.push('job_results');
         }
+        const searchPageEvidence = [];
+        if (/[/](?:jobs|sou)(?:[/]|$)/i.test(location.pathname || '')) {
+          searchPageEvidence.push('search_route');
+        }
+        if (/智联招聘/.test(title) && /热门职位招聘|职位招聘信息|招聘职位|职位搜索/.test(title)) {
+          searchPageEvidence.push('search_title');
+        }
+        if (searchInput) searchPageEvidence.push('search_input');
+        if (jobLinks.length || jobSurfaces.length) searchPageEvidence.push('job_surface');
+        if (jobActions.length) searchPageEvidence.push('job_action');
+        if (noResults) searchPageEvidence.push('no_results');
         const weakLogin = Array.from(new Set(weakLoginEvidence));
         const strongLogin = Array.from(new Set(strongLoginEvidence));
         const account = Array.from(new Set(accountEvidence));
@@ -165,6 +196,11 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
           accountEvidence: account,
           strongAccountEvidence: strongAccount,
           contentEvidence: Array.from(new Set(contentEvidence)),
+          searchPageEvidence: Array.from(new Set(searchPageEvidence)),
+          jobLinkCount: jobLinks.length,
+          jobSurfaceCount: jobSurfaces.length,
+          jobActionCount: jobActions.length,
+          noResults,
           evidenceDecision: {
             reason: sessionReason,
             hasStrongLogin,
@@ -567,6 +603,16 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         return /职位|公司|搜索|关键/.test(placeholder)
           || /keyword|search|kw/i.test(name + ' ' + id);
       }}
+      function isJobUrl(value){{
+        try {{
+          const parsed = new URL(String(value || ''), href);
+          return /[/](?:jobdetail|job|position)[/]/i.test(parsed.pathname)
+            || /(?:^|[.])jobs[.]zhaopin[.]com$/i.test(parsed.hostname)
+            || /(?:positionId|jobId)=/i.test(parsed.search);
+        }} catch (_error) {{
+          return false;
+        }}
+      }}
       function lines(value){{
         return String(value || '').split(/\\n+/).map(clean).filter(Boolean);
       }}
@@ -607,6 +653,16 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         return best;
       }}
       const anchors = Array.from(document.querySelectorAll('a[href]')).filter(visible);
+      const jobSurfaces = Array.from(document.querySelectorAll(
+        '[data-position-id],[data-positionid],[data-job-id],[data-jobid],[data-job-number],[class*="job-card"],[class*="jobCard"],[class*="position-card"],[class*="positionCard"]'
+      )).filter(visible);
+      const linkedSurfaces = jobSurfaces
+        .map((surface) => Array.from(surface.querySelectorAll('a[href]')).find((anchor) => isJobUrl(anchor.href)))
+        .filter(Boolean);
+      const jobAnchors = Array.from(new Set([
+        ...anchors.filter((anchor) => isJobUrl(anchor.href)),
+        ...linkedSurfaces
+      ]));
       const searchInput = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])'))
         .find(visibleSearchInput);
       const platformError = /搜索内容.{0,12}(全部|全为|都是)特殊字符|关键词.{0,12}(全部|全为|都是)特殊字符|请重新输入搜索/.test(text.slice(0, 1200))
@@ -632,10 +688,10 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
       const visibleCity = selectedCityCandidates.length ? selectedCityCandidates[0].city : '';
       const cards = [];
       const seen = new Set();
-      for (const anchor of anchors) {{
+      for (const anchor of jobAnchors) {{
         const url = anchor.href || '';
         const label = clean(anchor.innerText || anchor.textContent || '');
-        if (!url || !/[/]jobdetail[/]/.test(url)) continue;
+        if (!url || !isJobUrl(url)) continue;
         if (navLabels.has(label)) continue;
         const root = cardRoot(anchor);
         const rawText = clean(root.innerText || root.textContent || '');
@@ -658,6 +714,12 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         }});
         if (cards.length >= limit) break;
       }}
+      const jobActions = Array.from(document.querySelectorAll('a,button,[role="button"]'))
+        .filter(visible)
+        .filter((el) => /^(立即投递|投递简历|申请职位|立即沟通|继续沟通)$/.test(
+          clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+        ));
+      const noResults = /暂无.{0,12}职位|没有找到.{0,12}职位|未找到.{0,12}职位|无匹配职位|换个关键词/.test(text);
       return JSON.stringify({{
         ok: true,
         platform: 'zhilian',
@@ -676,11 +738,16 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         accountEvidence: session.accountEvidence,
         strongAccountEvidence: session.strongAccountEvidence,
         contentEvidence: session.contentEvidence,
+        searchPageEvidence: session.searchPageEvidence,
         evidenceDecision: session.evidenceDecision,
         visibleCity,
         searchKeyword: searchInput ? clean(searchInput.value) : '',
         searchKeywordVisible: !!searchInput,
         platformError,
+        jobLinkCount: jobAnchors.length,
+        jobSurfaceCount: jobSurfaces.length,
+        jobActionCount: jobActions.length,
+        noResults,
         candidateCount: cards.length,
         cards,
         bodySnippet: text.slice(0, 1200)

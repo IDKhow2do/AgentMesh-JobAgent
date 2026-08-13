@@ -760,7 +760,12 @@ def _with_login_workflow(platform: str, payload: dict[str, Any]) -> dict[str, An
             )
 
     evidence["login"] = {
+        "schema_version": 1,
         "logged_in": logged_in,
+        "platform": platform,
+        "round_id": workflow_before.get("round_id"),
+        "browser_session_id": workflow_before.get("browser_session_id"),
+        "verified_at": rounds.utc_now() if logged_in else None,
         "requires_user_action": bool(payload.get("requires_user_action")),
         "error": payload.get("error"),
     }

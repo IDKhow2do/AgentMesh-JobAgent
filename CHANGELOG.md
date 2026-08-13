@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.12] - 2026-08-13
+
+### Fixed
+
+- Carry a short-lived Zhilian login verification across the same round and managed Chrome session when the search-results page omits the account header.
+- Keep visible credential forms and login challenges authoritative, so previous login evidence cannot bypass a real sign-in requirement.
+- Recognize additional current Zhilian job-card surfaces and return `zhilian_job_cards_not_found` with safe selector diagnostics when a fully loaded search page cannot be parsed.
+- Preserve the bound login receipt when a browser collection attempt fails, allowing the exact saved Discover request to resume without another login or charge.
+
+### Compatibility
+
+- Existing API Keys, account binding, profiles, rounds, preserved request and Discover IDs, browser profiles, city cache and audits remain in place. No cache clearing, replacement round, repeated login or duplicate Discover charge is required.
+
 ## [0.5.11] - 2026-08-13
 
 ### Fixed

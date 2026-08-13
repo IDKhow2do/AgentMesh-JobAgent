@@ -7,7 +7,19 @@ from jobagent.platforms.zhilian.collect import ZhilianReadOnlyCollector, build_z
 from jobagent.platforms.zhilian.selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
+    build_zhilian_snapshot_script,
 )
+
+
+def _recent_login_verification():
+    return {
+        "valid": True,
+        "source": "recent_login_check",
+        "platform": "zhilian",
+        "round_id": "round-1",
+        "browser_session_id": "local-cdp-19222",
+        "age_seconds": 12,
+    }
 
 
 def test_build_zhilian_search_url_encodes_verified_beijing_city():
@@ -43,6 +55,17 @@ def test_keyword_search_keeps_platform_route_in_managed_tab():
     assert "button.setAttribute('target', '_self')" in script
     assert "button.href =" not in script
     assert "/sou/" not in script
+
+
+def test_snapshot_selector_supports_current_job_surfaces_and_safe_diagnostics():
+    script = build_zhilian_snapshot_script(limit=5)
+
+    assert "data-position-id" in script
+    assert "data-job-id" in script
+    assert "jobSurfaceCount" in script
+    assert "jobActionCount" in script
+    assert "noResults" in script
+    assert "searchPageEvidence" in script
 
 
 def test_city_filter_checks_visible_selected_city_before_expanding():
@@ -362,6 +385,143 @@ def test_collector_reports_unknown_not_login_when_loading_never_settles(tmp_path
     assert result.ok is False
     assert result.error == "zhilian_page_state_unknown"
     assert result.error != "zhilian_login_required"
+
+
+class _SearchPageWithoutAccountUiDriver(_DynamicCityDriver):
+    def __init__(
+        self,
+        *,
+        strong_login: bool = False,
+        cards: bool = True,
+        homepage_logged_in: bool = False,
+    ):
+        super().__init__()
+        self.strong_login = strong_login
+        self.cards = cards
+        self.homepage_logged_in = homepage_logged_in
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" in script:
+            result = super()._exec_js(script)
+            if self.homepage_logged_in:
+                result.update(
+                    {
+                        "readyState": "complete",
+                        "sessionEvidenceVersion": 2,
+                        "sessionState": "logged_in",
+                        "weakLoginEvidence": ["visible_login_control"],
+                        "strongLoginEvidence": [],
+                        "accountEvidence": ["account_navigation"],
+                        "strongAccountEvidence": ["resume_management"],
+                    }
+                )
+            return result
+        if "zhilian_city_filter" in script:
+            return {
+                "ok": False,
+                "mode": "zhilian_city_filter",
+                "error": "zhilian_city_option_not_found",
+                "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+                "title": "深圳热门职位招聘 - 智联招聘",
+                "readyState": "complete",
+                "sessionEvidenceVersion": 2,
+                "sessionState": "login_required" if self.strong_login else "unknown",
+                "weakLoginEvidence": ["visible_login_control"],
+                "strongLoginEvidence": (
+                    ["visible_credential_form"] if self.strong_login else []
+                ),
+                "searchPageEvidence": ["search_route", "search_title"],
+            }
+        cards = [
+            {
+                "positionId": "SZ-READY-1",
+                "jobTitle": "产品经理",
+                "companyName": "深圳示例科技",
+                "cityName": "深圳",
+                "jobUrl": "https://www.zhaopin.com/jobdetail/SZ-READY-1.htm",
+            }
+        ] if self.cards else []
+        return {
+            "ok": True,
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+            "readyState": "complete",
+            "sessionEvidenceVersion": 2,
+            "sessionState": "login_required" if self.strong_login else "unknown",
+            "weakLoginEvidence": ["visible_login_control"],
+            "strongLoginEvidence": (
+                ["visible_credential_form"] if self.strong_login else []
+            ),
+            "searchPageEvidence": ["search_route", "search_title"],
+            "searchKeyword": "产品经理",
+            "visibleCity": "深圳",
+            "candidateCount": len(cards),
+            "selectorVersion": "test-selector-v3",
+            "jobSurfaceCount": 8 if self.cards else 0,
+            "jobActionCount": 8 if self.cards else 0,
+            "noResults": False,
+            "cards": cards,
+        }
+
+
+def test_recent_login_verification_bridges_search_page_without_account_ui(tmp_path):
+    result = ZhilianReadOnlyCollector(
+        driver=_SearchPageWithoutAccountUiDriver(),
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_recent_login_verification(),
+    ).collect(query="产品经理", city="深圳", limit=5, wait_seconds=1)
+
+    assert result.ok is True
+    assert result.jobs[0].name == "产品经理"
+    assert result.snapshot["sessionContinuity"]["used"] is True
+
+
+def test_current_homepage_login_evidence_bridges_legacy_round_without_receipt(tmp_path):
+    result = ZhilianReadOnlyCollector(
+        driver=_SearchPageWithoutAccountUiDriver(homepage_logged_in=True),
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="产品经理", city="深圳", limit=5, wait_seconds=1)
+
+    assert result.ok is True
+    assert result.snapshot["sessionContinuity"] == {
+        "used": True,
+        "source": "current_collection_homepage",
+        "ageSeconds": 0,
+    }
+
+
+def test_strong_login_form_overrides_recent_login_verification(tmp_path):
+    result = ZhilianReadOnlyCollector(
+        driver=_SearchPageWithoutAccountUiDriver(strong_login=True),
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_recent_login_verification(),
+    ).collect(query="产品经理", city="深圳", limit=5, wait_seconds=1)
+
+    assert result.ok is False
+    assert result.error == "zhilian_login_required"
+
+
+def test_ready_search_page_with_zero_parsed_cards_reports_selector_failure(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS",
+        0,
+    )
+    result = ZhilianReadOnlyCollector(
+        driver=_SearchPageWithoutAccountUiDriver(cards=False),
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_recent_login_verification(),
+    ).collect(query="产品经理", city="深圳", limit=5, wait_seconds=0)
+
+    payload = result.to_payload()
+    assert result.ok is False
+    assert result.error == "zhilian_job_cards_not_found"
+    assert payload["retryable"] is True
+    assert payload["no_charge"] is True
+    assert payload["diagnostics"]["selector_version"]
+    assert payload["diagnostics"]["ready_state"] == "complete"
 
 
 def test_collector_learns_changed_shenzhen_code_after_city_dom_change(tmp_path):
