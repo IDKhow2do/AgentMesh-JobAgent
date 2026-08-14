@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.13] - 2026-08-14
+
+### Fixed
+
+- Wait for Zhilian's post-search navigation to reach a verified results page before resolving the requested city, including pages that take more than 50 seconds to finish loading.
+- Discover candidate city codes from the current visible city controls while requiring independent URL, page-title, selected-city or job-card evidence before a changed mapping is cached.
+- Distinguish incomplete city evidence, changed city-control structure and genuine city conflicts with stable machine-readable errors and safe diagnostics.
+- Keep weak login controls non-authoritative during a slow page transition; authentication routes and visible credential challenges still stop the workflow immediately.
+
+### Compatibility
+
+- Existing API Keys, account binding, profiles, rounds, preserved request and Discover IDs, managed Chrome profile, city cache and audits remain in place. Resume with the original `jobagent zhilian discover`; no cache clearing, replacement round, repeated login or duplicate Discover charge is required.
+
 ## [0.5.12] - 2026-08-13
 
 ### Fixed

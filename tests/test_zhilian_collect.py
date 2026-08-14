@@ -78,6 +78,15 @@ def test_city_filter_checks_visible_selected_city_before_expanding():
     assert "alreadySelected: true" in script
 
 
+def test_city_filter_discovers_candidate_codes_from_current_dom_metadata():
+    script = build_zhilian_city_filter_script("深圳")
+
+    assert "candidateCode" in script
+    assert "data-city-code" in script
+    assert "data-city-id" in script
+    assert "aria-label*=\"城市\"" in script
+
+
 def test_city_code_parser_accepts_query_and_canonical_path():
     assert city_code_from_url("https://sou.zhaopin.com/?jl=489&kw=AI") == "489"
     assert city_code_from_url("https://www.zhaopin.com/sou/jl653/kwAI") == "653"
@@ -140,6 +149,8 @@ def test_city_resolver_rejects_untrusted_url_code_without_semantic_evidence():
     assert verified["verified"] is False
     assert verified["observedCode"] == "765"
     assert verified["evidenceSources"] == []
+    assert verified["evidenceStatus"] == "evidence_pending"
+    assert verified["reason"] == "dynamic_evidence_insufficient"
 
 
 def test_city_resolver_accepts_changed_code_only_with_independent_city_evidence():
@@ -158,6 +169,44 @@ def test_city_resolver_accepts_changed_code_only_with_independent_city_evidence(
     assert verified["verified"] is True
     assert verified["codeChanged"] is True
     assert verified["evidenceSources"] == ["job_cards", "page_title", "visible_city"]
+    assert verified["evidenceStatus"] == "verified"
+
+
+def test_city_resolver_reports_real_city_conflict_separately():
+    resolution = ZhilianCityResolver().verify_snapshot(
+        "深圳",
+        {
+            "url": "https://www.zhaopin.com/jobs?jl=538&kw=产品经理",
+            "title": "上海热门职位招聘 - 智联招聘",
+            "visibleCity": "上海",
+            "cards": [{"cityName": "上海"}],
+        },
+        expected_code="489",
+        source="bundled_seed",
+    )
+
+    assert resolution["verified"] is False
+    assert resolution["evidenceStatus"] == "evidence_conflict"
+    assert resolution["reason"] == "city_evidence_conflict"
+
+
+def test_city_resolver_rejects_conflicting_url_and_dom_candidate_codes():
+    resolution = ZhilianCityResolver().verify_snapshot(
+        "深圳",
+        {
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+            "title": "深圳热门职位招聘 - 智联招聘",
+            "visibleCity": "深圳",
+            "candidateCityCode": "489",
+            "cards": [{"cityName": "深圳"}],
+        },
+        expected_code="489",
+        source="bundled_seed",
+    )
+
+    assert resolution["verified"] is False
+    assert resolution["codeEvidenceConflict"] is True
+    assert resolution["evidenceStatus"] == "evidence_conflict"
 
 
 class _DynamicCityDriver:
@@ -237,8 +286,9 @@ def test_collector_fails_closed_when_city_cannot_be_verified(tmp_path):
     ).collect(query="AI产品经理", city="杭州", limit=5, wait_seconds=1)
 
     assert result.ok is False
-    assert result.error == "zhilian_city_resolution_unverified"
+    assert result.error == "zhilian_city_evidence_conflict"
     assert result.jobs == []
+    assert result.to_payload()["retryable"] is False
 
 
 class _StaleCityDriver(_DynamicCityDriver):
@@ -354,6 +404,180 @@ class _SlowLoadingShenzhenDriver(_ChangedShenzhenCityDriver):
                 "accountEvidence": ["account_navigation"],
             }
         return super()._exec_js(script)
+
+
+class _SlowPostClickNavigationDriver(_ChangedShenzhenCityDriver):
+    def __init__(self, *, eventually_ready: bool = True):
+        super().__init__()
+        self.eventually_ready = eventually_ready
+        self.transition_probes = 0
+        self.search_ready = False
+
+    def _exec_js(self, script: str):
+        if "zhilian_search_transition" in script:
+            self.transition_probes += 1
+            if self.eventually_ready and self.transition_probes >= 3:
+                self.search_ready = True
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": "https://www.zhaopin.com/jobs?jl=765&kw=产品经理",
+                    "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+                    "readyState": "complete",
+                    "sessionState": "unknown",
+                    "searchPageEvidence": ["search_route", "search_title"],
+                    "observedKeyword": "AI产品经理",
+                    "titleCityMatch": True,
+                    "observedCityCode": "765",
+                }
+            return {
+                "ok": True,
+                "mode": "zhilian_search_transition",
+                "url": "https://www.zhaopin.com/",
+                "title": "深圳招聘网_深圳人才网_2026年深圳最新招聘信息-智联招聘",
+                "readyState": "complete",
+                "sessionState": "login_required",
+                "loginRequired": True,
+                "weakLoginEvidence": ["visible_login_control"],
+                "strongLoginEvidence": [],
+                "searchPageEvidence": ["search_input"],
+                "observedKeyword": "AI产品经理",
+                "titleCityMatch": True,
+                "observedCityCode": None,
+                "navigationElapsedMs": 50509,
+            }
+        if "zhilian_keyword_search" in script:
+            return super()._exec_js(script)
+        if not self.search_ready:
+            if "zhilian_city_filter" in script:
+                return {
+                    "ok": False,
+                    "mode": "zhilian_city_filter",
+                    "error": "zhilian_city_options_collapsed",
+                    "action": "expand_location",
+                    "clickPoint": None,
+                    "url": "https://www.zhaopin.com/",
+                    "title": "深圳招聘网_深圳人才网_2026年深圳最新招聘信息-智联招聘",
+                    "readyState": "complete",
+                    "sessionState": "logged_in",
+                }
+            return {
+                "ok": True,
+                "url": "https://www.zhaopin.com/",
+                "title": "深圳招聘网_深圳人才网_2026年深圳最新招聘信息-智联招聘",
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "searchKeyword": "AI产品经理",
+                "cards": [
+                    {
+                        "positionId": "HOME-1",
+                        "jobTitle": "AI产品经理",
+                        "companyName": "深圳示例科技",
+                        "cityName": "深圳",
+                        "jobUrl": "https://www.zhaopin.com/jobdetail/HOME-1.htm",
+                    }
+                ],
+            }
+        return super()._exec_js(script)
+
+
+class _DomCandidateCityCodeDriver(_ChangedShenzhenCityDriver):
+    def _exec_js(self, script: str):
+        if "zhilian_search_transition" in script:
+            return {
+                "ok": True,
+                "mode": "zhilian_search_transition",
+                "url": "https://www.zhaopin.com/jobs?kw=产品经理",
+                "title": "深圳热门职位招聘 - 智联招聘",
+                "readyState": "complete",
+                "sessionState": "page_ready",
+                "searchPageEvidence": ["search_route", "search_title"],
+                "observedKeyword": "AI产品经理",
+                "titleCityMatch": True,
+                "observedCityCode": None,
+            }
+        if "zhilian_keyword_search" in script:
+            return super()._exec_js(script)
+        if "zhilian_city_filter" in script:
+            self.city_filter_calls += 1
+            return {
+                "ok": True,
+                "mode": "zhilian_city_filter",
+                "city": "深圳",
+                "observedCity": "深圳",
+                "candidateCode": "765",
+                "alreadySelected": True,
+                "source": "visible_current_city",
+            }
+        result = super()._exec_js(script)
+        result["url"] = "https://www.zhaopin.com/jobs?kw=产品经理"
+        return result
+
+
+def test_collector_learns_dom_candidate_code_only_after_multi_source_validation(tmp_path):
+    cache = tmp_path / "cities.json"
+
+    result = ZhilianReadOnlyCollector(
+        driver=_DomCandidateCityCodeDriver(),
+        city_cache_path=cache,
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=1)
+
+    assert result.ok is True
+    assert result.snapshot["cityResolution"]["observedCodeSource"] == (
+        "city_control_metadata"
+    )
+    assert result.snapshot["cityResolution"]["evidenceSources"] == [
+        "job_cards",
+        "page_title",
+        "visible_city",
+    ]
+    assert ZhilianCityResolver(cache).lookup("深圳") == ("765", "verified_cache")
+
+
+def test_collector_waits_for_post_click_navigation_before_city_resolution(
+    tmp_path,
+    monkeypatch,
+):
+    driver = _SlowPostClickNavigationDriver()
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=8)
+
+    assert result.ok is True
+    assert driver.transition_probes == 3
+    assert result.jobs[0].city == "深圳"
+    assert ZhilianCityResolver(tmp_path / "cities.json").lookup("深圳") == (
+        "765",
+        "verified_cache",
+    )
+
+
+def test_collector_reports_city_evidence_pending_when_search_stays_on_homepage(
+    tmp_path,
+    monkeypatch,
+):
+    driver = _SlowPostClickNavigationDriver(eventually_ready=False)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+        raising=False,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+    ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=0)
+    payload = result.to_payload()
+
+    assert result.error == "zhilian_city_evidence_pending"
+    assert payload["retryable"] is True
+    assert payload["no_charge"] is True
+    assert payload["diagnostics"]["title_city_match"] is True
+    assert payload["diagnostics"]["navigation_elapsed_ms"] == 50509
 
 
 def test_collector_waits_past_default_window_for_slow_loading_page(tmp_path, monkeypatch):
@@ -548,7 +772,8 @@ def test_collector_fails_closed_after_city_dom_change_when_only_url_code_is_know
     ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=1)
 
     assert result.ok is False
-    assert result.error == "zhilian_city_resolution_unverified"
+    assert result.error == "zhilian_city_selector_unavailable"
+    assert result.to_payload()["diagnostics"]["evidence_status"] == "evidence_pending"
     assert result.jobs == []
 
 
