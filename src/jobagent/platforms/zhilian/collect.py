@@ -24,6 +24,7 @@ from .selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
     build_zhilian_pagination_script,
+    build_zhilian_search_control_activation_script,
     build_zhilian_search_form_submit_script,
     build_zhilian_search_transition_script,
     build_zhilian_snapshot_script,
@@ -1123,6 +1124,16 @@ class ZhilianReadOnlyCollector:
             or receipt.get("focusedElementType")
             or ""
         )
+        for source, target in (
+            ("buttonCandidateType", "buttonCandidateType"),
+            ("buttonSameContainer", "buttonSameContainer"),
+            ("searchDestinationReady", "searchDestinationReady"),
+            ("searchDestinationKind", "searchDestinationKind"),
+            ("searchControlTarget", "searchControlTarget"),
+        ):
+            value = committed_state.get(source)
+            if value not in {None, ""}:
+                receipt[target] = value
         input_transition_observed = _search_action_transition_observed(
             prepared_state,
             committed_state,
@@ -1184,6 +1195,7 @@ class ZhilianReadOnlyCollector:
             activated: bool,
             activation_error: str = "",
             form_submit_invoked: bool = False,
+            target_transition: dict[str, Any] | None = None,
         ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
             nonlocal current, activated_any
             activated_any = activated_any or activated
@@ -1204,9 +1216,148 @@ class ZhilianReadOnlyCollector:
                 attempt["activationError"] = activation_error
             if form_submit_invoked:
                 attempt["formSubmitInvoked"] = True
+            if isinstance(target_transition, dict):
+                attempt["targetOutcome"] = str(
+                    target_transition.get("outcome") or ""
+                )
+                attempt["newTargetCount"] = _safe_int(
+                    target_transition.get("new_target_count")
+                )
+                attempt["previousTargetClosed"] = bool(
+                    target_transition.get("previous_target_closed")
+                )
             receipt["attempts"].append(attempt)
             current = post
             return post, transition_observed, transition_probe
+
+        exact_search_anchor = bool(
+            str(
+                baseline.get("buttonCandidateType")
+                or data.get("buttonCandidateType")
+                or ""
+            )
+            == "a:search-anchor"
+            and bool(
+                baseline.get("buttonSameContainer")
+                or data.get("buttonSameContainer")
+            )
+            and bool(
+                baseline.get("searchDestinationReady")
+                or data.get("searchDestinationReady")
+            )
+        )
+
+        if exact_search_anchor:
+            exact_methods = (
+                ("native_pointer", "exact_anchor_pointer"),
+                ("dom_click", "exact_anchor_dom_click"),
+                ("official_destination", "official_search_destination"),
+            )
+            for activation_method, receipt_method in exact_methods:
+                activation: dict[str, Any] = {}
+                activation_error = ""
+                target_before: dict[str, Any] = {}
+                target_transition: dict[str, Any] | None = None
+                if activation_method == "native_pointer":
+                    capture_targets = getattr(
+                        self.driver,
+                        "capture_platform_target_state",
+                        None,
+                    )
+                    if callable(capture_targets):
+                        try:
+                            target_before = capture_targets("zhilian")
+                        except Exception as exc:
+                            activation_error = type(exc).__name__
+                try:
+                    activation = _unwrap_js_result_with_error(
+                        self.driver._exec_js(
+                            build_zhilian_search_control_activation_script(
+                                keyword,
+                                method=activation_method,
+                            )
+                        ),
+                        parse_error="zhilian_js_parse_failed",
+                    )
+                except Exception as exc:  # Navigation can replace the execution context.
+                    activation_error = type(exc).__name__
+
+                activated = bool(activation.get("controlActivated"))
+                if activation_method == "native_pointer":
+                    exact_point = (
+                        activation.get("clickPoint")
+                        if isinstance(activation.get("clickPoint"), dict)
+                        else None
+                    )
+                    if exact_point and callable(click_at):
+                        try:
+                            click_at(exact_point.get("x"), exact_point.get("y"))
+                            activated = True
+                            adopt_target = getattr(
+                                self.driver,
+                                "adopt_platform_target_transition",
+                                None,
+                            )
+                            if target_before and callable(adopt_target):
+                                target_transition = adopt_target(
+                                    target_before,
+                                    platform="zhilian",
+                                    wait_seconds=min(max(float(wait_seconds), 0.0), 5.0),
+                                )
+                        except Exception as exc:
+                            activation_error = type(exc).__name__
+                activated_any = activated_any or activated
+                for source, target in (
+                    ("buttonCandidateType", "buttonCandidateType"),
+                    ("buttonSameContainer", "buttonSameContainer"),
+                    ("searchDestinationReady", "searchDestinationReady"),
+                    ("searchDestinationKind", "searchDestinationKind"),
+                    ("searchControlTarget", "searchControlTarget"),
+                ):
+                    value = activation.get(source)
+                    if value not in {None, ""}:
+                        receipt[target] = value
+                post, changed, transition_probe = record_attempt(
+                    receipt_method,
+                    activated=activated,
+                    activation_error=activation_error
+                    or str(activation.get("exceptionType") or "")
+                    or str(activation.get("error") or ""),
+                    target_transition=target_transition,
+                )
+                if changed:
+                    receipt.update(
+                        _search_action_change_summary(action_origin, post)
+                    )
+                    receipt["transitionObserved"] = True
+                    return {
+                        **data,
+                        "ok": True,
+                        "searchActionReceipt": receipt,
+                        "searchTransitionProbe": transition_probe,
+                    }
+
+            receipt.update(_search_action_change_summary(action_origin, current))
+            dialog = _dismiss_javascript_dialog(self.driver)
+            if dialog.get("dismissed"):
+                return {
+                    **data,
+                    "ok": False,
+                    "error": "zhilian_keyword_rejected",
+                    "dialog": dialog,
+                    "searchActionReceipt": receipt,
+                }
+            return {
+                **data,
+                "ok": False,
+                "error": (
+                    "zhilian_search_transition_not_observed"
+                    if activated_any
+                    else "zhilian_search_submit_control_not_activated"
+                ),
+                "dialog": dialog,
+                "searchActionReceipt": receipt,
+            }
 
         if button_point and callable(click_at):
             activation_error = ""
@@ -1786,6 +1937,11 @@ def _safe_search_action_state(value: dict[str, Any]) -> dict[str, Any]:
         "historyLength": _safe_int(value.get("historyLength")),
         "documentTimeOriginMs": _safe_int(value.get("documentTimeOriginMs")),
         "focusedElementType": str(value.get("focusedElementType") or ""),
+        "buttonCandidateType": str(value.get("buttonCandidateType") or ""),
+        "buttonSameContainer": bool(value.get("buttonSameContainer")),
+        "searchDestinationReady": bool(value.get("searchDestinationReady")),
+        "searchDestinationKind": str(value.get("searchDestinationKind") or ""),
+        "searchControlTarget": str(value.get("searchControlTarget") or ""),
         "searchPageEvidence": [
             str(item)
             for item in (value.get("searchPageEvidence") or [])
@@ -1795,6 +1951,10 @@ def _safe_search_action_state(value: dict[str, Any]) -> dict[str, Any]:
             "buttonClicks": _safe_int(signals.get("buttonClicks")),
             "inputEnterKeyups": _safe_int(signals.get("inputEnterKeyups")),
             "formSubmits": _safe_int(signals.get("formSubmits")),
+            "domClicks": _safe_int(signals.get("domClicks")),
+            "destinationNavigations": _safe_int(
+                signals.get("destinationNavigations")
+            ),
         },
     }
 
@@ -1815,6 +1975,12 @@ def _new_search_action_receipt(
         "inputCandidateType": str(prepared.get("inputCandidateType") or ""),
         "buttonCandidateType": str(prepared.get("buttonCandidateType") or ""),
         "formCandidateType": str(prepared.get("formCandidateType") or ""),
+        "buttonSameContainer": bool(prepared.get("buttonSameContainer")),
+        "searchDestinationReady": bool(prepared.get("searchDestinationReady")),
+        "searchDestinationKind": str(
+            prepared.get("searchDestinationKind") or ""
+        ),
+        "searchControlTarget": str(prepared.get("searchControlTarget") or ""),
         "finalReadableInputValue": str(prepared.get("observedValue") or keyword),
         "focusedElementType": str(prepared.get("focusedElementType") or ""),
         "attempts": [],
@@ -1923,12 +2089,24 @@ def _safe_search_action_receipt(value: Any) -> dict[str, Any]:
         }
         if raw.get("activationError"):
             attempt["activation_error"] = str(raw["activationError"])[:80]
+        if raw.get("targetOutcome"):
+            attempt["target_outcome"] = str(raw["targetOutcome"])[:80]
+            attempt["new_target_count"] = _safe_int(raw.get("newTargetCount"))
+            attempt["previous_target_closed"] = bool(
+                raw.get("previousTargetClosed")
+            )
         attempts.append(attempt)
     return {
         "receipt_version": _safe_int(receipt.get("receiptVersion")),
         "input_candidate_type": str(receipt.get("inputCandidateType") or "")[:80],
         "button_candidate_type": str(receipt.get("buttonCandidateType") or "")[:80],
         "form_candidate_type": str(receipt.get("formCandidateType") or "")[:80],
+        "button_same_container": bool(receipt.get("buttonSameContainer")),
+        "search_destination_ready": bool(receipt.get("searchDestinationReady")),
+        "search_destination_kind": str(
+            receipt.get("searchDestinationKind") or ""
+        )[:80],
+        "search_control_target": str(receipt.get("searchControlTarget") or "")[:20],
         "final_readable_input_value": str(
             receipt.get("finalReadableInputValue") or ""
         )[:120],

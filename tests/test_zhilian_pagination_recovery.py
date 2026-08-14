@@ -585,6 +585,132 @@ class _SlugCityHomepageFormSubmitDriver(_SlugCityHomepageNoTransitionDriver):
         return result
 
 
+class _LiveVueSearchAnchorDriver(_SlugCityHomepageNoTransitionDriver):
+    """Model the live city-page Vue anchor observed by the v0.5.19 receipt."""
+
+    def __init__(self, *, transition_method: str | None):
+        super().__init__()
+        self.transition_method = transition_method
+        self.native_pointer_attempts = 0
+        self.dom_click_attempts = 0
+        self.official_destination_attempts = 0
+        self.target_capture_attempts = 0
+        self.target_adoption_attempts = 0
+        self._exact_pointer_armed = False
+
+    def _click_at(self, _x, _y):
+        if self._exact_pointer_armed:
+            self.native_pointer_attempts += 1
+            self._exact_pointer_armed = False
+
+    def capture_platform_target_state(self, platform: str):
+        assert platform == "zhilian"
+        self.target_capture_attempts += 1
+        return {"platform": platform, "target_ids": ["target-old"]}
+
+    def adopt_platform_target_transition(
+        self,
+        _before,
+        *,
+        platform: str,
+        wait_seconds: float,
+    ):
+        assert platform == "zhilian"
+        assert wait_seconds >= 0
+        self.target_adoption_attempts += 1
+        if self.transition_method == "new_target":
+            self.page = "search_results"
+            return {
+                "ok": True,
+                "outcome": "new_target_adopted",
+                "new_target_count": 1,
+                "previous_target_closed": True,
+            }
+        return {
+            "ok": False,
+            "outcome": "no_search_target_observed",
+            "new_target_count": 0,
+            "previous_target_closed": False,
+        }
+
+    def _exec_js(self, script: str):
+        if "zhilian_search_control_activation" in script:
+            if 'activationMethod = "native_pointer"' in script:
+                self._exact_pointer_armed = True
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_control_activation",
+                    "activationMethod": "native_pointer",
+                    "controlActivated": False,
+                    "searchDestinationReady": True,
+                    "searchDestinationKind": "official_search_with_opaque_keyword",
+                    "buttonCandidateType": "a:search-anchor",
+                    "buttonSameContainer": True,
+                    "clickPoint": {"x": 520, "y": 96},
+                }
+            if 'activationMethod = "dom_click"' in script:
+                self.dom_click_attempts += 1
+                if self.transition_method == "dom_click":
+                    self.page = "search_results"
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_control_activation",
+                    "activationMethod": "dom_click",
+                    "controlActivated": True,
+                    "searchDestinationReady": True,
+                    "searchDestinationKind": "official_search_with_opaque_keyword",
+                    "buttonCandidateType": "a:search-anchor",
+                    "buttonSameContainer": True,
+                }
+            if 'activationMethod = "official_destination"' in script:
+                self.official_destination_attempts += 1
+                if self.transition_method == "official_destination":
+                    self.page = "search_results"
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_control_activation",
+                    "activationMethod": "official_destination",
+                    "controlActivated": True,
+                    "searchDestinationReady": True,
+                    "searchDestinationKind": "official_search_with_opaque_keyword",
+                    "buttonCandidateType": "a:search-anchor",
+                    "buttonSameContainer": True,
+                }
+        if "zhilian_search_form_submit" in script:
+            return {
+                "ok": False,
+                "mode": "zhilian_search_form_submit",
+                "error": "zhilian_search_submit_control_not_activated",
+                "formSubmitInvoked": False,
+            }
+        result = super()._exec_js(script)
+        if "zhilian_keyword_search" in script and result.get("ok"):
+            result.update(
+                {
+                    "inputCandidateType": "input:text",
+                    "buttonCandidateType": "a:search-anchor",
+                    "formCandidateType": "",
+                    "searchDestinationReady": True,
+                    "searchDestinationKind": "official_search_with_opaque_keyword",
+                    "targetNormalized": False,
+                    "buttonSameContainer": True,
+                }
+            )
+        if "zhilian_search_transition" in script:
+            result.update(
+                {
+                    "searchDestinationReady": self.page == "city_homepage",
+                    "searchDestinationKind": (
+                        "official_search_with_opaque_keyword"
+                        if self.page == "city_homepage"
+                        else "search_results"
+                    ),
+                    "searchControlTarget": "_blank" if self.page == "city_homepage" else "",
+                }
+            )
+        return result
+
+
 class _SlugCityResultConflictDriver(_SlugCityHomepageRequiresNativeSearchDriver):
     def _exec_js(self, script: str):
         result = super()._exec_js(script)
@@ -970,6 +1096,170 @@ def test_verified_city_slug_can_fall_back_to_one_bounded_form_submit(
     assert driver.form_submit_attempts == 1
 
 
+def test_live_vue_anchor_requeries_current_control_and_verifies_dom_click_transition(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _LiveVueSearchAnchorDriver(transition_method="dom_click")
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is True
+    assert [job.raw_data["positionId"] for job in result.jobs] == ["JOB-FIRST"]
+    assert driver.native_pointer_attempts == 1
+    assert driver.dom_click_attempts == 1
+    assert driver.official_destination_attempts == 0
+    assert driver.native_enter_attempts == 0
+    assert driver.form_submit_attempts == 0
+
+
+def test_live_vue_anchor_adopts_new_cdp_target_before_result_collection(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _LiveVueSearchAnchorDriver(transition_method="new_target")
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is True
+    assert [job.raw_data["positionId"] for job in result.jobs] == ["JOB-FIRST"]
+    assert driver.target_capture_attempts == 1
+    assert driver.target_adoption_attempts == 1
+    assert driver.native_pointer_attempts == 1
+    assert driver.dom_click_attempts == 0
+    assert driver.official_destination_attempts == 0
+    receipt = result.snapshot["keywordSearch"]["searchTransition"][
+        "searchActionReceipt"
+    ]
+    pointer = next(
+        item for item in receipt["attempts"] if item["method"] == "exact_anchor_pointer"
+    )
+    assert pointer["targetOutcome"] == "new_target_adopted"
+    assert pointer["newTargetCount"] == 1
+    assert pointer["previousTargetClosed"] is True
+
+
+def test_live_vue_anchor_uses_page_generated_official_destination_once(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _LiveVueSearchAnchorDriver(transition_method="official_destination")
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is True
+    assert [job.raw_data["positionId"] for job in result.jobs] == ["JOB-FIRST"]
+    assert driver.native_pointer_attempts == 1
+    assert driver.dom_click_attempts == 1
+    assert driver.official_destination_attempts == 1
+    assert driver.native_enter_attempts == 0
+    assert driver.form_submit_attempts == 0
+
+
+def test_live_vue_anchor_all_bounded_actions_keep_precise_failure_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _LiveVueSearchAnchorDriver(transition_method=None)
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is False
+    assert result.error == "zhilian_search_transition_not_observed"
+    receipt = result.to_payload()["diagnostics"]["action_receipt"]
+    assert receipt["button_candidate_type"] == "a:search-anchor"
+    assert receipt["search_destination_ready"] is True
+    assert receipt["search_destination_kind"] == "official_search_with_opaque_keyword"
+    assert [attempt["method"] for attempt in receipt["attempts"]] == [
+        "controlled_input",
+        "exact_anchor_pointer",
+        "exact_anchor_dom_click",
+        "official_search_destination",
+    ]
+    assert all(attempt["transition_observed"] is False for attempt in receipt["attempts"])
+    assert driver.native_pointer_attempts == 1
+    assert driver.dom_click_attempts == 1
+    assert driver.official_destination_attempts == 1
+    assert driver.native_enter_attempts == 0
+    assert driver.form_submit_attempts == 0
+
+
 def test_search_action_receipt_redacts_unknown_page_and_account_fields():
     safe = _safe_search_action_receipt(
         {
@@ -1138,7 +1428,7 @@ def test_snapshot_script_emits_real_no_result_and_pagination_evidence():
     assert "allowUnknownSession = true" in city_script
     assert "readable_city_anchor:" in city_script
     assert "navigate_city_homepage" in city_script
-    assert ZHILIAN_SELECTOR_VERSION == "2026-08-14.6"
+    assert ZHILIAN_SELECTOR_VERSION == "2026-08-14.7"
 
 
 @pytest.mark.parametrize(

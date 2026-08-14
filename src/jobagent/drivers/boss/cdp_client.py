@@ -16,6 +16,7 @@ class CDPClient:
 
     def __init__(self):
         self.ws: websocket.WebSocket | None = None
+        self.ws_url = ""
         self._id_counter = 0
         self._pending: dict[int, Any] = {}  # id -> (resolve, reject)  — simplified inline
 
@@ -23,6 +24,7 @@ class CDPClient:
         """Open WebSocket connection to a CDP endpoint."""
         self.disconnect()
         self.ws = websocket.create_connection(ws_url, timeout=timeout)
+        self.ws_url = ws_url
 
     def disconnect(self) -> None:
         if self.ws:
@@ -31,6 +33,7 @@ class CDPClient:
             except Exception:
                 pass
             self.ws = None
+        self.ws_url = ""
         self._pending.clear()
 
     @property
