@@ -7,6 +7,7 @@ from jobagent.platforms.zhilian.collect import ZhilianReadOnlyCollector, build_z
 from jobagent.platforms.zhilian.selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
+    build_zhilian_search_control_activation_script,
     build_zhilian_search_form_submit_script,
     build_zhilian_search_transition_script,
     build_zhilian_snapshot_script,
@@ -53,10 +54,42 @@ def test_build_zhilian_search_url_keeps_ui_fallback_for_unknown_city():
 def test_keyword_search_keeps_platform_route_in_managed_tab():
     script = build_zhilian_keyword_search_script("AI产品经理")
 
-    assert "originalTarget.toLowerCase() === '_blank'" in script
-    assert "button.setAttribute('target', '_self')" in script
+    assert "input.closest('.search-wrapper')" in script
+    assert "search-wrapper__button" in script
+    assert "searchDestinationReady" in script
+    assert "button.setAttribute('target', '_self')" not in script
     assert "button.href =" not in script
     assert "/sou/" not in script
+
+
+def test_search_control_activation_requeries_live_vue_anchor_and_bounds_methods():
+    pointer = build_zhilian_search_control_activation_script(
+        "AI产品经理",
+        method="native_pointer",
+    )
+    dom_click = build_zhilian_search_control_activation_script(
+        "AI产品经理",
+        method="dom_click",
+    )
+    destination = build_zhilian_search_control_activation_script(
+        "AI产品经理",
+        method="official_destination",
+    )
+
+    for script in (pointer, dom_click, destination):
+        assert "zhilian_search_control_activation" in script
+        assert "input.closest('.search-wrapper')" in script
+        assert "search-wrapper__button" in script
+        assert "officialSearchDestination" in script
+        assert "searchDestinationReady" in script
+        assert "button.href =" not in script
+    assert 'activationMethod = "native_pointer"' in pointer
+    native_block = pointer.split("if (activationMethod === 'native_pointer')", 1)[1].split(
+        "if (activationMethod === 'dom_click')", 1
+    )[0]
+    assert "button.setAttribute('target', '_self')" not in native_block
+    assert "button.click()" in dom_click
+    assert "location.assign" in destination
 
 
 def test_keyword_search_emits_controlled_input_and_bounded_form_fallback():

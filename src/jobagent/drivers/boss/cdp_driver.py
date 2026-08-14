@@ -13,8 +13,11 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from jobagent.infra.platform_tabs import (
+    adopt_platform_tab_target,
+    close_platform_target,
     default_url_for_platform,
     ensure_platform_tab,
+    list_targets,
     platform_for_url,
 )
 
@@ -34,6 +37,7 @@ class CDPBossDriver(BossActionDriver):
         self.manager = manager or ChromeInstanceManager()
         self.platform = platform
         self.current_platform = ""
+        self.current_target_id = ""
         self.cdp = CDPClient()
         self._ensure_connected()
 
@@ -61,6 +65,164 @@ class CDPBossDriver(BossActionDriver):
         ws_url = target["webSocketDebuggerUrl"]
         self.cdp.connect(ws_url)
         self.current_platform = target_platform
+        self.current_target_id = str(target.get("id") or target.get("targetId") or "")
+
+    @staticmethod
+    def _trusted_platform_search_target(target: dict[str, Any], platform: str) -> bool:
+        if target.get("type") != "page" or platform_for_url(str(target.get("url") or "")) != platform:
+            return False
+        try:
+            parsed = urlsplit(str(target.get("url") or ""))
+        except ValueError:
+            return False
+        if (
+            parsed.scheme != "https"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return False
+        if platform == "zhilian":
+            return (
+                parsed.path == "/sou"
+                or parsed.path.startswith("/sou/")
+                or parsed.path in {"/jobs", "/jobs/"}
+            )
+        return False
+
+    def capture_platform_target_state(self, platform: str) -> dict[str, Any]:
+        """Capture opaque target identities before an action may open a new tab."""
+        self._ensure_connected(platform=platform)
+        targets = list_targets(self.manager.port)
+        current_target_id = str(getattr(self, "current_target_id", "") or "")
+        if not current_target_id:
+            current_ws_url = str(getattr(self.cdp, "ws_url", "") or "")
+            current_target = next(
+                (
+                    target
+                    for target in targets
+                    if current_ws_url
+                    and str(target.get("webSocketDebuggerUrl") or "")
+                    == current_ws_url
+                ),
+                None,
+            )
+            if current_target:
+                current_target_id = str(
+                    current_target.get("id") or current_target.get("targetId") or ""
+                )
+                self.current_target_id = current_target_id
+        target_ids = [
+            str(target.get("id") or target.get("targetId") or "")
+            for target in targets
+            if target.get("type") == "page"
+            and platform_for_url(str(target.get("url") or "")) == platform
+        ]
+        return {
+            "platform": platform,
+            "target_ids": [target_id for target_id in target_ids if target_id],
+            "current_target_id": current_target_id,
+        }
+
+    def adopt_platform_target_transition(
+        self,
+        before: dict[str, Any],
+        *,
+        platform: str,
+        wait_seconds: float = 2,
+    ) -> dict[str, Any]:
+        """Adopt one newly opened official search target and retire its predecessor."""
+        if before.get("platform") != platform:
+            return {
+                "ok": False,
+                "outcome": "target_state_platform_mismatch",
+                "new_target_count": 0,
+                "previous_target_closed": False,
+            }
+        before_ids = {
+            str(target_id)
+            for target_id in before.get("target_ids") or []
+            if target_id
+        }
+        previous_target_id = str(before.get("current_target_id") or "")
+        timeout = min(max(float(wait_seconds), 2.0), 5.0)
+        deadline = time.monotonic() + timeout
+        while True:
+            targets = list_targets(self.manager.port)
+            current = next(
+                (
+                    target
+                    for target in targets
+                    if str(target.get("id") or target.get("targetId") or "")
+                    == previous_target_id
+                ),
+                None,
+            )
+            if current and self._trusted_platform_search_target(current, platform):
+                adopt_platform_tab_target(
+                    platform=platform,
+                    port=self.manager.port,
+                    target=current,
+                    track_round=getattr(self, "track_round", True),
+                )
+                self.current_platform = platform
+                self.current_target_id = previous_target_id
+                return {
+                    "ok": True,
+                    "outcome": "current_target_reused",
+                    "new_target_count": 0,
+                    "previous_target_closed": False,
+                }
+
+            candidates = [
+                target
+                for target in targets
+                if str(target.get("id") or target.get("targetId") or "")
+                not in before_ids
+                and self._trusted_platform_search_target(target, platform)
+            ]
+            if len(candidates) == 1:
+                selected = candidates[0]
+                selected_id = str(
+                    selected.get("id") or selected.get("targetId") or ""
+                )
+                self.cdp.connect(str(selected["webSocketDebuggerUrl"]))
+                adopt_platform_tab_target(
+                    platform=platform,
+                    port=self.manager.port,
+                    target=selected,
+                    track_round=getattr(self, "track_round", True),
+                )
+                self.current_platform = platform
+                self.current_target_id = selected_id
+                previous_closed = False
+                if previous_target_id and previous_target_id in before_ids:
+                    try:
+                        close_platform_target(self.manager.port, previous_target_id)
+                        previous_closed = True
+                    except Exception:
+                        previous_closed = False
+                return {
+                    "ok": True,
+                    "outcome": "new_target_adopted",
+                    "new_target_count": 1,
+                    "previous_target_closed": previous_closed,
+                }
+            if len(candidates) > 1:
+                return {
+                    "ok": False,
+                    "outcome": "ambiguous_search_targets",
+                    "new_target_count": len(candidates),
+                    "previous_target_closed": False,
+                }
+            if time.monotonic() >= deadline:
+                return {
+                    "ok": False,
+                    "outcome": "no_search_target_observed",
+                    "new_target_count": 0,
+                    "previous_target_closed": False,
+                }
+            time.sleep(0.1)
 
     def _ensure_connected_for_url(self, url: str) -> str:
         target_platform = platform_for_url(url) or self.platform

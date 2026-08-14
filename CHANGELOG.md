@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.20] - 2026-08-14
+
+### Fixed
+
+- Activate Zhilian's current official search anchor with a bounded native-pointer, DOM-click and official-destination fallback sequence, verifying a real route or result-state transition after every attempt.
+- Capture and adopt the single verified Zhilian search target when the site opens results in a new tab, persist it as the platform target, and close only the superseded page.
+- Keep same-tab navigation supported while refusing ambiguous or non-official targets and destinations.
+- Return a redacted search-action receipt with control, target and transition evidence without exposing cookies, account content, page text or opaque route tokens.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, round, preserved `request_id`, signed SearchPlan, Discover ID, candidates and audits remain in place. Resume with `jobagent zhilian discover`; the same preserved request continues without another Discover charge.
+
 ## [0.5.19] - 2026-08-14
 
 ### Fixed

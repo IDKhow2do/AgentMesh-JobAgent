@@ -75,6 +75,18 @@ def _activate_target(port: int, target_id: str) -> None:
         pass
 
 
+def close_platform_target(port: int, target_id: str) -> None:
+    """Close one exact CDP target after its replacement is under control."""
+    if not target_id:
+        return
+    try:
+        _request_json(port, f"/json/close/{quote(target_id, safe='')}")
+    except json.JSONDecodeError:
+        # Chrome answers this endpoint with plain text after accepting the
+        # close. A non-JSON success body must not be reported as a failure.
+        return
+
+
 def _target_id(target: dict[str, Any]) -> str:
     return str(target.get("id") or target.get("targetId") or "")
 
@@ -149,4 +161,43 @@ def ensure_platform_tab(
 
     if not target.get("webSocketDebuggerUrl"):
         raise RuntimeError(f"CDP target for platform `{platform}` has no WebSocket URL")
+    return target
+
+
+def adopt_platform_tab_target(
+    *,
+    platform: str,
+    port: int,
+    target: dict[str, Any],
+    track_round: bool = True,
+) -> dict[str, Any]:
+    """Activate and persist an already discovered page target for a platform."""
+    platform = platform if platform in PLATFORM_TAB_DEFAULTS else "boss"
+    target_id = _target_id(target)
+    if (
+        target.get("type") != "page"
+        or not target_id
+        or not target.get("webSocketDebuggerUrl")
+        or not _target_matches_platform(target, platform)
+    ):
+        raise RuntimeError(f"CDP target cannot be adopted for platform `{platform}`")
+
+    _activate_target(port, target_id)
+    if not track_round:
+        return target
+
+    round_state = ensure_current_round()
+    mark_browser_session(f"local-cdp-{port}")
+    registry = _load_registry()
+    tabs = registry.setdefault("tabs", {})
+    tabs[platform] = {
+        "target_id": target_id,
+        "url": target.get("url", ""),
+        "title": target.get("title", ""),
+        "webSocketDebuggerUrl": target.get("webSocketDebuggerUrl", ""),
+        "last_seen_at": utc_now(),
+    }
+    registry["round_id"] = round_state["round_id"]
+    registry["updated_at"] = utc_now()
+    _save_registry(registry)
     return target

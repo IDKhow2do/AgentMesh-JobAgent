@@ -498,6 +498,66 @@ def test_platform_tab_registry_creates_missing_platform_target(monkeypatch, tmp_
     assert target["webSocketDebuggerUrl"] == "ws://new"
 
 
+def test_adopt_platform_tab_target_updates_registry_before_closing_previous(
+    monkeypatch,
+    tmp_path,
+):
+    registry_path = tmp_path / "platform_tabs.json"
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(platform_tabs, "platform_tabs_path", lambda: registry_path)
+    monkeypatch.setattr(platform_tabs, "ensure_current_round", lambda: {"round_id": "round-1"})
+    monkeypatch.setattr(platform_tabs, "mark_browser_session", lambda session_id: {"session_id": session_id})
+    monkeypatch.setattr(
+        platform_tabs,
+        "_activate_target",
+        lambda _port, target_id: events.append(("activate", target_id)),
+    )
+
+    target = {
+        "id": "target-search",
+        "type": "page",
+        "url": "https://www.zhaopin.com/sou/jl765/kwOPAQUE",
+        "title": "深圳职位",
+        "webSocketDebuggerUrl": "ws://target-search",
+    }
+    adopted = platform_tabs.adopt_platform_tab_target(
+        platform="zhilian",
+        port=19222,
+        target=target,
+    )
+
+    assert adopted["id"] == "target-search"
+    assert events == [("activate", "target-search")]
+    saved = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert saved["tabs"]["zhilian"]["target_id"] == "target-search"
+    assert saved["tabs"]["zhilian"]["url"].startswith("https://www.zhaopin.com/sou/")
+
+
+def test_close_platform_target_uses_exact_cdp_target(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        platform_tabs,
+        "_request_json",
+        lambda _port, path, method="GET": calls.append(f"{method} {path}") or {},
+    )
+
+    platform_tabs.close_platform_target(19222, "target-old")
+
+    assert calls == ["GET /json/close/target-old"]
+
+
+def test_close_platform_target_accepts_chrome_plain_text_success(monkeypatch):
+    monkeypatch.setattr(
+        platform_tabs,
+        "_request_json",
+        lambda _port, _path: (_ for _ in ()).throw(
+            json.JSONDecodeError("plain text", "Target is closing", 0)
+        ),
+    )
+
+    platform_tabs.close_platform_target(19222, "target-old")
+
+
 class FakeManager:
     port = 19222
 
@@ -565,3 +625,173 @@ def test_cdp_driver_switches_to_platform_tab_for_url(monkeypatch):
     assert selected == [("liepin", "https://www.liepin.com/job/1.shtml")]
     assert driver.cdp.ws_urls == ["ws://liepin"]
     assert driver.current_platform == "liepin"
+
+
+def test_cdp_driver_adopts_one_new_official_zhilian_search_target(monkeypatch):
+    target_sets = iter(
+        [
+            [
+                {
+                    "id": "target-old",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/shenzhen/",
+                    "webSocketDebuggerUrl": "ws://target-old",
+                }
+            ],
+            [
+                {
+                    "id": "target-old",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/shenzhen/",
+                    "webSocketDebuggerUrl": "ws://target-old",
+                },
+                {
+                    "id": "target-search",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/sou/jl765/kwOPAQUE",
+                    "webSocketDebuggerUrl": "ws://target-search",
+                },
+            ],
+        ]
+    )
+    adopted: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        lambda _port: next(target_sets),
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.adopt_platform_tab_target",
+        lambda **kwargs: adopted.append(kwargs["target"]["id"]) or kwargs["target"],
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.close_platform_target",
+        lambda _port, target_id: closed.append(target_id),
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-old"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+
+    before = driver.capture_platform_target_state("zhilian")
+    result = driver.adopt_platform_target_transition(
+        before,
+        platform="zhilian",
+        wait_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["outcome"] == "new_target_adopted"
+    assert result["new_target_count"] == 1
+    assert adopted == ["target-search"]
+    assert driver.cdp.ws_urls == ["ws://target-search"]
+    assert driver.current_target_id == "target-search"
+    assert driver.current_platform == "zhilian"
+    assert closed == ["target-old"]
+
+
+def test_cdp_driver_reuses_current_target_after_same_tab_search_navigation(monkeypatch):
+    target = {
+        "id": "target-current",
+        "type": "page",
+        "url": "https://www.zhaopin.com/sou/jl765/kwOPAQUE",
+        "webSocketDebuggerUrl": "ws://target-current",
+    }
+    adopted: list[str] = []
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        lambda _port: [target],
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.adopt_platform_tab_target",
+        lambda **kwargs: adopted.append(kwargs["target"]["id"]) or kwargs["target"],
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-current"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+
+    result = driver.adopt_platform_target_transition(
+        {
+            "platform": "zhilian",
+            "target_ids": ["target-current"],
+            "current_target_id": "target-current",
+        },
+        platform="zhilian",
+        wait_seconds=0,
+    )
+
+    assert result == {
+        "ok": True,
+        "outcome": "current_target_reused",
+        "new_target_count": 0,
+        "previous_target_closed": False,
+    }
+    assert adopted == ["target-current"]
+    assert driver.cdp.ws_urls == []
+
+
+def test_cdp_driver_accepts_official_zhilian_jobs_route_with_trailing_slash():
+    assert CDPBossDriver._trusted_platform_search_target(
+        {
+            "id": "target-jobs",
+            "type": "page",
+            "url": "https://www.zhaopin.com/jobs/",
+            "webSocketDebuggerUrl": "ws://target-jobs",
+        },
+        "zhilian",
+    ) is True
+
+
+def test_cdp_driver_refuses_ambiguous_new_search_targets(monkeypatch):
+    targets = [
+        {
+            "id": target_id,
+            "type": "page",
+            "url": f"https://www.zhaopin.com/sou/jl765/kw{suffix}",
+            "webSocketDebuggerUrl": f"ws://{target_id}",
+        }
+        for target_id, suffix in (("target-a", "AAAA"), ("target-b", "BBBB"))
+    ]
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        lambda _port: targets,
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-old"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+
+    result = driver.adopt_platform_target_transition(
+        {
+            "platform": "zhilian",
+            "target_ids": ["target-old"],
+            "current_target_id": "target-old",
+        },
+        platform="zhilian",
+        wait_seconds=0,
+    )
+
+    assert result == {
+        "ok": False,
+        "outcome": "ambiguous_search_targets",
+        "new_target_count": 2,
+        "previous_target_closed": False,
+    }
+    assert driver.current_target_id == "target-old"
+    assert driver.cdp.ws_urls == []
