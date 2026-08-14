@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-14.5"
+ZHILIAN_SELECTOR_VERSION = "2026-08-14.6"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -388,14 +388,17 @@ def build_zhilian_keyword_search_script(
     keyword: str,
     *,
     allow_unknown_session: bool = False,
+    allow_missing_submit_control: bool = False,
 ) -> str:
     safe_keyword = json.dumps(keyword, ensure_ascii=False)
     safe_allow_unknown = json.dumps(bool(allow_unknown_session))
+    safe_allow_missing_submit = json.dumps(bool(allow_missing_submit_control))
     return f"""
     (function(){{
       const mode = 'zhilian_keyword_search';
       const keyword = {safe_keyword};
       const allowUnknownSession = {safe_allow_unknown};
+      const allowMissingSubmitControl = {safe_allow_missing_submit};
       {_ZHILIAN_SESSION_PROBE_JS}
       const session = zhilianSessionProbe();
       const href = session.url;
@@ -424,6 +427,17 @@ def build_zhilian_keyword_search_script(
           text: clean(el.innerText || el.textContent || '')
         }};
       }}
+      function elementType(el){{
+        if (!el || !(el instanceof Element)) return null;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'input') {{
+          return 'input:' + clean(el.getAttribute('type') || 'text').toLowerCase();
+        }}
+        const role = clean(el.getAttribute('role') || '').toLowerCase();
+        if (tag === 'button') return 'button:search';
+        if (role === 'button') return tag + ':role-button';
+        return tag || null;
+      }}
       if (session.loginRequired) {{
         return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', ...session}});
       }}
@@ -449,9 +463,21 @@ def build_zhilian_keyword_search_script(
         return JSON.stringify({{ok: false, mode, error: 'zhilian_keyword_input_not_found', url: href, title}});
       }}
       input.focus();
+      const previousValue = clean(input.value);
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
       setter.call(input, keyword);
-      input.dispatchEvent(new Event('input', {{bubbles: true}}));
+      if (input._valueTracker && typeof input._valueTracker.setValue === 'function') {{
+        input._valueTracker.setValue(previousValue);
+      }}
+      const inputEvent = typeof InputEvent === 'function'
+        ? new InputEvent('input', {{
+            bubbles: true,
+            composed: true,
+            inputType: 'insertText',
+            data: keyword
+          }})
+        : new Event('input', {{bubbles: true, composed: true}});
+      input.dispatchEvent(inputEvent);
       input.dispatchEvent(new Event('change', {{bubbles: true}}));
       const inputRect = input.getBoundingClientRect();
       const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'))
@@ -467,7 +493,7 @@ def build_zhilian_keyword_search_script(
         .filter((item) => item.rect.top < 400)
         .sort((a, b) => a.distance - b.distance);
       const button = buttons[0] && buttons[0].el;
-      if (!button) {{
+      if (!button && !allowMissingSubmitControl) {{
         return JSON.stringify({{
           ok: false,
           mode,
@@ -478,11 +504,49 @@ def build_zhilian_keyword_search_script(
           title
         }});
       }}
-      const originalTarget = clean(button.getAttribute('target') || '');
+      const originalTarget = button ? clean(button.getAttribute('target') || '') : '';
       const targetNormalized = originalTarget.toLowerCase() === '_blank';
-      if (targetNormalized) {{
+      if (button && targetNormalized) {{
         button.setAttribute('target', '_self');
       }}
+      const form = input.form || input.closest('form');
+      const monitorKey = '__jobagentZhilianSearchActionV1';
+      const previousMonitor = window[monitorKey];
+      if (previousMonitor && typeof previousMonitor.cleanup === 'function') {{
+        previousMonitor.cleanup();
+      }}
+      const monitor = {{
+        version: 1,
+        input,
+        button,
+        form,
+        buttonClicks: 0,
+        inputEnterKeyups: 0,
+        formSubmits: 0
+      }};
+      const onClick = (event) => {{
+        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        if (button && (event.target === button || button.contains(event.target) || path.includes(button))) {{
+          monitor.buttonClicks += 1;
+        }}
+      }};
+      const onKeyup = (event) => {{
+        if (event.key === 'Enter' && (event.target === input || input.contains(event.target))) {{
+          monitor.inputEnterKeyups += 1;
+        }}
+      }};
+      const onSubmit = (event) => {{
+        if (!form || event.target === form) monitor.formSubmits += 1;
+      }};
+      document.addEventListener('click', onClick, true);
+      document.addEventListener('keyup', onKeyup, true);
+      document.addEventListener('submit', onSubmit, true);
+      monitor.cleanup = () => {{
+        document.removeEventListener('click', onClick, true);
+        document.removeEventListener('keyup', onKeyup, true);
+        document.removeEventListener('submit', onSubmit, true);
+      }};
+      window[monitorKey] = monitor;
       return JSON.stringify({{
         ok: true,
         mode,
@@ -491,10 +555,84 @@ def build_zhilian_keyword_search_script(
         observedValue: clean(input.value),
         originalTarget,
         targetNormalized,
+        titleBefore: title,
+        historyLength: Number(history.length || 0),
+        documentTimeOriginMs: Math.round(Number(performance.timeOrigin || 0)),
+        inputCandidateType: elementType(input),
+        buttonCandidateType: elementType(button),
+        formCandidateType: form ? elementType(form) : null,
+        focusedElementType: elementType(document.activeElement),
         inputClickPoint: clickPoint(input),
-        clickPoint: clickPoint(button),
+        clickPoint: button ? clickPoint(button) : null,
         urlBefore: href,
         ...session
+      }});
+    }})()
+    """
+
+
+def build_zhilian_search_form_submit_script(keyword: str) -> str:
+    safe_keyword = json.dumps(keyword, ensure_ascii=False)
+    return f"""
+    (function(){{
+      const mode = 'zhilian_search_form_submit';
+      const expectedKeyword = {safe_keyword};
+      function clean(value){{
+        return String(value || '').replace(/\\s+/g, ' ').trim();
+      }}
+      const monitor = window.__jobagentZhilianSearchActionV1 || null;
+      const input = monitor && monitor.input && monitor.input.isConnected
+        ? monitor.input
+        : null;
+      const form = input && (input.form || input.closest('form'));
+      if (!input || clean(input.value) !== clean(expectedKeyword)) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_search_input_not_committed',
+          observedKeyword: input ? clean(input.value) : '',
+          formSubmitInvoked: false,
+          url: location.href || '',
+          title: document.title || ''
+        }});
+      }}
+      if (!form || typeof form.requestSubmit !== 'function') {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_search_submit_control_not_activated',
+          observedKeyword: clean(input.value),
+          formSubmitInvoked: false,
+          url: location.href || '',
+          title: document.title || ''
+        }});
+      }}
+      const submitter = monitor && monitor.button && monitor.button.isConnected
+        && /^(submit|image)$/i.test(String(monitor.button.getAttribute('type') || ''))
+        ? monitor.button
+        : form.querySelector('button[type="submit"],input[type="submit"],input[type="image"]');
+      try {{
+        if (submitter) form.requestSubmit(submitter);
+        else form.requestSubmit();
+      }} catch (error) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_search_submit_control_not_activated',
+          observedKeyword: clean(input.value),
+          formSubmitInvoked: false,
+          exceptionType: String(error && error.name || 'Error'),
+          url: location.href || '',
+          title: document.title || ''
+        }});
+      }}
+      return JSON.stringify({{
+        ok: true,
+        mode,
+        observedKeyword: clean(input.value),
+        formSubmitInvoked: true,
+        url: location.href || '',
+        title: document.title || ''
       }});
     }})()
     """
@@ -523,6 +661,17 @@ def build_zhilian_search_transition_script(keyword: str, city: str = "") -> str:
           && rect.width > 8
           && rect.height > 8;
       }}
+      function elementType(el){{
+        if (!el || !(el instanceof Element)) return null;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'input') {{
+          return 'input:' + clean(el.getAttribute('type') || 'text').toLowerCase();
+        }}
+        const role = clean(el.getAttribute('role') || '').toLowerCase();
+        if (tag === 'button') return 'button:search';
+        if (role === 'button') return tag + ':role-button';
+        return tag || null;
+      }}
       function cityCodeFromUrl(value){{
         try {{
           const parsed = new URL(String(value || ''), location.href);
@@ -549,6 +698,7 @@ def build_zhilian_search_transition_script(keyword: str, city: str = "") -> str:
       const observedKeyword = inputs.length ? clean(inputs[0].el.value) : '';
       const cityCandidate = targetCityCandidate();
       const cityNavigationCandidate = targetCityNavigationCandidate();
+      const monitor = window.__jobagentZhilianSearchActionV1 || null;
       return JSON.stringify({{
         ok: true,
         mode,
@@ -561,6 +711,18 @@ def build_zhilian_search_transition_script(keyword: str, city: str = "") -> str:
         candidateCitySource: cityCandidate && cityCandidate.source,
         candidateCityNavigationUrl: cityNavigationCandidate && cityNavigationCandidate.url,
         candidateCityNavigationSource: cityNavigationCandidate && cityNavigationCandidate.source,
+        historyLength: Number(history.length || 0),
+        documentTimeOriginMs: Math.round(Number(performance.timeOrigin || 0)),
+        focusedElementType: elementType(document.activeElement),
+        actionSignals: monitor ? {{
+          buttonClicks: Number(monitor.buttonClicks || 0),
+          inputEnterKeyups: Number(monitor.inputEnterKeyups || 0),
+          formSubmits: Number(monitor.formSubmits || 0)
+        }} : {{
+          buttonClicks: 0,
+          inputEnterKeyups: 0,
+          formSubmits: 0
+        }},
         ...session
       }});
     }})()

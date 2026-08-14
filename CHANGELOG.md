@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.19] - 2026-08-14
+
+### Fixed
+
+- Verify Zhilian's controlled search input and try the visible search button, input Enter and form submission once each, stopping as soon as a real route, history, navigation or result-state change is observed.
+- Return stable `zhilian_search_input_not_committed`, `zhilian_search_submit_control_not_activated` and `zhilian_search_transition_not_observed` failures when the live page accepts no verifiable search action.
+- Include a redacted action receipt with control types, readable input value, attempted submit method and before/after state without exposing cookies, account content or page text.
+- Keep search-navigation recovery separate from city-evidence recovery, so a stalled search can no longer be rewritten as a city-resolution failure or repeat forever.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, round, preserved `request_id`, signed SearchPlan, Discover ID, candidates and audits remain in place. Resume with `jobagent zhilian discover`; no cache clearing, repeated login, replacement round or duplicate Discover charge is required.
+
 ## [0.5.15] - 2026-08-14
 
 ### Fixed

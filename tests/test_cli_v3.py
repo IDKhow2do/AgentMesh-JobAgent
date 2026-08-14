@@ -1934,9 +1934,24 @@ def test_discover_start_failure_preserves_and_reuses_request_id(
     assert pending["account_ref"] == "acct_account_a"
 
 
+@pytest.mark.parametrize(
+    ("failure_code", "terminal_code"),
+    [
+        (
+            "zhilian_city_evidence_pending",
+            "zhilian_city_evidence_recovery_exhausted",
+        ),
+        (
+            "zhilian_search_navigation_pending",
+            "zhilian_search_navigation_recovery_exhausted",
+        ),
+    ],
+)
 def test_discover_collection_failure_preserves_request_and_no_charge(
     tmp_path,
     monkeypatch,
+    failure_code,
+    terminal_code,
 ):
     import jobagent.application.discover as application
     import jobagent.infra.discovery_state as discovery_state
@@ -1984,8 +1999,8 @@ def test_discover_collection_failure_preserves_request_and_no_charge(
 
     def fail_collection(*_args, **_kwargs):
         raise application.CollectionError(
-            "zhilian_city_evidence_pending",
-            "Zhilian city evidence is still pending",
+            failure_code,
+            "Zhilian collection recovery is still pending",
             details={"retryable": True},
         )
 
@@ -1999,14 +2014,14 @@ def test_discover_collection_failure_preserves_request_and_no_charge(
         errors.append(error.value)
 
     assert len(set(request_ids)) == 1
-    assert errors[0].code == "zhilian_city_evidence_pending"
+    assert errors[0].code == failure_code
     assert errors[0].details["retryable"] is True
     assert errors[0].details["recovery_attempt"] == 1
     assert errors[0].details["recovery_budget"] == 3
-    assert errors[1].code == "zhilian_city_evidence_pending"
+    assert errors[1].code == failure_code
     assert errors[1].details["retryable"] is True
     assert errors[1].details["recovery_attempt"] == 2
-    assert errors[-1].code == "zhilian_city_evidence_recovery_exhausted"
+    assert errors[-1].code == terminal_code
     assert errors[-1].details == {
         "retryable": False,
         "request_preserved": True,
@@ -2029,6 +2044,20 @@ def test_discover_collection_failure_preserves_request_and_no_charge(
     assert pending is not None
     assert pending["request_id"] == request_ids[0]
     assert pending["collection_recovery"]["attempts"] == 3
+
+
+def test_zhilian_search_navigation_recovery_is_not_classified_as_city_recovery():
+    import jobagent.application.discover as application
+
+    assert "zhilian_search_navigation_pending" not in application._ZHILIAN_CITY_RECOVERY_CODES
+    assert (
+        "zhilian_search_navigation_pending"
+        in application._ZHILIAN_SEARCH_NAVIGATION_RECOVERY_CODES
+    )
+    assert (
+        application._ZHILIAN_SEARCH_NAVIGATION_RECOVERY_TERMINAL
+        == "zhilian_search_navigation_recovery_exhausted"
+    )
 
 
 def test_collection_recovery_budget_is_bound_to_exact_request(tmp_path, monkeypatch):
