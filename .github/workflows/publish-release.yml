@@ -1,0 +1,109 @@
+name: Publish versioned release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-versioned-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read and validate version
+        id: version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          package_version = {}
+          exec(Path("src/jobagent/__init__.py").read_text(), package_version)
+          skill_versions = []
+          for path in (
+              Path("skills/claude-code/SKILL.md"),
+              Path("skills/openclaw-job-agent/SKILL.md"),
+          ):
+              for line in path.read_text().splitlines():
+                  if line.startswith("version:"):
+                      skill_versions.append(line.split(":", 1)[1].strip())
+                      break
+          versions = [package_version["__version__"], *skill_versions]
+          if versions != [version, version, version]:
+              raise SystemExit(f"version mismatch: project={version}, surfaces={versions}")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"version={version}\n")
+              output.write(f"tag=v{version}\n")
+          PY
+
+      - name: Test public client
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest -q
+
+      - name: Build and smoke-test wheel
+        run: |
+          python -m pip install build
+          python -m build
+          python -m venv /tmp/jobagent-release-smoke
+          /tmp/jobagent-release-smoke/bin/pip install dist/*.whl
+          /tmp/jobagent-release-smoke/bin/jobagent --version
+          /tmp/jobagent-release-smoke/bin/jobagent zhilian --help
+
+      - name: Prepare release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          changelog = Path("CHANGELOG.md").read_text()
+          start_marker = f"## [{version}]"
+          start = changelog.find(start_marker)
+          if start < 0:
+              raise SystemExit(f"missing changelog section: {start_marker}")
+          end = changelog.find("\n## [", start + len(start_marker))
+          if end < 0:
+              end = len(changelog)
+          Path("/tmp/jobagent-release-notes.md").write_text(
+              changelog[start:end].strip() + "\n"
+          )
+          PY
+
+      - name: Publish immutable version tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Job Agent $TAG" \
+            --notes-file /tmp/jobagent-release-notes.md
