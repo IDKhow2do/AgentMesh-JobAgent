@@ -21,6 +21,7 @@ from .selectors import (
     ZHILIAN_SELECTOR_VERSION,
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
+    build_zhilian_search_transition_script,
     build_zhilian_pagination_script,
     build_zhilian_snapshot_script,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "build_zhilian_detail_snapshot_script",
     "build_zhilian_city_filter_script",
     "build_zhilian_keyword_search_script",
+    "build_zhilian_search_transition_script",
     "build_zhilian_pagination_script",
     "ZhilianCityResolver",
     "city_code_from_url",

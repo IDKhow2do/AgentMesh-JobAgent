@@ -523,6 +523,10 @@ def _collection_error_retryable(code: str) -> bool:
     return code in {
         "zhilian_page_state_unknown",
         "zhilian_job_cards_not_found",
+        "zhilian_city_evidence_pending",
+        "zhilian_city_selector_unavailable",
+        "zhilian_city_resolution_unverified",
+        "zhilian_search_navigation_pending",
         "page_state_unknown",
         "no_candidates",
     }

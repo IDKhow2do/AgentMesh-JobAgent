@@ -93,7 +93,22 @@ class ZhilianCityResolver:
     ) -> dict[str, Any]:
         normalized = normalize_city_name(city)
         observed_url = str(snapshot.get("url") or "")
-        observed_code = city_code_from_url(observed_url)
+        url_code = city_code_from_url(observed_url)
+        city_filter = snapshot.get("cityFilter") if isinstance(snapshot.get("cityFilter"), dict) else {}
+        candidate_code = str(
+            snapshot.get("candidateCityCode")
+            or city_filter.get("candidateCode")
+            or ""
+        )
+        if not candidate_code.isdigit():
+            candidate_code = ""
+        observed_code = url_code or candidate_code or None
+        code_evidence_conflict = bool(
+            url_code and candidate_code and url_code != candidate_code
+        )
+        observed_code_source = (
+            "result_url" if url_code else "city_control_metadata" if candidate_code else "none"
+        )
         observed_title = str(snapshot.get("title") or "")
         visible_values = _visible_city_values(snapshot)
         matching = 0
@@ -110,8 +125,12 @@ class ZhilianCityResolver:
                 mismatches.append(card_city)
         card_cities_present = bool(matching or mismatches)
         all_cards_other_city = bool(card_cities_present and matching == 0)
+        title_matches_city = bool(
+            normalized and normalized in normalize_city_name(observed_title)
+        )
+        visible_city_conflict = bool(visible_values and normalized not in visible_values)
         evidence_sources: list[str] = []
-        if normalized and normalized in normalize_city_name(observed_title):
+        if title_matches_city:
             evidence_sources.append("page_title")
         if normalized and normalized in visible_values:
             evidence_sources.append("visible_city")
@@ -126,7 +145,10 @@ class ZhilianCityResolver:
             and observed_code == expected_code
             and source in {"bundled_seed", "verified_cache"}
         )
-        if not observed_code or all_cards_other_city:
+        evidence_conflict = bool(
+            all_cards_other_city or visible_city_conflict or code_evidence_conflict
+        )
+        if not observed_code or evidence_conflict:
             verified = False
         elif code_changed or not expected_code:
             # A newly observed code is only learned when two independent,
@@ -142,6 +164,21 @@ class ZhilianCityResolver:
             else "trusted_mapping_with_page_evidence" if verified
             else "unverified"
         )
+        if verified:
+            evidence_status = "verified"
+            reason = "verified"
+        elif evidence_conflict:
+            evidence_status = "evidence_conflict"
+            reason = "city_evidence_conflict"
+        elif not observed_code:
+            evidence_status = "evidence_pending"
+            reason = "observed_city_code_missing"
+        elif code_changed or not expected_code:
+            evidence_status = "evidence_pending"
+            reason = "dynamic_evidence_insufficient"
+        else:
+            evidence_status = "evidence_pending"
+            reason = "trusted_mapping_evidence_missing"
         return {
             "ok": verified,
             "mode": "zhilian_city_resolution",
@@ -149,12 +186,19 @@ class ZhilianCityResolver:
             "source": source,
             "expectedCode": expected_code,
             "observedCode": observed_code,
+            "observedCodeSource": observed_code_source,
+            "candidateCode": candidate_code or None,
+            "codeEvidenceConflict": code_evidence_conflict,
             "observedUrl": observed_url,
             "observedTitle": observed_title,
             "visibleCities": visible_values,
             "matchingCards": matching,
             "mismatchedCardCities": sorted(set(mismatches)),
             "allCardsOtherCity": all_cards_other_city,
+            "titleMatchesCity": title_matches_city,
+            "visibleCityConflict": visible_city_conflict,
+            "evidenceStatus": evidence_status,
+            "reason": reason,
             "codeChanged": code_changed,
             "evidenceSources": evidence_sources,
             "verificationSource": verification_source,

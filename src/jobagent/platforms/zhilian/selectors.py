@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-13.3"
+ZHILIAN_SELECTOR_VERSION = "2026-08-14.1"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -330,6 +330,66 @@ def build_zhilian_keyword_search_script(keyword: str) -> str:
     """
 
 
+def build_zhilian_search_transition_script(keyword: str, city: str = "") -> str:
+    safe_keyword = json.dumps(keyword, ensure_ascii=False)
+    safe_city = json.dumps(city, ensure_ascii=False)
+    return f"""
+    (function(){{
+      const mode = 'zhilian_search_transition';
+      const expectedKeyword = {safe_keyword};
+      const targetCity = {safe_city};
+      {_ZHILIAN_SESSION_PROBE_JS}
+      const session = zhilianSessionProbe();
+      function clean(value){{
+        return String(value || '').replace(/\\s+/g, ' ').trim();
+      }}
+      function visible(el){{
+        if (!el || !(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity || '1') !== 0
+          && rect.width > 8
+          && rect.height > 8;
+      }}
+      function cityCodeFromUrl(value){{
+        try {{
+          const parsed = new URL(String(value || ''), location.href);
+          const queryCode = parsed.searchParams.get('jl');
+          if (/^\\d+$/.test(queryCode || '')) return queryCode;
+          const match = parsed.pathname.match(/(?:^|\\/)jl(\\d+)(?:\\/|$)/);
+          return match ? match[1] : null;
+        }} catch (_error) {{
+          return null;
+        }}
+      }}
+      const inputs = Array.from(document.querySelectorAll(
+        'input[type="text"],input[type="search"],input:not([type])'
+      )).filter(visible).map((el) => {{
+        const placeholder = clean(el.getAttribute('placeholder') || '');
+        const name = clean(el.getAttribute('name') || '');
+        const id = clean(el.id || '');
+        const score = (/职位|公司|搜索|关键/.test(placeholder) ? 8 : 0)
+          + (/keyword|search|kw/i.test(name + ' ' + id) ? 4 : 0)
+          + (el.getBoundingClientRect().top < 320 ? 2 : 0);
+        return {{el, score}};
+      }}).sort((a, b) => b.score - a.score);
+      const observedKeyword = inputs.length ? clean(inputs[0].el.value) : '';
+      return JSON.stringify({{
+        ok: true,
+        mode,
+        expectedKeyword,
+        observedKeyword,
+        requestedCity: targetCity,
+        titleCityMatch: !!targetCity && clean(session.title).includes(targetCity.replace(/市$/, '')),
+        observedCityCode: cityCodeFromUrl(session.url),
+        ...session
+      }});
+    }})()
+    """
+
+
 def build_zhilian_pagination_script(page: int) -> str:
     safe_page = max(1, int(page))
     return f"""
@@ -437,6 +497,30 @@ def build_zhilian_city_filter_script(city: str) -> str:
           text: directText(target)
         }};
       }}
+      function candidateCode(el){{
+        const target = el && (el.closest('a,[data-city-code],[data-city-id],[data-code],[data-value]') || el);
+        if (!target) return null;
+        const values = [
+          target.getAttribute('data-city-code'),
+          target.getAttribute('data-city-id'),
+          target.getAttribute('data-code'),
+          target.getAttribute('data-value'),
+          target.getAttribute('value')
+        ];
+        for (const value of values) {{
+          if (/^\\d+$/.test(clean(value))) return clean(value);
+        }}
+        const hrefValue = target.getAttribute('href') || '';
+        try {{
+          const parsed = new URL(hrefValue, href);
+          const queryCode = parsed.searchParams.get('jl');
+          if (/^\\d+$/.test(queryCode || '')) return queryCode;
+          const pathMatch = parsed.pathname.match(/(?:^|\\/)jl(\\d+)(?:\\/|$)/);
+          return pathMatch ? pathMatch[1] : null;
+        }} catch (_error) {{
+          return null;
+        }}
+      }}
       const cityNames = ['北京','上海','广州','深圳','天津','武汉','西安','成都','大连','长春','沈阳','南京','济南','青岛','杭州','苏州','无锡','宁波','重庆','郑州','长沙','福州','厦门','哈尔滨'];
       const visibleElements = Array.from(document.querySelectorAll('body *')).filter(visible);
       function cityCount(text){{
@@ -454,17 +538,27 @@ def build_zhilian_city_filter_script(city: str) -> str:
         return matches[0] && matches[0].el;
       }}
       function findCurrentCityControl(){{
-        const matches = visibleElements
+        const explicit = Array.from(document.querySelectorAll(
+          '[data-city-code],[data-city-id],[data-city],[data-location],[aria-label*="城市"],[aria-label*="地点"],[class*="city"],[class*="City"],[class*="location"],[class*="Location"]'
+        )).filter(visible);
+        const matches = Array.from(new Set([...explicit, ...visibleElements]))
           .filter((el) => {{
             const rect = el.getBoundingClientRect();
             const className = String(el.className || '');
             const parentClass = String(el.parentElement && el.parentElement.className || '');
+            const metadata = clean([
+              el.getAttribute('aria-label'),
+              el.getAttribute('data-city'),
+              el.getAttribute('data-location')
+            ].join(' '));
             const text = directText(el);
             return rect.top < 320
               && cityNames.includes(text)
               && (
                 className.includes('content-s__item__text')
                 || parentClass.includes('content-s__item')
+                || /city|location|城市|地点/i.test(className + ' ' + parentClass + ' ' + metadata)
+                || !!candidateCode(el)
               );
           }})
           .map((el) => {{
@@ -482,6 +576,7 @@ def build_zhilian_city_filter_script(city: str) -> str:
           mode,
           city: targetCity,
           observedCity: currentCity,
+          candidateCode: candidateCode(currentCityControl),
           alreadySelected: true,
           source: 'visible_current_city',
           url: href,
@@ -516,9 +611,15 @@ def build_zhilian_city_filter_script(city: str) -> str:
           .sort((a, b) => a.text.length - b.text.length);
         return candidates[0] && candidates[0].el;
       }}
+      const explicitTargetOptions = Array.from(document.querySelectorAll(
+        '[data-city-code],[data-city-id],[data-city],[role="option"],[role="menuitem"],a[href*="jl="]'
+      )).filter(visible).filter((el) => directText(el) === targetCity);
       let root = findLocationRoot();
       let expanded = false;
-      if (!root || !clean(root.innerText || root.textContent || '').includes(targetCity) || cityCount(clean(root.innerText || root.textContent || '')) < 4) {{
+      const rootHasCityOptions = !!root
+        && clean(root.innerText || root.textContent || '').includes(targetCity)
+        && cityCount(clean(root.innerText || root.textContent || '')) >= 4;
+      if (!rootHasCityOptions && !explicitTargetOptions.length) {{
         const header = findLocationHeader() || currentCityControl;
         if (header) {{
           expanded = true;
@@ -535,14 +636,17 @@ def build_zhilian_city_filter_script(city: str) -> str:
           title
         }});
       }}
-      const options = Array.from(root.querySelectorAll('a,button,label,li,span,div'))
+      const scopedOptions = root
+        ? Array.from(root.querySelectorAll('a,button,label,li,span,div'))
+        : [];
+      const options = Array.from(new Set([...scopedOptions, ...explicitTargetOptions]))
         .filter(visible)
         .filter((el) => directText(el) === targetCity)
         .map((el) => {{
           const rect = el.getBoundingClientRect();
           const className = String(el.className || '');
           const selected = /active|selected|checked|current/.test(className);
-          return {{el, rect, selected}};
+          return {{el, rect, selected, candidateCode: candidateCode(el)}};
         }})
         .filter((item) => item.rect.top < 700)
         .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
@@ -552,19 +656,29 @@ def build_zhilian_city_filter_script(city: str) -> str:
           mode,
           error: 'zhilian_city_option_not_found',
           city: targetCity,
-          rootText: clean(root.innerText || root.textContent || '').slice(0, 500),
+          rootText: root ? clean(root.innerText || root.textContent || '').slice(0, 500) : '',
           url: href,
           title
         }});
       }}
       const option = options[0];
       if (option.selected) {{
-        return JSON.stringify({{ok: true, mode, city: targetCity, alreadySelected: true, url: href, title}});
+        return JSON.stringify({{
+          ok: true,
+          mode,
+          city: targetCity,
+          alreadySelected: true,
+          candidateCode: option.candidateCode,
+          source: 'visible_city_option',
+          url: href,
+          title
+        }});
       }}
       return JSON.stringify({{
         ok: true,
         mode,
         city: targetCity,
+        candidateCode: option.candidateCode,
         applied: true,
         action: 'select_city',
         clickPoint: clickPoint(option.el),

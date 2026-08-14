@@ -1984,8 +1984,8 @@ def test_discover_collection_failure_preserves_request_and_no_charge(
 
     def fail_collection(*_args, **_kwargs):
         raise application.CollectionError(
-            "zhilian_page_state_unknown",
-            "Zhilian page state stayed unknown",
+            "zhilian_city_evidence_pending",
+            "Zhilian city evidence is still pending",
             details={"retryable": True},
         )
 
