@@ -7,6 +7,7 @@ from jobagent.platforms.zhilian.collect import ZhilianReadOnlyCollector, build_z
 from jobagent.platforms.zhilian.selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
+    build_zhilian_search_form_submit_script,
     build_zhilian_search_transition_script,
     build_zhilian_snapshot_script,
 )
@@ -56,6 +57,30 @@ def test_keyword_search_keeps_platform_route_in_managed_tab():
     assert "button.setAttribute('target', '_self')" in script
     assert "button.href =" not in script
     assert "/sou/" not in script
+
+
+def test_keyword_search_emits_controlled_input_and_bounded_form_fallback():
+    keyword_script = build_zhilian_keyword_search_script(
+        "AI产品经理",
+        allow_missing_submit_control=True,
+    )
+    form_script = build_zhilian_search_form_submit_script("AI产品经理")
+    transition_script = build_zhilian_search_transition_script(
+        "AI产品经理",
+        "深圳",
+    )
+
+    assert "input._valueTracker.setValue(previousValue)" in keyword_script
+    assert "new InputEvent('input'" in keyword_script
+    assert "__jobagentZhilianSearchActionV1" in keyword_script
+    assert "inputCandidateType" in keyword_script
+    assert "buttonCandidateType" in keyword_script
+    assert "formCandidateType" in keyword_script
+    assert "zhilian_search_form_submit" in form_script
+    assert "form.requestSubmit" in form_script
+    assert "historyLength" in transition_script
+    assert "documentTimeOriginMs" in transition_script
+    assert "actionSignals" in transition_script
 
 
 def test_snapshot_selector_supports_current_job_surfaces_and_safe_diagnostics():
@@ -542,9 +567,12 @@ class _HomepageDynamicCityDiscoveryDriver(_ChangedShenzhenCityDriver):
             self.page = "city_homepage"
         return result
 
+    def _click_at(self, x, y):
+        super()._click_at(x, y)
+        self.keyword_submissions += 1
+
     def _exec_js(self, script: str):
         if "zhilian_keyword_search" in script:
-            self.keyword_submissions += 1
             return super()._exec_js(script)
         if "zhilian_search_transition" in script:
             self.transition_probes += 1

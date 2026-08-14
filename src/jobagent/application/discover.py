@@ -35,9 +35,15 @@ _ZHILIAN_CITY_RECOVERY_CODES = {
     "zhilian_city_evidence_pending",
     "zhilian_city_selector_unavailable",
     "zhilian_city_resolution_unverified",
-    "zhilian_search_navigation_pending",
 }
 _ZHILIAN_CITY_RECOVERY_BUDGET = 3
+_ZHILIAN_SEARCH_NAVIGATION_RECOVERY_CODES = {
+    "zhilian_search_navigation_pending",
+}
+_ZHILIAN_SEARCH_NAVIGATION_RECOVERY_BUDGET = 3
+_ZHILIAN_SEARCH_NAVIGATION_RECOVERY_TERMINAL = (
+    "zhilian_search_navigation_recovery_exhausted"
+)
 
 
 def _decision_result(
@@ -515,13 +521,41 @@ def run_discover(
                 "next_suggested",
                 f"jobagent browser diagnose --platform {platform}",
             )
+        recovery_contract: tuple[str, int, str, str] | None = None
         if platform == "zhilian" and exc.code in _ZHILIAN_CITY_RECOVERY_CODES:
+            recovery_contract = (
+                "zhilian_city_convergence",
+                _ZHILIAN_CITY_RECOVERY_BUDGET,
+                "zhilian_city_evidence_recovery_exhausted",
+                (
+                    "Zhilian city evidence did not converge within the bounded "
+                    "recovery window. The request remains preserved and was not charged."
+                ),
+            )
+        elif (
+            platform == "zhilian"
+            and exc.code in _ZHILIAN_SEARCH_NAVIGATION_RECOVERY_CODES
+        ):
+            recovery_contract = (
+                "zhilian_search_navigation",
+                _ZHILIAN_SEARCH_NAVIGATION_RECOVERY_BUDGET,
+                _ZHILIAN_SEARCH_NAVIGATION_RECOVERY_TERMINAL,
+                (
+                    "Zhilian started search navigation but did not reach a verifiable "
+                    "result state within the bounded recovery window. The request "
+                    "remains preserved and was not charged."
+                ),
+            )
+        if recovery_contract is not None:
+            recovery_key, recovery_budget, terminal_code, terminal_message = (
+                recovery_contract
+            )
             recovery = record_collection_recovery(
                 platform,
                 request_id=request_id,
-                recovery_key="zhilian_city_convergence",
+                recovery_key=recovery_key,
                 client_version=__version__,
-                budget=_ZHILIAN_CITY_RECOVERY_BUDGET,
+                budget=recovery_budget,
             )
             details.update(
                 {
@@ -532,11 +566,8 @@ def run_discover(
                 }
             )
             if recovery["exhausted"]:
-                exc.code = "zhilian_city_evidence_recovery_exhausted"
-                exc.message = (
-                    "Zhilian city evidence did not converge within the bounded recovery "
-                    "window. The request remains preserved and was not charged."
-                )
+                exc.code = terminal_code
+                exc.message = terminal_message
                 details.update(
                     {
                         "retryable": False,

@@ -201,6 +201,8 @@ jobagent zhilian audit
 
 当智联只提供可读城市 slug、暂时没有数值城市码时，CLI 会先独立验证官方城市页，再从该页提交 SearchPlan 的原始可读查询。城市首页的推荐职位不会被当作关键词搜索结果；只有页面实际进入搜索路由，并再次验证可读 query 与城市后，岗位卡才会进入候选。后续若页面暴露数值城市码，CLI 会交叉验证后再缓存，而不是静态猜测。
 
+智联的搜索按钮、输入框 Enter 与表单提交会按一次性有界顺序尝试，每一步都必须观察到真实 URL、history、文档导航或结果状态变化才算成功。若页面接收了动作但没有变化，CLI 返回 `zhilian_search_input_not_committed`、`zhilian_search_submit_control_not_activated` 或 `zhilian_search_transition_not_observed`，并附带不含 Cookie、账号和页面正文的 `diagnostics.action_receipt`；这些错误不可自动重试，应执行返回的只读 `browser diagnose`。真正已经开始但尚未完成的导航继续使用原 `request_id`、不重复收费，并以独立的搜索导航恢复预算收敛，不会被改写为城市证据错误。
+
 ### 前程无忧 / 51Job
 
 ```bash

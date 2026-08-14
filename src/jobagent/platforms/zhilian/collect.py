@@ -24,6 +24,7 @@ from .selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
     build_zhilian_pagination_script,
+    build_zhilian_search_form_submit_script,
     build_zhilian_search_transition_script,
     build_zhilian_snapshot_script,
 )
@@ -35,6 +36,8 @@ _ZHILIAN_CITY_CODES = BUNDLED_CITY_CODES
 ZHILIAN_SEARCH_ENTRY_URL = "https://www.zhaopin.com/"
 ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS = 75
 ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS = 75
+ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS = 8
+ZHILIAN_SEARCH_INPUT_COMMIT_TIMEOUT_SECONDS = 2
 ZHILIAN_PAGE_POLL_INTERVAL_SECONDS = 0.5
 
 
@@ -118,7 +121,6 @@ class ZhilianCollectResult:
             "zhilian_city_selector_unavailable",
             "zhilian_city_evidence_conflict",
             "zhilian_city_resolution_unverified",
-            "zhilian_search_navigation_pending",
         }:
             messages = {
                 "zhilian_city_evidence_pending": (
@@ -133,10 +135,6 @@ class ZhilianCollectResult:
                     "Zhilian exposed city evidence that conflicts with the requested city; "
                     "collection stopped before returning candidates and no credits were charged."
                 ),
-                "zhilian_search_navigation_pending": (
-                    "Zhilian did not finish the search-page transition in the safe wait window; "
-                    "the preserved request can be resumed without another charge."
-                ),
                 "zhilian_city_resolution_unverified": (
                     "Zhilian city evidence could not be verified safely; no credits were charged."
                 ),
@@ -145,6 +143,48 @@ class ZhilianCollectResult:
                 {
                     "message": messages[self.error],
                     "retryable": self.error != "zhilian_city_evidence_conflict",
+                    "no_charge": True,
+                    "diagnostics": _safe_city_diagnostics(self.snapshot),
+                }
+            )
+        elif self.error == "zhilian_search_navigation_pending":
+            payload.update(
+                {
+                    "message": (
+                        "Zhilian started changing search state but did not finish a "
+                        "verifiable result-page transition in the safe wait window; "
+                        "the preserved request can be resumed without another charge."
+                    ),
+                    "retryable": True,
+                    "no_charge": True,
+                    "diagnostics": _safe_city_diagnostics(self.snapshot),
+                }
+            )
+        elif self.error in {
+            "zhilian_search_input_not_committed",
+            "zhilian_search_submit_control_not_activated",
+            "zhilian_search_transition_not_observed",
+        }:
+            messages = {
+                "zhilian_search_input_not_committed": (
+                    "Zhilian did not retain the requested readable search term in its "
+                    "controlled input. Collection stopped before reading recommendations."
+                ),
+                "zhilian_search_submit_control_not_activated": (
+                    "Zhilian exposed a search field but none of its bounded submit controls "
+                    "could be activated safely."
+                ),
+                "zhilian_search_transition_not_observed": (
+                    "Zhilian accepted the readable search term, but button, Enter, and form "
+                    "submission produced no verifiable route, history, or result-state change."
+                ),
+            }
+            payload.update(
+                {
+                    "message": messages[self.error] + " No credits were charged.",
+                    "retryable": False,
+                    "requires_user_action": True,
+                    "next_suggested": "jobagent browser diagnose --platform zhilian",
                     "no_charge": True,
                     "diagnostics": _safe_city_diagnostics(self.snapshot),
                 }
@@ -692,12 +732,15 @@ class ZhilianReadOnlyCollector:
         city_discovery_actions: set[tuple[str, str]] = set()
         city_route_verification: dict[str, Any] | None = None
         native_city_search_submitted = False
+        search_action_receipt: dict[str, Any] | None = None
         while True:
             attempts += 1
             last = _unwrap_js_result_with_error(
                 self.driver._exec_js(script),
                 parse_error="zhilian_js_parse_failed",
             )
+            if search_action_receipt:
+                last["searchActionReceipt"] = search_action_receipt
             if _strong_login_evidence(last):
                 return {
                     **last,
@@ -721,9 +764,13 @@ class ZhilianReadOnlyCollector:
                     if not native_city_search_submitted:
                         native_submit = self._submit_verified_city_keyword(
                             keyword,
+                            city=city,
                             wait_seconds=wait_seconds,
                         )
+                        search_action_receipt = native_submit.get("searchActionReceipt")
                         last["verifiedCityKeywordSubmit"] = native_submit
+                        if search_action_receipt:
+                            last["searchActionReceipt"] = search_action_receipt
                         if not native_submit.get("ok"):
                             return {
                                 **last,
@@ -736,6 +783,22 @@ class ZhilianReadOnlyCollector:
                                 "settleAttempts": attempts,
                                 "settleTimeoutSeconds": timeout,
                                 "cityRouteVerification": city_route_verification,
+                            }
+                        transition_probe = native_submit.get(
+                            "searchTransitionProbe"
+                        )
+                        if isinstance(
+                            transition_probe, dict
+                        ) and _search_transition_ready(
+                            transition_probe, keyword, city
+                        ):
+                            return {
+                                **transition_probe,
+                                "ok": True,
+                                "searchActionReceipt": search_action_receipt,
+                                "cityRouteVerification": city_route_verification,
+                                "settleAttempts": attempts,
+                                "settleTimeoutSeconds": timeout,
                             }
                         native_city_search_submitted = True
                         deadline = time.monotonic() + timeout
@@ -798,21 +861,47 @@ class ZhilianReadOnlyCollector:
                                 "settleAttempts": attempts,
                                 "settleTimeoutSeconds": timeout,
                             }
-                        restart = self._click_keyword_control(
+                        native_submit = self._submit_verified_city_keyword(
                             keyword,
+                            city=city,
                             wait_seconds=wait_seconds,
                         )
-                        last["cityBootstrapKeyword"] = restart
-                        if not restart.get("ok"):
+                        search_action_receipt = native_submit.get(
+                            "searchActionReceipt"
+                        )
+                        last["cityBootstrapKeyword"] = native_submit
+                        if search_action_receipt:
+                            last["searchActionReceipt"] = search_action_receipt
+                        if not native_submit.get("ok"):
                             return {
                                 **last,
                                 "ok": False,
-                                "error": restart.get("error")
+                                "error": native_submit.get("error")
                                 or "zhilian_keyword_submit_failed",
-                                "loginRequired": restart.get("loginRequired", False),
+                                "loginRequired": native_submit.get(
+                                    "loginRequired", False
+                                ),
+                                "settleAttempts": attempts,
+                                "settleTimeoutSeconds": timeout,
+                                "cityRouteVerification": city_route_verification,
+                            }
+                        transition_probe = native_submit.get(
+                            "searchTransitionProbe"
+                        )
+                        if isinstance(
+                            transition_probe, dict
+                        ) and _search_transition_ready(
+                            transition_probe, keyword, city
+                        ):
+                            return {
+                                **transition_probe,
+                                "ok": True,
+                                "searchActionReceipt": search_action_receipt,
+                                "cityRouteVerification": city_route_verification,
                                 "settleAttempts": attempts,
                                 "settleTimeoutSeconds": timeout,
                             }
+                        native_city_search_submitted = True
                         deadline = time.monotonic() + timeout
                         continue
                     if _search_transition_ready(last, keyword, city):
@@ -984,6 +1073,7 @@ class ZhilianReadOnlyCollector:
         self,
         keyword: str,
         *,
+        city: str,
         wait_seconds: int,
     ) -> dict[str, Any]:
         data = self._exec_ui_script_until_settled(
@@ -992,28 +1082,208 @@ class ZhilianReadOnlyCollector:
                 allow_unknown_session=_valid_login_verification(
                     self.login_verification
                 ),
+                allow_missing_submit_control=True,
             ),
             wait_seconds=wait_seconds,
             parse_error="zhilian_js_parse_failed",
         )
         if not data.get("ok"):
             return data
+        prepared_state = _safe_search_action_state(data)
+        receipt = _new_search_action_receipt(data, keyword)
+        expected = " ".join(keyword.split()).casefold()
+        observed = " ".join(str(data.get("observedValue") or "").split()).casefold()
+        if not expected or observed != expected:
+            input_summary = _search_action_change_summary(
+                prepared_state, prepared_state
+            )
+            receipt["attempts"].append(
+                {
+                    "method": "controlled_input",
+                    "controlActivated": True,
+                    **input_summary,
+                    "transitionObserved": False,
+                }
+            )
+            receipt.update(input_summary)
+            return {
+                **data,
+                "ok": False,
+                "error": "zhilian_search_input_not_committed",
+                "searchActionReceipt": receipt,
+            }
+        committed_state, committed_probe, committed = self._verify_search_input_commit(
+            keyword,
+            city=city,
+            wait_seconds=wait_seconds,
+        )
+        receipt["finalReadableInputValue"] = str(committed_state.get("query") or "")
+        receipt["focusedElementType"] = str(
+            committed_state.get("focusedElementType")
+            or receipt.get("focusedElementType")
+            or ""
+        )
+        input_transition_observed = _search_action_transition_observed(
+            prepared_state,
+            committed_state,
+            committed_probe,
+            keyword,
+            city,
+        )
+        input_summary = _search_action_change_summary(
+            prepared_state, committed_state
+        )
+        receipt["attempts"].append(
+            {
+                "method": "controlled_input",
+                "controlActivated": True,
+                **input_summary,
+                "transitionObserved": input_transition_observed,
+            }
+        )
+        if not committed:
+            receipt.update(input_summary)
+            return {
+                **data,
+                "ok": False,
+                "error": "zhilian_search_input_not_committed",
+                "searchTransitionProbe": committed_probe,
+                "searchActionReceipt": receipt,
+            }
+        if input_transition_observed:
+            receipt.update(input_summary)
+            receipt["transitionObserved"] = True
+            return {
+                **data,
+                "ok": True,
+                "searchTransitionProbe": committed_probe,
+                "searchActionReceipt": receipt,
+            }
+        baseline = committed_state
+        action_origin = prepared_state
+
         input_point = (
             data.get("inputClickPoint")
             if isinstance(data.get("inputClickPoint"), dict)
             else None
         )
+        button_point = (
+            data.get("clickPoint")
+            if isinstance(data.get("clickPoint"), dict)
+            else None
+        )
         click_at = getattr(self.driver, "_click_at", None)
         cdp = getattr(self.driver, "cdp", None)
         send = getattr(cdp, "send", None)
-        if not input_point or not callable(click_at) or not callable(send):
+        current = baseline
+        activated_any = False
+
+        def record_attempt(
+            method: str,
+            *,
+            activated: bool,
+            activation_error: str = "",
+            form_submit_invoked: bool = False,
+        ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+            nonlocal current, activated_any
+            activated_any = activated_any or activated
+            post, transition_observed, transition_probe = self._observe_search_action(
+                keyword,
+                city=city,
+                baseline=current,
+                wait_seconds=wait_seconds,
+            )
+            summary = _search_action_change_summary(current, post)
+            attempt = {
+                "method": method,
+                "controlActivated": activated,
+                **summary,
+                "transitionObserved": transition_observed,
+            }
+            if activation_error:
+                attempt["activationError"] = activation_error
+            if form_submit_invoked:
+                attempt["formSubmitInvoked"] = True
+            receipt["attempts"].append(attempt)
+            current = post
+            return post, transition_observed, transition_probe
+
+        if button_point and callable(click_at):
+            activation_error = ""
+            activated = False
+            try:
+                click_at(button_point.get("x"), button_point.get("y"))
+                activated = True
+            except Exception as exc:  # Browser drivers expose heterogeneous errors.
+                activation_error = type(exc).__name__
+            post, changed, transition_probe = record_attempt(
+                "button_click",
+                activated=activated,
+                activation_error=activation_error,
+            )
+            if changed:
+                receipt.update(_search_action_change_summary(action_origin, post))
+                receipt["transitionObserved"] = True
+                return {
+                    **data,
+                    "ok": True,
+                    "searchActionReceipt": receipt,
+                    "searchTransitionProbe": transition_probe,
+                }
+
+        if input_point and callable(click_at) and callable(send):
+            activation_error = ""
+            activated = False
+            try:
+                click_at(input_point.get("x"), input_point.get("y"))
+                _dispatch_native_enter(send)
+                activated = True
+            except Exception as exc:  # Browser drivers expose heterogeneous errors.
+                activation_error = type(exc).__name__
+            post, changed, transition_probe = record_attempt(
+                "input_enter",
+                activated=activated,
+                activation_error=activation_error,
+            )
+            if changed:
+                receipt.update(_search_action_change_summary(action_origin, post))
+                receipt["transitionObserved"] = True
+                return {
+                    **data,
+                    "ok": True,
+                    "searchActionReceipt": receipt,
+                    "searchTransitionProbe": transition_probe,
+                }
+
+        form_result: dict[str, Any] = {}
+        activation_error = ""
+        try:
+            form_result = _unwrap_js_result_with_error(
+                self.driver._exec_js(
+                    build_zhilian_search_form_submit_script(keyword)
+                ),
+                parse_error="zhilian_js_parse_failed",
+            )
+        except Exception as exc:  # A navigation may destroy the execution context.
+            activation_error = type(exc).__name__
+        form_activated = bool(form_result.get("formSubmitInvoked"))
+        post, changed, transition_probe = record_attempt(
+            "form_submit",
+            activated=form_activated,
+            activation_error=activation_error
+            or str(form_result.get("exceptionType") or ""),
+            form_submit_invoked=form_activated,
+        )
+        receipt.update(_search_action_change_summary(action_origin, post))
+        if changed:
+            receipt["transitionObserved"] = True
             return {
                 **data,
-                "ok": False,
-                "error": "zhilian_keyword_submit_not_found",
+                "ok": True,
+                "searchActionReceipt": receipt,
+                "searchTransitionProbe": transition_probe,
             }
-        click_at(input_point.get("x"), input_point.get("y"))
-        _dispatch_native_enter(send)
+
         dialog = _dismiss_javascript_dialog(self.driver)
         if dialog.get("dismissed"):
             return {
@@ -1021,13 +1291,89 @@ class ZhilianReadOnlyCollector:
                 "ok": False,
                 "error": "zhilian_keyword_rejected",
                 "dialog": dialog,
+                "searchActionReceipt": receipt,
             }
         return {
             **data,
-            "ok": True,
-            "nativeEnterSubmitted": True,
+            "ok": False,
+            "error": (
+                "zhilian_search_transition_not_observed"
+                if activated_any
+                else "zhilian_search_submit_control_not_activated"
+            ),
             "dialog": dialog,
+            "searchActionReceipt": receipt,
         }
+
+    def _verify_search_input_commit(
+        self,
+        keyword: str,
+        *,
+        city: str,
+        wait_seconds: int,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        timeout = min(
+            max(float(wait_seconds), 0.0),
+            float(ZHILIAN_SEARCH_INPUT_COMMIT_TIMEOUT_SECONDS),
+        )
+        deadline = time.monotonic() + timeout
+        expected = " ".join(keyword.split()).casefold()
+        script = build_zhilian_search_transition_script(keyword, city)
+        last_probe: dict[str, Any] = {}
+        while True:
+            try:
+                last_probe = _unwrap_js_result_with_error(
+                    self.driver._exec_js(script),
+                    parse_error="zhilian_js_parse_failed",
+                )
+            except Exception as exc:
+                last_probe = {"probeErrorType": type(exc).__name__}
+            state = _safe_search_action_state(last_probe)
+            observed = " ".join(str(state.get("query") or "").split()).casefold()
+            if expected and observed == expected:
+                return state, last_probe, True
+            if time.monotonic() >= deadline:
+                return state, last_probe, False
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
+
+    def _observe_search_action(
+        self,
+        keyword: str,
+        *,
+        city: str,
+        baseline: dict[str, Any],
+        wait_seconds: int,
+    ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+        timeout = min(
+            max(float(wait_seconds), 0.0),
+            float(ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS),
+        )
+        deadline = time.monotonic() + timeout
+        script = build_zhilian_search_transition_script(keyword, city)
+        last = dict(baseline)
+        while True:
+            try:
+                probe = _unwrap_js_result_with_error(
+                    self.driver._exec_js(script),
+                    parse_error="zhilian_js_parse_failed",
+                )
+            except Exception as exc:  # Retry after transient navigation contexts.
+                probe = {
+                    **last,
+                    "probeErrorType": type(exc).__name__,
+                }
+            last = _safe_search_action_state(probe)
+            if _search_action_transition_observed(
+                baseline,
+                last,
+                probe,
+                keyword,
+                city,
+            ):
+                return last, True, probe
+            if time.monotonic() >= deadline:
+                return last, False, probe
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
 
     def _select_page(self, page: int, wait_seconds: int = 8) -> dict[str, Any]:
         result = self.driver._exec_js(build_zhilian_pagination_script(page))
@@ -1427,6 +1773,185 @@ def _safe_selector_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_search_action_state(value: dict[str, Any]) -> dict[str, Any]:
+    signals = value.get("actionSignals")
+    signals = signals if isinstance(signals, dict) else {}
+    return {
+        "url": str(value.get("url") or value.get("urlBefore") or ""),
+        "title": str(value.get("title") or value.get("titleBefore") or ""),
+        "query": str(
+            value.get("observedKeyword") or value.get("observedValue") or ""
+        ),
+        "readyState": str(value.get("readyState") or ""),
+        "historyLength": _safe_int(value.get("historyLength")),
+        "documentTimeOriginMs": _safe_int(value.get("documentTimeOriginMs")),
+        "focusedElementType": str(value.get("focusedElementType") or ""),
+        "searchPageEvidence": [
+            str(item)
+            for item in (value.get("searchPageEvidence") or [])
+            if item
+        ],
+        "actionSignals": {
+            "buttonClicks": _safe_int(signals.get("buttonClicks")),
+            "inputEnterKeyups": _safe_int(signals.get("inputEnterKeyups")),
+            "formSubmits": _safe_int(signals.get("formSubmits")),
+        },
+    }
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _new_search_action_receipt(
+    prepared: dict[str, Any],
+    keyword: str,
+) -> dict[str, Any]:
+    return {
+        "receiptVersion": 1,
+        "inputCandidateType": str(prepared.get("inputCandidateType") or ""),
+        "buttonCandidateType": str(prepared.get("buttonCandidateType") or ""),
+        "formCandidateType": str(prepared.get("formCandidateType") or ""),
+        "finalReadableInputValue": str(prepared.get("observedValue") or keyword),
+        "focusedElementType": str(prepared.get("focusedElementType") or ""),
+        "attempts": [],
+    }
+
+
+def _search_action_change_summary(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any]:
+    url_changed = bool(before.get("url") and after.get("url") != before.get("url"))
+    title_changed = bool(
+        before.get("title") and after.get("title") != before.get("title")
+    )
+    history_changed = bool(
+        before.get("historyLength")
+        and after.get("historyLength") != before.get("historyLength")
+    )
+    navigation_changed = bool(
+        before.get("documentTimeOriginMs")
+        and after.get("documentTimeOriginMs")
+        and after.get("documentTimeOriginMs") != before.get("documentTimeOriginMs")
+    ) or bool(
+        before.get("readyState") == "complete"
+        and after.get("readyState")
+        and after.get("readyState") != "complete"
+    )
+    form_submitted = bool(
+        _safe_int((after.get("actionSignals") or {}).get("formSubmits"))
+    )
+    return {
+        "urlBefore": str(before.get("url") or ""),
+        "urlAfter": str(after.get("url") or ""),
+        "titleBefore": str(before.get("title") or ""),
+        "titleAfter": str(after.get("title") or ""),
+        "queryBefore": str(before.get("query") or ""),
+        "queryAfter": str(after.get("query") or ""),
+        "urlChanged": url_changed,
+        "titleChanged": title_changed,
+        "historyChanged": history_changed,
+        "navigationChanged": navigation_changed,
+        "formSubmitted": form_submitted,
+        "transitionObserved": bool(
+            url_changed or history_changed or navigation_changed
+        ),
+    }
+
+
+def _search_action_transition_observed(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    raw_probe: dict[str, Any],
+    keyword: str,
+    city: str,
+) -> bool:
+    if _search_transition_ready(raw_probe, keyword, city):
+        return True
+    summary = _search_action_change_summary(before, after)
+    if summary["urlChanged"] or summary["historyChanged"] or summary["navigationChanged"]:
+        return True
+    gained_evidence = set(after.get("searchPageEvidence") or []) - set(
+        before.get("searchPageEvidence") or []
+    )
+    return "search_route" in gained_evidence or "no_results" in gained_evidence
+
+
+def _safe_diagnostic_url(value: Any) -> str:
+    try:
+        parsed = urlparse(str(value or ""))
+    except (TypeError, ValueError):
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    query_names = []
+    for part in parsed.query.split("&"):
+        name = part.split("=", 1)[0].strip()
+        if name and name not in query_names:
+            query_names.append(name)
+    suffix = ""
+    if query_names:
+        suffix = "?" + "&".join(f"{name}=<redacted>" for name in query_names)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}{suffix}"
+
+
+def _safe_search_action_receipt(value: Any) -> dict[str, Any]:
+    receipt = value if isinstance(value, dict) else {}
+    attempts = []
+    for raw in receipt.get("attempts") or []:
+        if not isinstance(raw, dict):
+            continue
+        attempt = {
+            "method": str(raw.get("method") or ""),
+            "control_activated": bool(raw.get("controlActivated")),
+            "transition_observed": bool(raw.get("transitionObserved")),
+            "url_before": _safe_diagnostic_url(raw.get("urlBefore")),
+            "url_after": _safe_diagnostic_url(raw.get("urlAfter")),
+            "title_before": str(raw.get("titleBefore") or "")[:180],
+            "title_after": str(raw.get("titleAfter") or "")[:180],
+            "query_before": str(raw.get("queryBefore") or "")[:120],
+            "query_after": str(raw.get("queryAfter") or "")[:120],
+            "url_changed": bool(raw.get("urlChanged")),
+            "title_changed": bool(raw.get("titleChanged")),
+            "history_changed": bool(raw.get("historyChanged")),
+            "navigation_changed": bool(raw.get("navigationChanged")),
+            "form_submitted": bool(raw.get("formSubmitted")),
+        }
+        if raw.get("activationError"):
+            attempt["activation_error"] = str(raw["activationError"])[:80]
+        attempts.append(attempt)
+    return {
+        "receipt_version": _safe_int(receipt.get("receiptVersion")),
+        "input_candidate_type": str(receipt.get("inputCandidateType") or "")[:80],
+        "button_candidate_type": str(receipt.get("buttonCandidateType") or "")[:80],
+        "form_candidate_type": str(receipt.get("formCandidateType") or "")[:80],
+        "final_readable_input_value": str(
+            receipt.get("finalReadableInputValue") or ""
+        )[:120],
+        "focused_element_type": str(receipt.get("focusedElementType") or "")[:80],
+        "attempts": attempts,
+        "url_before": _safe_diagnostic_url(receipt.get("urlBefore")),
+        "url_after": _safe_diagnostic_url(receipt.get("urlAfter")),
+        "title_before": str(receipt.get("titleBefore") or "")[:180],
+        "title_after": str(receipt.get("titleAfter") or "")[:180],
+        "query_before": str(receipt.get("queryBefore") or "")[:120],
+        "query_after": str(receipt.get("queryAfter") or "")[:120],
+        "url_changed": bool(receipt.get("urlChanged")),
+        "title_changed": bool(receipt.get("titleChanged")),
+        "history_changed": bool(receipt.get("historyChanged")),
+        "navigation_changed": bool(receipt.get("navigationChanged")),
+        "form_submitted": bool(
+            receipt.get("formSubmitted")
+            or any(item.get("form_submitted") for item in attempts)
+        ),
+        "transition_observed": bool(receipt.get("transitionObserved")),
+    }
+
+
 def _safe_city_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
     current = snapshot if isinstance(snapshot, dict) else {}
     pages = current.get("pages")
@@ -1478,6 +2003,13 @@ def _safe_city_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
             diagnostics["candidate_city_code"] = city_filter["candidateCode"]
         if city_filter.get("source"):
             diagnostics["city_selector_source"] = city_filter["source"]
+    action_receipt = (
+        transition.get("searchActionReceipt")
+        or keyword.get("searchActionReceipt")
+        or failure.get("searchActionReceipt")
+    )
+    if isinstance(action_receipt, dict):
+        diagnostics["action_receipt"] = _safe_search_action_receipt(action_receipt)
     return diagnostics
 
 

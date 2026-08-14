@@ -13,6 +13,7 @@ from jobagent.platforms.zhilian.collect import (
     ZhilianReadOnlyCollector,
     _city_bootstrap_destination_verified,
     _query_page_exhausted,
+    _safe_search_action_receipt,
     _safe_zhilian_city_navigation_url,
 )
 from jobagent.platforms.zhilian.selectors import (
@@ -458,6 +459,132 @@ class _SlugCityHomepageRequiresNativeSearchDriver:
         }
 
 
+class _NoTransitionCDP:
+    def __init__(self, driver):
+        self.driver = driver
+
+    def send(self, method: str, params: dict | None = None):
+        params = params or {}
+        if (
+            method == "Input.dispatchKeyEvent"
+            and params.get("type") == "keyUp"
+            and params.get("key") == "Enter"
+        ):
+            self.driver.native_enter_attempts += 1
+        return {}
+
+
+class _SlugCityHomepageNoTransitionDriver(
+    _SlugCityHomepageRequiresNativeSearchDriver
+):
+    """Model a real city page that accepts input but swallows every submit path."""
+
+    def __init__(self):
+        super().__init__()
+        self.cdp = _NoTransitionCDP(self)
+        self.native_enter_attempts = 0
+        self.form_submit_attempts = 0
+
+    def _exec_js(self, script: str):
+        if "zhilian_search_form_submit" in script:
+            self.form_submit_attempts += 1
+            return {
+                "ok": True,
+                "mode": "zhilian_search_form_submit",
+                "formSubmitInvoked": True,
+                "url": "https://www.zhaopin.com/city-alpha/",
+                "title": "目标城招聘网_目标城人才网_2026年最新招聘信息-智联招聘",
+                "observedKeyword": self.current_query,
+            }
+        result = super()._exec_js(script)
+        if "zhilian_keyword_search" in script and result.get("ok"):
+            result.update(
+                {
+                    "urlBefore": (
+                        "https://www.zhaopin.com/city-alpha/"
+                        if self.page == "city_homepage"
+                        else "https://www.zhaopin.com/"
+                    ),
+                    "titleBefore": "目标城招聘网_目标城人才网_2026年最新招聘信息-智联招聘",
+                    "historyLength": 4,
+                    "documentTimeOriginMs": 1000,
+                    "inputCandidateType": "input:search",
+                    "buttonCandidateType": "button:search",
+                    "formCandidateType": "form",
+                    "focusedElementType": "input:search",
+                }
+            )
+        if "zhilian_search_transition" in script:
+            result.update(
+                {
+                    "historyLength": 4,
+                    "documentTimeOriginMs": 1000,
+                    "focusedElementType": "input:search",
+                    "actionSignals": {
+                        "buttonClicks": 1,
+                        "inputEnterKeyups": self.native_enter_attempts,
+                        "formSubmits": self.form_submit_attempts,
+                    },
+                }
+            )
+        return result
+
+
+class _SlugCityHomepageInputResetDriver(_SlugCityHomepageNoTransitionDriver):
+    def __init__(self):
+        super().__init__()
+        self.city_input_prepared = False
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" in script and self.page == "city_homepage":
+            self.city_input_prepared = True
+        result = super()._exec_js(script)
+        if (
+            "zhilian_search_transition" in script
+            and self.page == "city_homepage"
+            and self.city_input_prepared
+        ):
+            result["observedKeyword"] = ""
+        return result
+
+
+class _SlugCityHomepageNoSubmitControlDriver(_SlugCityHomepageNoTransitionDriver):
+    def _exec_js(self, script: str):
+        if "zhilian_search_form_submit" in script:
+            return {
+                "ok": False,
+                "mode": "zhilian_search_form_submit",
+                "error": "zhilian_search_submit_control_not_activated",
+                "formSubmitInvoked": False,
+            }
+        result = super()._exec_js(script)
+        if "zhilian_keyword_search" in script and self.page == "city_homepage":
+            result["clickPoint"] = None
+            result["inputClickPoint"] = None
+            result["buttonCandidateType"] = ""
+            result["formCandidateType"] = ""
+        return result
+
+
+class _SlugCityHomepageFormSubmitDriver(_SlugCityHomepageNoTransitionDriver):
+    def _exec_js(self, script: str):
+        if "zhilian_search_form_submit" in script:
+            self.form_submit_attempts += 1
+            self.page = "search_results"
+            return {
+                "ok": True,
+                "mode": "zhilian_search_form_submit",
+                "formSubmitInvoked": True,
+                "observedKeyword": self.current_query,
+            }
+        result = super()._exec_js(script)
+        if "zhilian_keyword_search" in script and self.page == "city_homepage":
+            result["clickPoint"] = None
+            result["inputClickPoint"] = None
+            result["buttonCandidateType"] = ""
+        return result
+
+
 class _SlugCityResultConflictDriver(_SlugCityHomepageRequiresNativeSearchDriver):
     def _exec_js(self, script: str):
         result = super()._exec_js(script)
@@ -697,6 +824,184 @@ def test_scheduler_submits_both_queries_from_verified_city_slug_without_numeric_
     assert not (tmp_path / "metadata" / "zhilian_city_codes.json").exists()
 
 
+def test_verified_city_slug_reports_bounded_search_action_receipt_when_dom_swallows_submit(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _SlugCityHomepageNoTransitionDriver()
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.city_resolver.APP_DIR",
+        tmp_path,
+    )
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+        raising=False,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is False
+    assert result.error == "zhilian_search_transition_not_observed"
+    payload = result.to_payload()
+    assert payload["retryable"] is False
+    assert payload["no_charge"] is True
+    receipt = payload["diagnostics"]["action_receipt"]
+    assert receipt["receipt_version"] == 1
+    assert receipt["input_candidate_type"] == "input:search"
+    assert receipt["button_candidate_type"] == "button:search"
+    assert receipt["form_candidate_type"] == "form"
+    assert receipt["final_readable_input_value"] == "第一查询"
+    assert receipt["focused_element_type"] == "input:search"
+    assert [attempt["method"] for attempt in receipt["attempts"]] == [
+        "controlled_input",
+        "button_click",
+        "input_enter",
+        "form_submit",
+    ]
+    assert all(attempt["transition_observed"] is False for attempt in receipt["attempts"])
+    assert receipt["url_changed"] is False
+    assert receipt["title_changed"] is False
+    assert receipt["history_changed"] is False
+    assert receipt["navigation_changed"] is False
+    assert receipt["form_submitted"] is True
+    assert driver.native_enter_attempts == 1
+    assert driver.form_submit_attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("driver_type", "expected_error"),
+    [
+        (
+            _SlugCityHomepageInputResetDriver,
+            "zhilian_search_input_not_committed",
+        ),
+        (
+            _SlugCityHomepageNoSubmitControlDriver,
+            "zhilian_search_submit_control_not_activated",
+        ),
+    ],
+)
+def test_verified_city_slug_returns_exact_terminal_search_action_failure(
+    monkeypatch,
+    tmp_path,
+    driver_type,
+    expected_error,
+):
+    driver = driver_type()
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_INPUT_COMMIT_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is False
+    assert result.error == expected_error
+    payload = result.to_payload()
+    assert payload["retryable"] is False
+    assert payload["next_suggested"] == "jobagent browser diagnose --platform zhilian"
+    assert payload["diagnostics"]["action_receipt"]["transition_observed"] is False
+
+
+def test_verified_city_slug_can_fall_back_to_one_bounded_form_submit(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _SlugCityHomepageFormSubmitDriver()
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is True
+    assert [job.raw_data["positionId"] for job in result.jobs] == ["JOB-FIRST"]
+    assert driver.native_enter_attempts == 0
+    assert driver.form_submit_attempts == 1
+
+
+def test_search_action_receipt_redacts_unknown_page_and_account_fields():
+    safe = _safe_search_action_receipt(
+        {
+            "receiptVersion": 1,
+            "inputCandidateType": "input:search",
+            "finalReadableInputValue": "产品经理",
+            "urlBefore": "https://www.zhaopin.com/shenzhen/?token=secret",
+            "urlAfter": "https://www.zhaopin.com/jobs?kw=opaque&account=private",
+            "cookie": "session=secret",
+            "bodySnippet": "private account page",
+            "accountName": "private-user",
+            "attempts": [
+                {
+                    "method": "button_click",
+                    "controlActivated": True,
+                    "transitionObserved": True,
+                    "urlBefore": "https://www.zhaopin.com/shenzhen/?token=secret",
+                    "urlAfter": "https://www.zhaopin.com/jobs?kw=opaque",
+                    "bodySnippet": "private account page",
+                }
+            ],
+        }
+    )
+
+    encoded = json.dumps(safe, ensure_ascii=False)
+    assert "secret" not in encoded
+    assert "private-user" not in encoded
+    assert "private account page" not in encoded
+    assert safe["url_before"].endswith("?token=<redacted>")
+    assert safe["url_after"].endswith("?kw=<redacted>&account=<redacted>")
+
+
 def test_verified_city_slug_does_not_override_result_city_conflict(monkeypatch, tmp_path):
     driver = _SlugCityResultConflictDriver()
     monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
@@ -833,7 +1138,7 @@ def test_snapshot_script_emits_real_no_result_and_pagination_evidence():
     assert "allowUnknownSession = true" in city_script
     assert "readable_city_anchor:" in city_script
     assert "navigate_city_homepage" in city_script
-    assert ZHILIAN_SELECTOR_VERSION == "2026-08-14.5"
+    assert ZHILIAN_SELECTOR_VERSION == "2026-08-14.6"
 
 
 @pytest.mark.parametrize(
