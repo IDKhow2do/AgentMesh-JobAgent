@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.24] - 2026-08-15
+
+### Fixed
+
+- Wait for slow Zhilian detail pages to finish loading, and do not treat a generic navigation login entry as a logged-out session.
+- Recover job title and company from trusted official detail-page sources, and normalize explicit negotiable or undisclosed salary labels without inventing compensation.
+- Keep one irreparable candidate from blocking an already paid batch: safely exclude only that signed candidate, preserve repaired candidates, and regenerate the remaining preview with zero additional credits.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, round, session, Discover ID, signed candidate identity and audits remain in place. Resume with `jobagent zhilian apply review`; do not start another round or Discover. The repaired decision still stops at the final delivery confirmation gate.
+
 ## [0.5.23] - 2026-08-15
 
 ### Fixed

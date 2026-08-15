@@ -18,6 +18,7 @@ from .constants import ZHILIAN_LOGIN_USER_PROMPT
 from .detail import (
     build_zhilian_detail_snapshot_script,
     merge_zhilian_detail_into_job,
+    parse_zhilian_detail_snapshot,
     unwrap_zhilian_detail_js_result,
 )
 from .parser import is_reviewable_zhilian_job, parse_zhilian_job, zhilian_job_id
@@ -40,6 +41,7 @@ ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS = 75
 ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS = 75
 ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS = 8
 ZHILIAN_SEARCH_INPUT_COMMIT_TIMEOUT_SECONDS = 2
+ZHILIAN_DETAIL_SETTLE_TIMEOUT_SECONDS = 75
 ZHILIAN_PAGE_POLL_INTERVAL_SECONDS = 0.5
 ZHILIAN_CANDIDATE_SUCCESS_TERMINATIONS = frozenset(
     {
@@ -1711,11 +1713,11 @@ class ZhilianReadOnlyCollector:
                     ok=False,
                 )
                 continue
-            snapshot = self._extract_detail_snapshot()
+            snapshot = self._await_detail_snapshot(wait_seconds=wait_seconds)
             snapshot["jobIndex"] = index
             snapshot["requestedUrl"] = job.url
             snapshots.append(snapshot)
-            failure = _snapshot_failure(snapshot)
+            failure = _detail_snapshot_failure(snapshot)
             if failure:
                 self._emit_progress(
                     "collection_job_detail_completed",
@@ -1744,6 +1746,26 @@ class ZhilianReadOnlyCollector:
     def _extract_detail_snapshot(self) -> dict[str, Any]:
         js = build_zhilian_detail_snapshot_script()
         return unwrap_zhilian_detail_js_result(self.driver._exec_js(js))
+
+    def _await_detail_snapshot(self, *, wait_seconds: int) -> dict[str, Any]:
+        timeout = max(
+            float(wait_seconds),
+            float(ZHILIAN_DETAIL_SETTLE_TIMEOUT_SECONDS),
+        )
+        deadline = time.monotonic() + timeout
+        last: dict[str, Any] = {}
+        while True:
+            last = self._extract_detail_snapshot()
+            if _detail_snapshot_settled(last):
+                return last
+            if time.monotonic() >= deadline:
+                return {
+                    **last,
+                    "ok": False,
+                    "error": "zhilian_detail_page_state_unknown",
+                    "settleTimeoutSeconds": timeout,
+                }
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
 
 
 def write_zhilian_snapshot(path: str | Path, payload: dict[str, Any]) -> None:
@@ -1864,6 +1886,62 @@ def _snapshot_failure(
     if snapshot.get("ok") is False:
         return str(snapshot.get("error") or "zhilian_snapshot_failed")
     return ""
+
+
+def _is_official_zhilian_detail_url(value: Any) -> bool:
+    parsed = urlparse(str(value or ""))
+    host = str(parsed.hostname or "").casefold()
+    return bool(
+        parsed.scheme == "https"
+        and (host == "zhaopin.com" or host.endswith(".zhaopin.com"))
+        and parsed.path.startswith("/jobdetail/")
+    )
+
+
+def _detail_snapshot_settled(snapshot: dict[str, Any]) -> bool:
+    if _detail_snapshot_requires_login(snapshot) or snapshot.get("platformError"):
+        return True
+    if not _is_official_zhilian_detail_url(snapshot.get("url")):
+        return False
+    ready_state = str(snapshot.get("readyState") or "")
+    fields = parse_zhilian_detail_snapshot(snapshot)
+    has_identity = bool(fields.get("name") and fields.get("company"))
+    if ready_state:
+        return ready_state == "complete" and has_identity
+    return snapshot.get("ok") is not False and has_identity
+
+
+def _detail_snapshot_failure(snapshot: dict[str, Any]) -> str:
+    if snapshot.get("platformError"):
+        return str(snapshot["platformError"])
+    if _detail_snapshot_requires_login(snapshot):
+        return "zhilian_login_required"
+    if _detail_snapshot_settled(snapshot):
+        return ""
+    if snapshot.get("ok") is False:
+        return str(snapshot.get("error") or "zhilian_detail_snapshot_failed")
+    return "zhilian_detail_page_state_unknown"
+
+
+def _detail_snapshot_requires_login(snapshot: dict[str, Any]) -> bool:
+    if not snapshot.get("loginRequired"):
+        return False
+    raw_evidence = snapshot.get("loginEvidence")
+    evidence = {
+        str(value or "").strip().casefold()
+        for value in (
+            raw_evidence
+            if isinstance(raw_evidence, (list, tuple, set))
+            else [raw_evidence]
+        )
+        if str(value or "").strip()
+    }
+    weak_navigation_evidence = {
+        "generic_navigation_login",
+        "header_login_link",
+        "visible_login_control",
+    }
+    return not evidence or not evidence.issubset(weak_navigation_evidence)
 
 
 def _unwrap_js_result(result: Any) -> dict[str, Any]:

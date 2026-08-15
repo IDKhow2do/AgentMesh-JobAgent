@@ -43,6 +43,23 @@ _SALARY_PATTERN = re.compile(
     r"(?:万|千|[kK]|元)|面议)"
 )
 
+_NEGOTIABLE_SALARY_MARKERS = (
+    "薪资面议",
+    "薪酬面议",
+    "待遇面议",
+    "工资面议",
+    "面议",
+)
+
+_UNDISCLOSED_SALARY_MARKERS = (
+    "薪资不公开",
+    "薪酬不公开",
+    "工资不公开",
+    "薪资保密",
+    "薪酬保密",
+    "工资保密",
+)
+
 
 def clean_review_field(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
@@ -59,8 +76,20 @@ def is_reviewable_company(value: Any) -> bool:
 
 
 def is_reviewable_salary(value: Any) -> bool:
+    return bool(normalize_reviewable_salary(value))
+
+
+def normalize_reviewable_salary(value: Any) -> str:
+    """Return a stable user-reviewable salary without inventing compensation."""
+
     salary = clean_review_field(value)
-    return bool(salary and _SALARY_PATTERN.search(salary))
+    if not salary:
+        return ""
+    if any(marker in salary for marker in _UNDISCLOSED_SALARY_MARKERS):
+        return "薪资不公开"
+    if any(marker in salary for marker in _NEGOTIABLE_SALARY_MARKERS):
+        return "薪资面议"
+    return salary if _SALARY_PATTERN.search(salary) else ""
 
 
 def delivery_reviewability_issues(item: dict[str, Any]) -> list[str]:

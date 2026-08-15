@@ -1,3 +1,7 @@
+import pytest
+
+from jobagent.domain.reviewability import is_reviewable_salary
+from jobagent.platforms.zhilian.collect import _detail_snapshot_failure
 from jobagent.platforms.zhilian.detail import merge_zhilian_detail_into_job
 from jobagent.platforms.zhilian.parser import (
     is_reviewable_zhilian_job,
@@ -62,3 +66,41 @@ def test_zhilian_snapshot_contract_prefers_stable_review_fields():
     assert "stable_company_node" in script
     assert "looksLikeCompanyMeta" in script
     assert "深圳示例科技有限公司" in script
+
+
+def test_explicit_negotiable_or_undisclosed_salary_is_reviewable():
+    assert is_reviewable_salary("薪资面议") is True
+    assert is_reviewable_salary("薪资不公开") is True
+    assert is_reviewable_salary("薪酬保密") is True
+    assert is_reviewable_salary("待遇优厚") is False
+
+
+def test_zhilian_detail_nav_login_entry_is_not_a_forced_login_wall():
+    snapshot = {
+        "ok": True,
+        "url": "https://www.zhaopin.com/jobdetail/ZL-NAV-LOGIN.htm",
+        "readyState": "complete",
+        "loginRequired": True,
+        "loginEvidence": "header_login_link",
+        "jobTitle": "基础设施运维管理专家",
+        "companyName": "深圳示例云技术服务有限公司",
+        "salary": "薪资不公开",
+    }
+
+    assert _detail_snapshot_failure(snapshot) == ""
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    ["login_url", "credential_form", "security_challenge"],
+)
+def test_zhilian_detail_strong_login_evidence_still_fails_closed(evidence):
+    snapshot = {
+        "ok": True,
+        "url": "https://www.zhaopin.com/jobdetail/ZL-LOGIN.htm",
+        "readyState": "complete",
+        "loginRequired": True,
+        "loginEvidence": evidence,
+    }
+
+    assert _detail_snapshot_failure(snapshot) == "zhilian_login_required"
