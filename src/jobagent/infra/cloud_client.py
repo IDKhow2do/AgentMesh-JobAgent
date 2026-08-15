@@ -423,6 +423,7 @@ def discovery_repair(
     expected_manifest_id: str,
     expected_candidate_digest: str,
     patches: list[dict[str, Any]],
+    safe_exclusions: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return _request(
         "POST",
@@ -432,8 +433,9 @@ def discovery_repair(
             "protocol_version": PROTOCOL_VERSION,
             "expected_manifest_id": expected_manifest_id,
             "expected_candidate_digest": expected_candidate_digest,
-            "reason": "zhilian_reviewability_v1",
+            "reason": "zhilian_reviewability_v2",
             "patches": patches,
+            "safe_exclusions": safe_exclusions,
         },
         timeout=600,
         max_attempts=3,

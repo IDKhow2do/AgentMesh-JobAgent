@@ -265,6 +265,7 @@ class _AuthenticatedCityHomepageBootstrapDriver:
                     "positionId": "JOB-DATA-1",
                     "jobTitle": "数据产品经理",
                     "companyName": "深圳示例科技",
+                    "salary": "20-30K",
                     "cityName": "深圳",
                     "jobUrl": "https://www.zhaopin.com/jobdetail/JOB-DATA-1.htm",
                 }
@@ -312,6 +313,7 @@ class _CrossCityFallbackAfterValidQueryDriver(_AuthenticatedCityHomepageBootstra
                         "positionId": "JOB-LOCAL-1",
                         "jobTitle": "产品经理",
                         "companyName": "深圳示例科技",
+                        "salary": "20-30K",
                         "cityName": "深圳",
                         "jobUrl": "https://www.zhaopin.com/jobdetail/JOB-LOCAL-1.htm",
                     }

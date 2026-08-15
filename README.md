@@ -193,12 +193,13 @@ jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --au
 jobagent zhilian audit
 ```
 
-If an older preserved Zhilian decision contains a generic link label or is missing
-company or salary, `jobagent zhilian apply review` repairs only those fields from
-the signed job detail URLs. The cloud returns a replacement signature for the same
-Discover with zero additional credits, then the CLI shows a new complete preview
-and still waits for the user's delivery confirmation. Do not create a replacement
-round or Discover.
+If a preserved Zhilian decision contains a generic link label or is missing company
+or salary, `jobagent zhilian apply review` repairs trusted fields from the signed job
+detail URLs. If one detail page still cannot expose reviewable core fields, that
+single candidate is safely excluded instead of blocking the repaired candidates.
+The cloud returns a replacement signature for the same Discover with zero additional
+credits, then the CLI shows the remaining complete preview and still waits for the
+user's delivery confirmation. Do not create a replacement round or Discover.
 
 智联结果页中的 `kw...` URL 片段是平台内部状态，不是云端生成的职位搜索词。Agent 必须以 CLI 返回的可读 `query`、错误码和 `next_suggested` 为准，不得把该片段重新用于搜索，也不得据此自行跳过智联。
 

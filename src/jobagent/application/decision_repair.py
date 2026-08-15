@@ -156,48 +156,29 @@ def repair_zhilian_decision_if_needed(
         )
 
     repaired_jobs = list(detail_result.get("jobs") or [])
-    patches = [_patch(item, job) for item, job in zip(targets, repaired_jobs, strict=True)]
-    unresolved = [
-        {
-            "job_id": str(item.get("id") or ""),
-            "missing_or_invalid_fields": delivery_reviewability_issues(
-                {
-                    "title": job.name,
-                    "company": job.company,
-                    "salary": job.salary,
-                }
-            ),
-        }
-        for item, job in zip(targets, repaired_jobs, strict=True)
-        if delivery_reviewability_issues(
+    patches: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for item, job in zip(targets, repaired_jobs, strict=True):
+        patch = _patch(item, job)
+        if len(patch) > 2:
+            patches.append(patch)
+        issues = delivery_reviewability_issues(
             {"title": job.name, "company": job.company, "salary": job.salary}
         )
-    ]
-    if unresolved:
-        raise DecisionRepairError(
-            {
-                "ok": False,
-                "error": "decision_repair_incomplete",
-                "message": (
-                    "Zhilian detail pages did not expose enough reliable fields to rebuild a "
-                    "reviewable delivery list. No delivery was authorized."
-                ),
-                "platform": "zhilian",
-                "discover_id": discover_id,
-                "candidates": unresolved,
-                "request_preserved": True,
-                "no_charge": True,
-                "billing": {"additional_credits": 0},
-                "requires_user_action": False,
-                "next_suggested": "jobagent browser diagnose --platform zhilian",
-            }
-        )
-
+        if issues:
+            unresolved.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "url": str(item.get("url") or ""),
+                    "missing_or_invalid_fields": issues,
+                }
+            )
     response = cloud_client.discovery_repair(
         discover_id=discover_id,
         expected_manifest_id=str(manifest["manifest_id"]),
         expected_candidate_digest=str(manifest["candidate_digest"]),
         patches=patches,
+        safe_exclusions=unresolved,
     )
     repaired_manifest = response.get("manifest")
     repaired_candidates = response.get("candidates")
@@ -243,6 +224,7 @@ def repair_zhilian_decision_if_needed(
         selected=len(verified.get("selected", [])),
         review=len(verified.get("review", [])),
         rejected=len(verified.get("rejected", [])),
+        safely_excluded=int(repair.get("excluded_count") or 0),
         additional_credits=0,
     )
     return {
