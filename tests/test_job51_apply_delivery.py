@@ -3,9 +3,9 @@ from __future__ import annotations
 from jobagent.platforms.job51.apply import (
     Job51ApplySender,
     _job51_apply_inspect_script,
-    _job51_history_inspect_script,
 )
 from jobagent.platforms.job51.audit import Job51AuditLog
+from jobagent.platforms.job51.audit import Job51AuditEvent
 from jobagent.domain.models import SendAttempt
 
 
@@ -98,7 +98,7 @@ def test_job51_unavailable_job_is_audited_as_skip_and_does_not_stop_batch(monkey
     assert [event["status"] for event in audit_log.list_recent(10)] == ["skipped", "delivered"]
 
 
-class HistoryVerificationDriver:
+class CurrentSurfaceVerificationDriver:
     def __init__(self):
         self.opened: list[str] = []
         self.inspect_calls = 0
@@ -108,20 +108,13 @@ class HistoryVerificationDriver:
         return {"ok": True, "url": url, "wait_seconds": wait_seconds}
 
     def _exec_js(self, script: str):
-        if "document.querySelectorAll('.apox .e, .exmsg .e')" in script:
-            return {
-                "ok": True,
-                "historyReady": True,
-                "loginRequired": False,
-                "delivered": True,
-                "matchedJobId": "172706410",
-            }
         if "const candidates" in script:
             return {"ok": True, "clicked": "投递", "jobId": "172706410"}
         self.inspect_calls += 1
         if self.inspect_calls == 1:
             return {
                 "ok": True,
+                "href": "https://we.51job.com/pc/search",
                 "pageReady": True,
                 "cardFound": True,
                 "applyAvailable": True,
@@ -130,6 +123,7 @@ class HistoryVerificationDriver:
             }
         return {
             "ok": True,
+            "href": "https://we.51job.com/pc/search",
             "pageReady": True,
             "cardFound": True,
             "applyAvailable": False,
@@ -138,9 +132,9 @@ class HistoryVerificationDriver:
         }
 
 
-def test_job51_ambiguous_button_removal_is_verified_in_application_history(monkeypatch, tmp_path):
+def test_job51_stable_button_removal_is_verified_on_current_surface(monkeypatch, tmp_path):
     monkeypatch.setattr("jobagent.platforms.job51.apply.time.sleep", lambda _: None)
-    driver = HistoryVerificationDriver()
+    driver = CurrentSurfaceVerificationDriver()
 
     attempts = Job51ApplySender(
         driver=driver,
@@ -155,19 +149,229 @@ def test_job51_ambiguous_button_removal_is_verified_in_application_history(monke
     )
 
     assert attempts[0].delivered is True
-    assert driver.opened[-1] == "https://i.51job.com/userset/my_apply.php"
-    assert any(step["step"] == "verify_51job_application_history" for step in attempts[0].steps)
-
-
-def test_job51_history_verification_is_scoped_to_job_id_or_exact_row_identity():
-    script = _job51_history_inspect_script(
-        "172706410",
-        "高级数据平台工程师（151563）",
-        "任仕达企业管理（上海）有限公司",
+    assert driver.opened == ["https://we.51job.com/pc/search?keyword=data&jobArea=010000"]
+    assert any(
+        step.get("step") == "observe_51job_apply_transition"
+        and step.get("ok") is True
+        and step.get("observed_transition_stable") is True
+        for step in attempts[0].steps
     )
 
-    assert "a.zhn" in script
-    assert "a.gs" in script
-    assert "idMatches || textMatches" in script
-    assert "document.body" in script
-    assert "delivered: Boolean(row)" in script
+
+def _append_legacy_indeterminate(log: Job51AuditLog, job_id: str) -> None:
+    log.append(
+        Job51AuditEvent(
+            action="apply_send",
+            status="failed",
+            error="delivery_not_verified",
+            evidence={
+                "job_id": job_id,
+                "steps": [
+                    {"step": "click_51job_apply", "ok": True, "jobId": job_id},
+                    {
+                        "step": "inspect_after_apply",
+                        "ok": True,
+                        "href": "https://we.51job.com/pc/search",
+                        "cardFound": True,
+                        "applyAvailable": False,
+                        "delivered": False,
+                    },
+                    {
+                        "step": "verify_51job_application_history",
+                        "ok": True,
+                        "href": "https://login.51job.com/login.php",
+                        "loginRequired": True,
+                        "delivered": False,
+                    },
+                ],
+            },
+        )
+    )
+
+
+def test_job51_legacy_clicked_failure_survives_later_unavailable_audit(tmp_path):
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    _append_legacy_indeterminate(log, "job-pending")
+    log.append(
+        Job51AuditEvent(
+            action="apply_send",
+            status="skipped",
+            error="job_unavailable",
+            evidence={
+                "job_id": "job-pending",
+                "steps": [
+                    {
+                        "step": "click_51job_apply",
+                        "ok": False,
+                        "error": "job51_card_not_found",
+                        "jobId": "job-pending",
+                    }
+                ],
+            },
+        )
+    )
+
+    pending = log.indeterminate_apply_send_evidence()
+
+    assert set(pending) == {"job-pending"}
+    assert pending["job-pending"]["click_observed"] is True
+    assert pending["job-pending"]["transition_observed"] is True
+
+
+class CurrentSurfaceReconciliationDriver:
+    def __init__(self, pending_card_found: bool):
+        self.pending_card_found = pending_card_found
+        self.opened: list[str] = []
+        self.clicked_job_ids: list[str] = []
+        self.next_inspect_count = 0
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 0):
+        self.opened.append(url)
+        return {"ok": True, "url": url, "wait_seconds": wait_seconds}
+
+    def _exec_js(self, script: str):
+        if "const candidates" in script:
+            job_id = "job-next" if "job-next" in script else "job-pending"
+            self.clicked_job_ids.append(job_id)
+            return {"ok": True, "clicked": "投递", "jobId": job_id}
+        if "job-pending" in script:
+            return {
+                "ok": True,
+                "href": "https://we.51job.com/pc/search",
+                "pageReady": True,
+                "cardFound": self.pending_card_found,
+                "applyAvailable": False,
+                "delivered": False,
+                "loginRequired": False,
+            }
+        self.next_inspect_count += 1
+        if self.next_inspect_count == 1:
+            return {
+                "ok": True,
+                "href": "https://we.51job.com/pc/search",
+                "pageReady": True,
+                "cardFound": True,
+                "applyAvailable": True,
+                "delivered": False,
+                "loginRequired": False,
+            }
+        return {
+            "ok": True,
+            "href": "https://we.51job.com/pc/search",
+            "pageReady": True,
+            "cardFound": True,
+            "applyAvailable": False,
+            "delivered": True,
+            "loginRequired": False,
+            "noticeText": "投递成功",
+        }
+
+
+def test_job51_pending_delivery_is_not_reclicked_and_does_not_stop_batch(monkeypatch, tmp_path):
+    monkeypatch.setattr("jobagent.platforms.job51.apply.time.sleep", lambda _: None)
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    _append_legacy_indeterminate(log, "job-pending")
+    driver = CurrentSurfaceReconciliationDriver(pending_card_found=False)
+    sender = Job51ApplySender(driver=driver, audit_log=log)
+
+    attempts = sender.send_batch(
+        [
+            {
+                "job_id": "job-pending",
+                "name": "Example pending role",
+                "company": "Example A",
+                "url": "https://we.51job.com/pc/search#jobId=job-pending",
+            },
+            {
+                "job_id": "job-next",
+                "name": "Example next role",
+                "company": "Example B",
+                "url": "https://we.51job.com/pc/search#jobId=job-next",
+            },
+        ],
+        limit=2,
+        wait_seconds=1,
+        stop_on_failure=True,
+    )
+
+    assert attempts[0].delivered is False
+    assert attempts[0].error == "delivery_indeterminate"
+    assert attempts[1].delivered is True
+    assert driver.clicked_job_ids == ["job-next"]
+    assert [record["status"] for record in log.list_recent(2)] == [
+        "indeterminate",
+        "delivered",
+    ]
+
+
+def test_job51_pending_stable_card_transition_confirms_without_reclick(monkeypatch, tmp_path):
+    monkeypatch.setattr("jobagent.platforms.job51.apply.time.sleep", lambda _: None)
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    _append_legacy_indeterminate(log, "job-pending")
+    driver = CurrentSurfaceReconciliationDriver(pending_card_found=True)
+
+    attempt = Job51ApplySender(driver=driver, audit_log=log).send_batch(
+        [
+            {
+                "job_id": "job-pending",
+                "name": "Example pending role",
+                "company": "Example A",
+                "url": "https://we.51job.com/pc/search#jobId=job-pending",
+            }
+        ],
+        wait_seconds=1,
+    )[0]
+
+    assert attempt.delivered is True
+    assert driver.clicked_job_ids == []
+    assert any(
+        step.get("evidence_source") == "persisted_click_plus_stable_card_transition"
+        for step in attempt.steps
+    )
+
+
+class AmbiguousClickDriver:
+    def __init__(self):
+        self.opened: list[str] = []
+        self.inspect_count = 0
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 0):
+        self.opened.append(url)
+        return {"ok": True, "url": url, "wait_seconds": wait_seconds}
+
+    def _exec_js(self, script: str):
+        if "const candidates" in script:
+            return {"ok": True, "clicked": "投递", "jobId": "job-new"}
+        self.inspect_count += 1
+        return {
+            "ok": True,
+            "href": "https://we.51job.com/pc/search",
+            "pageReady": True,
+            "cardFound": self.inspect_count == 1,
+            "applyAvailable": self.inspect_count == 1,
+            "delivered": False,
+            "loginRequired": False,
+        }
+
+
+def test_job51_new_ambiguous_click_is_persisted_without_opening_legacy_history(monkeypatch, tmp_path):
+    monkeypatch.setattr("jobagent.platforms.job51.apply.time.sleep", lambda _: None)
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    driver = AmbiguousClickDriver()
+
+    attempt = Job51ApplySender(driver=driver, audit_log=log).send_batch(
+        [
+            {
+                "job_id": "job-new",
+                "name": "Example role",
+                "company": "Example",
+                "url": "https://we.51job.com/pc/search#jobId=job-new",
+            }
+        ],
+        wait_seconds=1,
+    )[0]
+
+    assert attempt.delivered is False
+    assert attempt.error == "delivery_indeterminate"
+    assert "https://i.51job.com/userset/my_apply.php" not in driver.opened
+    assert log.list_recent(1)[0]["status"] == "indeterminate"

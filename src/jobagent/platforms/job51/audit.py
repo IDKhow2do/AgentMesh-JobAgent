@@ -65,6 +65,56 @@ class Job51AuditLog:
                 keys.add(key)
         return keys
 
+    def indeterminate_apply_send_evidence(self) -> dict[str, dict[str, Any]]:
+        """Return clicked-but-unverified jobs that have no later delivery proof.
+
+        Older clients wrote `delivery_not_verified` after a successful click when
+        the legacy history domain redirected to login. A later card-missing retry
+        must not erase that click evidence.
+        """
+        pending: dict[str, dict[str, Any]] = {}
+        delivered: set[str] = set()
+        for record in self._load():
+            if record.get("action") != "apply_send":
+                continue
+            evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
+            key = str(evidence.get("job_id") or record.get("job_url") or "").strip()
+            if not key:
+                continue
+            status = str(record.get("status") or "")
+            error = str(record.get("error") or "")
+            if status == "delivered" or error == "already_delivered":
+                delivered.add(key)
+                pending.pop(key, None)
+                continue
+            if key in delivered:
+                continue
+            steps = evidence.get("steps") if isinstance(evidence.get("steps"), list) else []
+            click_observed = any(
+                isinstance(step, dict)
+                and str(step.get("step") or "")
+                in {"click_51job_apply", "click_51job_apply_recovery"}
+                and step.get("ok") is True
+                for step in steps
+            )
+            if not click_observed:
+                continue
+            transition_observed = any(
+                isinstance(step, dict)
+                and str(step.get("step") or "")
+                in {"inspect_after_apply", "observe_51job_apply_transition"}
+                and step.get("cardFound") is True
+                and step.get("applyAvailable") is False
+                for step in steps
+            )
+            pending[key] = {
+                "click_observed": True,
+                "transition_observed": transition_observed,
+                "source_error": error,
+                "source_created_at": str(record.get("created_at") or ""),
+            }
+        return pending
+
     def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         return self._load()[-max(1, int(limit)):]
 
@@ -73,7 +123,14 @@ class Job51AuditLog:
             "platform": "51job",
             "total": 0,
             "apply_open": {"total": 0, "opened": 0, "planned": 0, "failed": 0},
-            "apply_send": {"total": 0, "delivered": 0, "planned": 0, "failed": 0, "skipped": 0},
+            "apply_send": {
+                "total": 0,
+                "delivered": 0,
+                "planned": 0,
+                "failed": 0,
+                "skipped": 0,
+                "indeterminate": 0,
+            },
         }
         for record in self._load():
             action = record.get("action")

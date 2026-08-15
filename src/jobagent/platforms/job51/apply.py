@@ -15,7 +15,7 @@ from jobagent.drivers.boss import create_driver
 from .audit import Job51AuditEvent, Job51AuditLog
 
 
-_JOB51_APPLICATION_HISTORY_URL = "https://i.51job.com/userset/my_apply.php"
+_JOB51_INDETERMINATE_ERROR = "delivery_indeterminate"
 
 
 @dataclass
@@ -136,6 +136,7 @@ class Job51ApplySender:
     ) -> list[SendAttempt]:
         selected = jobs[max(0, start): max(0, start) + max(1, limit)]
         delivered_keys = self.audit_log.delivered_apply_send_keys() if skip_delivered else set()
+        indeterminate_evidence = self.audit_log.indeterminate_apply_send_evidence()
         attempts: list[SendAttempt] = []
         for index, job in enumerate(selected, start=max(0, start)):
             message = str(job.get("cloud_greeting") or job.get("greeting") or "")
@@ -147,14 +148,31 @@ class Job51ApplySender:
                 status = "skipped"
                 audit_message = "Skipped because this 51Job job was already delivered."
             else:
-                attempt = self._send_one(job, message, wait_seconds=wait_seconds, dry_run=dry_run)
+                if not dry_run and key and key in indeterminate_evidence:
+                    attempt = self._reconcile_indeterminate(
+                        job,
+                        message,
+                        evidence=indeterminate_evidence[key],
+                        wait_seconds=wait_seconds,
+                    )
+                else:
+                    attempt = self._send_one(
+                        job,
+                        message,
+                        wait_seconds=wait_seconds,
+                        dry_run=dry_run,
+                    )
                 status = (
                     "planned"
                     if dry_run
                     else (
                         "delivered"
                         if attempt.delivered
-                        else ("skipped" if attempt.error == "job_unavailable" else "failed")
+                        else (
+                            "indeterminate"
+                            if attempt.error == _JOB51_INDETERMINATE_ERROR
+                            else ("skipped" if attempt.error == "job_unavailable" else "failed")
+                        )
                     )
                 )
                 audit_message = (
@@ -166,12 +184,27 @@ class Job51ApplySender:
                         else (
                             "Skipped because the job is no longer available in live search."
                             if attempt.error == "job_unavailable"
-                            else "Failed."
+                            else (
+                                "Apply action was observed; final verification remains indeterminate."
+                                if attempt.error == _JOB51_INDETERMINATE_ERROR
+                                else "Failed."
+                            )
                         )
                     )
                 )
                 if attempt.delivered and key:
                     delivered_keys.add(key)
+                    indeterminate_evidence.pop(key, None)
+                elif attempt.error == _JOB51_INDETERMINATE_ERROR and key:
+                    indeterminate_evidence[key] = {
+                        "click_observed": True,
+                        "transition_observed": any(
+                            isinstance(step, dict)
+                            and step.get("step") == "observe_51job_apply_transition"
+                            and step.get("ok") is True
+                            for step in attempt.steps
+                        ),
+                    }
             attempts.append(attempt)
             self.audit_log.append(
                 Job51AuditEvent(
@@ -202,6 +235,135 @@ class Job51ApplySender:
             if stop_on_failure and not dry_run and status == "failed":
                 break
         return attempts
+
+    def _reconcile_indeterminate(
+        self,
+        job: dict[str, Any],
+        message: str,
+        *,
+        evidence: dict[str, Any],
+        wait_seconds: int,
+    ) -> SendAttempt:
+        url = _job51_open_url(job)
+        job_id = _job51_job_key(job)
+        attempt = SendAttempt(
+            job_url=url,
+            message=message,
+            delivered=False,
+            error=_JOB51_INDETERMINATE_ERROR,
+        )
+        if not url:
+            attempt.error = "missing_job_url"
+            return attempt
+        driver = self.driver or create_driver(platform="51job")
+        self.driver = driver
+        steps: list[dict[str, Any]] = [
+            {
+                "step": "resume_51job_indeterminate_delivery",
+                "ok": True,
+                "click_observed": bool(evidence.get("click_observed")),
+                "transition_observed": bool(evidence.get("transition_observed")),
+                "will_click": False,
+                "job_id": job_id,
+            }
+        ]
+        state = self._open_and_inspect_for_reconciliation(
+            driver,
+            job,
+            job_id,
+            steps,
+            wait_seconds=wait_seconds,
+            allow_stable_transition=bool(evidence.get("transition_observed")),
+        )
+        if _job51_page_requires_login(state):
+            attempt.error = "login_required"
+        elif state.get("requires_user_action"):
+            attempt.error = str(state.get("user_action") or "user_action_required")
+        elif _job51_delivery_detected(state):
+            attempt.delivered = True
+            attempt.error = ""
+            steps.append(
+                {
+                    "step": "verify_51job_indeterminate_delivery",
+                    "ok": True,
+                    "evidence_source": "current_site_explicit_delivery",
+                    "job_id": job_id,
+                }
+            )
+        elif evidence.get("transition_observed") and _job51_stable_current_card_transition(state):
+            attempt.delivered = True
+            attempt.error = ""
+            steps.append(
+                {
+                    "step": "verify_51job_indeterminate_delivery",
+                    "ok": True,
+                    "evidence_source": "persisted_click_plus_stable_card_transition",
+                    "job_id": job_id,
+                }
+            )
+        else:
+            steps.append(
+                {
+                    "step": "verify_51job_indeterminate_delivery",
+                    "ok": False,
+                    "error": _JOB51_INDETERMINATE_ERROR,
+                    "will_click": False,
+                    "job_id": job_id,
+                }
+            )
+        attempt.steps = steps
+        return attempt
+
+    def _open_and_inspect_for_reconciliation(
+        self,
+        driver: Any,
+        job: dict[str, Any],
+        job_id: str,
+        steps: list[dict[str, Any]],
+        *,
+        wait_seconds: int,
+        allow_stable_transition: bool,
+    ) -> dict[str, Any]:
+        urls = [_job51_open_url(job)]
+        recovery_url = _job51_recovery_url(job)
+        if recovery_url and recovery_url not in urls:
+            urls.append(recovery_url)
+        last: dict[str, Any] = {}
+        for position, url in enumerate(urls):
+            opened = driver.open_url_in_new_tab(url, wait_seconds=max(1, wait_seconds))
+            steps.append(
+                {
+                    "step": "open_51job_indeterminate_reconciliation",
+                    "candidate": "original" if position == 0 else "recovery_search",
+                    **opened,
+                }
+            )
+            if not opened.get("ok"):
+                continue
+            last = _wait_for_job51_apply_state(
+                driver,
+                job_id,
+                wait_seconds=max(8, wait_seconds),
+                require_delivery=True,
+            )
+            steps.append(
+                {
+                    "step": "inspect_51job_indeterminate_reconciliation",
+                    "candidate": "original" if position == 0 else "recovery_search",
+                    **last,
+                }
+            )
+            if (
+                _job51_page_requires_login(last)
+                or last.get("requires_user_action")
+                or _job51_delivery_detected(last)
+                or (
+                    allow_stable_transition
+                    and _job51_stable_current_card_transition(last)
+                )
+            ):
+                return last
+        return last
 
     def _send_one(self, job: dict[str, Any], message: str, wait_seconds: int = 3, dry_run: bool = False) -> SendAttempt:
         url = _job51_open_url(job)
@@ -268,6 +430,7 @@ class Job51ApplySender:
 
         if message.strip():
             steps.append({"step": "job51_greeting_not_supported", "ok": True, "reason": "job51_chat_is_qr_only"})
+        before_click_state = inspect_before
         click_result = _exec_job51_js(driver, _job51_apply_click_script(job_id))
         steps.append({"step": "click_51job_apply", **click_result})
         if not click_result.get("ok") and click_result.get("error") == "job51_card_not_found":
@@ -319,20 +482,10 @@ class Job51ApplySender:
                             attempt.delivered = True
                             attempt.steps = steps
                             return attempt
+                before_click_state = recovery_state
                 click_result = _exec_job51_js(driver, _job51_apply_click_script(job_id))
                 steps.append({"step": "click_51job_apply_recovery", **click_result})
         if not click_result.get("ok"):
-            history_state = self._verify_in_application_history(
-                driver,
-                job,
-                job_id,
-                steps,
-                wait_seconds=wait_seconds,
-            )
-            if _job51_delivery_detected(history_state):
-                attempt.delivered = True
-                attempt.steps = steps
-                return attempt
             attempt.error = (
                 "job_unavailable"
                 if click_result.get("error") == "job51_card_not_found"
@@ -347,48 +500,25 @@ class Job51ApplySender:
             require_delivery=True,
         )
         steps.append({"step": "inspect_after_apply", **after})
+        transition_evidence = _job51_apply_transition_evidence(
+            before_click_state,
+            click_result,
+            after,
+            job_id=job_id,
+        )
+        steps.append(transition_evidence)
         if _job51_delivery_detected(after):
             attempt.delivered = True
+        elif transition_evidence["ok"] and _job51_stable_current_card_transition(after):
+            attempt.delivered = True
+        elif _job51_page_requires_login(after):
+            attempt.error = "login_required"
+        elif after.get("requires_user_action"):
+            attempt.error = str(after.get("user_action") or "user_action_required")
         else:
-            history_state = self._verify_in_application_history(
-                driver,
-                job,
-                job_id,
-                steps,
-                wait_seconds=wait_seconds,
-            )
-            if _job51_delivery_detected(history_state):
-                attempt.delivered = True
-            else:
-                attempt.error = str(after.get("user_action") or after.get("error") or "delivery_not_verified")
+            attempt.error = _JOB51_INDETERMINATE_ERROR
         attempt.steps = steps
         return attempt
-
-    def _verify_in_application_history(
-        self,
-        driver: Any,
-        job: dict[str, Any],
-        job_id: str,
-        steps: list[dict[str, Any]],
-        *,
-        wait_seconds: int,
-    ) -> dict[str, Any]:
-        history_open = driver.open_url_in_new_tab(
-            _JOB51_APPLICATION_HISTORY_URL,
-            wait_seconds=max(3, wait_seconds),
-        )
-        steps.append({"step": "open_51job_application_history", **history_open})
-        if not history_open.get("ok"):
-            return {}
-        state = _wait_for_job51_history_state(
-            driver,
-            job_id=job_id,
-            title=str(job.get("name") or job.get("title") or ""),
-            company=str(job.get("company") or ""),
-            wait_seconds=max(8, wait_seconds),
-        )
-        steps.append({"step": "verify_51job_application_history", **state})
-        return state
 
     def _reload_until_card(
         self,
@@ -510,6 +640,7 @@ def _wait_for_job51_apply_state(
     attempts = max(2, int(math.ceil(max(0.0, float(wait_seconds)) / poll_interval)) + 1)
     last: dict[str, Any] = {}
     stable_ready_hits = 0
+    stable_transition_hits = 0
     for attempt in range(attempts):
         last = _exec_job51_js(driver, _job51_apply_inspect_script(job_id))
         if (
@@ -525,34 +656,21 @@ def _wait_for_job51_apply_state(
             stable_ready_hits = stable_ready_hits + 1 if last.get("pageReady") else 0
             if stable_ready_hits >= 5:
                 return last
-        if attempt < attempts - 1:
-            time.sleep(poll_interval)
-    return last
-
-
-def _wait_for_job51_history_state(
-    driver: Any,
-    *,
-    job_id: str,
-    title: str,
-    company: str,
-    wait_seconds: float,
-) -> dict[str, Any]:
-    poll_interval = 0.5
-    attempts = max(2, int(math.ceil(max(0.0, float(wait_seconds)) / poll_interval)) + 1)
-    last: dict[str, Any] = {}
-    for attempt in range(attempts):
-        last = _exec_job51_js(
-            driver,
-            _job51_history_inspect_script(job_id, title, company),
-        )
-        if (
-            last.get("ok") is False
-            or last.get("loginRequired")
-            or last.get("delivered")
-            or last.get("historyReady")
+        elif (
+            _job51_is_current_surface(last)
+            and last.get("pageReady") is True
+            and last.get("cardFound") is True
+            and last.get("applyAvailable") is False
         ):
-            return last
+            stable_transition_hits += 1
+            if stable_transition_hits >= 3:
+                return {
+                    **last,
+                    "observedTransitionStable": True,
+                    "transitionStableHits": stable_transition_hits,
+                }
+        else:
+            stable_transition_hits = 0
         if attempt < attempts - 1:
             time.sleep(poll_interval)
     return last
@@ -570,6 +688,57 @@ def _job51_delivery_detected(state: dict[str, Any]) -> bool:
         return True
     text = f"{state.get('title') or ''}\n{state.get('bodySnippet') or ''}"
     return any(token in text for token in ("投递成功", "已投递", "简历投递成功", "申请成功"))
+
+
+def _job51_is_current_surface(state: dict[str, Any]) -> bool:
+    try:
+        return (urlsplit(str(state.get("href") or "")).hostname or "").lower() == "we.51job.com"
+    except ValueError:
+        return False
+
+
+def _job51_stable_current_card_transition(state: dict[str, Any]) -> bool:
+    return bool(
+        _job51_is_current_surface(state)
+        and state.get("pageReady") is True
+        and state.get("cardFound") is True
+        and state.get("applyAvailable") is False
+        and state.get("observedTransitionStable") is True
+        and not _job51_page_requires_login(state)
+        and not state.get("requires_user_action")
+    )
+
+
+def _job51_apply_transition_evidence(
+    before: dict[str, Any],
+    click: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    click_matches = bool(
+        click.get("ok") is True
+        and (not click.get("jobId") or str(click.get("jobId")) == str(job_id))
+    )
+    transition = bool(
+        click_matches
+        and before.get("cardFound") is True
+        and before.get("applyAvailable") is True
+        and _job51_is_current_surface(after)
+        and after.get("cardFound") is True
+        and after.get("applyAvailable") is False
+    )
+    return {
+        "step": "observe_51job_apply_transition",
+        "ok": transition,
+        "job_id": job_id,
+        "click_observed": click_matches,
+        "current_surface": _job51_is_current_surface(after),
+        "cardFound": after.get("cardFound") is True,
+        "applyAvailable": after.get("applyAvailable"),
+        "explicit_delivery": _job51_delivery_detected(after),
+        "observed_transition_stable": after.get("observedTransitionStable") is True,
+    }
 
 
 def _job51_apply_inspect_script(job_id: str = "") -> str:
@@ -643,52 +812,6 @@ def _job51_apply_inspect_script(job_id: str = "") -> str:
         requires_user_action: requiresResume || requiresCaptcha,
         user_action: requiresCaptcha ? 'captcha_required' : (requiresResume ? 'resume_selection_required' : ''),
         bodySnippet: bodyText.slice(0, 1400)
-      }});
-    }})()
-    """
-
-
-def _job51_history_inspect_script(job_id: str, title: str, company: str) -> str:
-    safe_job_id = json.dumps(job_id)
-    safe_title = json.dumps(title)
-    safe_company = json.dumps(company)
-    return f"""
-    (function(){{
-      const jobId = {safe_job_id};
-      const expectedTitle = {safe_title};
-      const expectedCompany = {safe_company};
-      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-      const href = location.href || '';
-      const pageTitle = document.title || '';
-      const bodyText = clean(document.body && (document.body.innerText || document.body.textContent));
-      const loginRequired = /passport|login/.test(href) || /登录[/]注册|请登录|扫码登录|验证码登录/.test(bodyText.slice(0, 1000));
-      const rows = Array.from(document.querySelectorAll('.apox .e, .exmsg .e'))
-        .filter((row, index, all) => all.indexOf(row) === index);
-      const row = rows.find((item) => {{
-        const jobLink = item.querySelector('a.zhn, a[href*="jobs.51job.com/"]');
-        const rowTitle = clean(jobLink && (jobLink.getAttribute('title') || jobLink.textContent));
-        const rowCompany = clean(item.querySelector('a.gs') && (item.querySelector('a.gs').getAttribute('title') || item.querySelector('a.gs').textContent));
-        const jobHref = String(jobLink && jobLink.href || '');
-        const idMatches = Boolean(jobId && new RegExp('/' + jobId + '[.]html(?:[?#]|$)').test(jobHref));
-        const textMatches = Boolean(expectedTitle && expectedCompany && rowTitle === expectedTitle && rowCompany === expectedCompany);
-        return idMatches || textMatches;
-      }}) || null;
-      const matchedLink = row && row.querySelector('a.zhn, a[href*="jobs.51job.com/"]');
-      const matchedCompany = row && row.querySelector('a.gs');
-      const rowText = clean(row && (row.innerText || row.textContent));
-      const appliedAtMatch = rowText.match(/申请于(20\\d{{2}}-\\d{{2}}-\\d{{2}})/);
-      return JSON.stringify({{
-        ok: true,
-        href,
-        title: pageTitle,
-        historyReady: rows.length > 0,
-        recordCount: rows.length,
-        loginRequired,
-        delivered: Boolean(row),
-        matchedJobId: jobId && row ? jobId : '',
-        matchedTitle: clean(matchedLink && (matchedLink.getAttribute('title') || matchedLink.textContent)),
-        matchedCompany: clean(matchedCompany && (matchedCompany.getAttribute('title') || matchedCompany.textContent)),
-        appliedAt: appliedAtMatch ? appliedAtMatch[1] : ''
       }});
     }})()
     """

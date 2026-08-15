@@ -224,6 +224,8 @@ jobagent 51job audit
 
 猎聘 completes two verified actions for every selected job: it sends the resume associated with the user's platform account and then sends the signed personalized greeting generated from the resume profile and job. A platform-owned default introduction does not count as the personalized greeting. 智联招聘 and 51Job remain resume-submit workflows; on 51Job, the web chat entry is a mobile QR handoff.
 
+51Job verifies resume submission from the current `we.51job.com` surface rather than treating its separately authenticated legacy history domain as the source of truth. If an apply click was observed but the final evidence remains insufficient, the CLI records an idempotent `delivery_indeterminate` outcome, continues the remaining authorized jobs and preserves the same preview, authorization, round and Discover. Run the exact returned `next_suggested` command: it reconciles pending items without clicking them again and adds no cloud charge. Do not repeat Discover or clear the managed profile.
+
 Boss and 猎聘 require a non-empty signed personalized greeting of at most 100 characters before either preview or real delivery can proceed. Their success records include the delivered-message evidence. 智联招聘 and 51Job explicitly report personalized message delivery as unsupported instead of treating a review note as a sent message.
 
 ## Review Rules
