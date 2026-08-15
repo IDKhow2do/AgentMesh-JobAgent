@@ -434,6 +434,19 @@ def test_51job_indeterminate_delivery_preserves_authorization_and_exact_resume(
             ),
         ],
     )
+    monkeypatch.setattr(
+        delivery,
+        "_delivery_outcome_summary",
+        lambda _platform, _jobs: {
+            "total": 2,
+            "terminal": 1,
+            "delivered": 1,
+            "unavailable": 0,
+            "unresolved": 0,
+            "pending": 1,
+            "failed": 0,
+        },
+    )
     monkeypatch.setattr(delivery, "progress_heartbeat", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(delivery, "active_command", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(delivery, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
@@ -483,3 +496,116 @@ def test_51job_indeterminate_delivery_preserves_authorization_and_exact_resume(
     assert "--authorization-id auth-preserved" in result["next_suggested"]
     assert statuses[0][1] == "reviewed"
     assert cleared == []
+
+
+def test_51job_terminal_unresolved_completes_send_with_cumulative_evidence(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+
+    from jobagent.application import delivery
+    from jobagent.domain.models import SendAttempt
+    from jobagent.infra import interaction_state
+
+    jobs = [
+        {"job_id": f"delivered-{index}", "url": f"https://example.invalid/d/{index}"}
+        for index in range(5)
+    ] + [
+        {"job_id": f"unavailable-{index}", "url": f"https://example.invalid/u/{index}"}
+        for index in range(2)
+    ] + [
+        {"job_id": f"unresolved-{index}", "url": f"https://example.invalid/x/{index}"}
+        for index in range(2)
+    ]
+    reviewed = {
+        "discover_id": "dis-terminal",
+        "send_candidates": jobs,
+        "source_path": "/tmp/terminal.review.json",
+    }
+    attempts = [
+        SendAttempt(job_url=job["url"], message="", delivered=False, error="already_delivered")
+        for job in jobs[:5]
+    ] + [
+        SendAttempt(job_url=job["url"], message="", delivered=False, error="job_unavailable")
+        for job in jobs[5:7]
+    ] + [
+        SendAttempt(job_url=job["url"], message="", delivered=False, error="delivery_unresolved")
+        for job in jobs[7:]
+    ]
+    cumulative = {
+        "total": 9,
+        "terminal": 9,
+        "delivered": 5,
+        "unavailable": 2,
+        "unresolved": 2,
+        "pending": 0,
+        "failed": 0,
+    }
+    statuses = []
+    cleared = []
+    monkeypatch.setattr(delivery, "_load_reviewed", lambda *_args, **_kwargs: reviewed)
+    monkeypatch.setattr(delivery, "_check_apply_login", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(delivery, "_apply_send", lambda *_args, **_kwargs: attempts)
+    monkeypatch.setattr(
+        delivery,
+        "_delivery_outcome_summary",
+        lambda _platform, _jobs: cumulative,
+        raising=False,
+    )
+    monkeypatch.setattr(delivery, "progress_heartbeat", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "active_command", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "emit_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(delivery, "print_first_delivery_star_prompt_once", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        delivery.rounds,
+        "set_platform_status",
+        lambda platform, status, **kwargs: statuses.append((platform, status, kwargs)),
+    )
+    monkeypatch.setattr(
+        delivery.rounds,
+        "round_status",
+        lambda: {"round_id": "round-terminal", "current_platform": "51job"},
+    )
+    monkeypatch.setattr(
+        interaction_state,
+        "load_pending_interaction",
+        lambda: {
+            "stage": "delivery_authorized",
+            "context": {"platform": "51job", "authorization_id": "auth-terminal"},
+        },
+    )
+    monkeypatch.setattr(interaction_state, "clear_pending_interaction", lambda: cleared.append(True))
+
+    result = delivery.send_reviewed(
+        "51job",
+        input_path="/tmp/terminal.review.json",
+        preview_id="preview-terminal",
+        authorization_id="auth-terminal",
+        limit=100,
+    )
+
+    assert result["ok"] is True
+    assert result["retryable"] is False
+    assert result["next_suggested"] == "jobagent 51job audit"
+    assert result["delivered"] == 5
+    assert result["skipped"] == 2
+    assert result["indeterminate"] == 0
+    assert result["unresolved"] == 2
+    assert result["completion_state"] == "completed_with_unresolved"
+    assert result["no_charge"] is True
+    assert result["request_preserved"] is True
+    assert result["preview_preserved"] is True
+    assert result["authorization_preserved"] is True
+    assert statuses[0][1] == "sent"
+    assert statuses[0][2]["evidence"] == {
+        "discover_id": "dis-terminal",
+        "attempted": 9,
+        "delivered": 5,
+        "failed": 0,
+        "skipped": 2,
+        "indeterminate": 0,
+        "unresolved": 2,
+        "reviewed_count": 9,
+    }
+    assert cleared == [True]

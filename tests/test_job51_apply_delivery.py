@@ -189,6 +189,38 @@ def _append_legacy_indeterminate(log: Job51AuditLog, job_id: str) -> None:
     )
 
 
+def _append_reconcile_indeterminate(
+    log: Job51AuditLog,
+    job_id: str,
+    *,
+    reconcile_attempt: int,
+) -> None:
+    log.append(
+        Job51AuditEvent(
+            action="apply_send",
+            status="indeterminate",
+            error="delivery_indeterminate",
+            evidence={
+                "job_id": job_id,
+                "steps": [
+                    {
+                        "step": "resume_51job_indeterminate_delivery",
+                        "ok": True,
+                        "will_click": False,
+                        "reconcile_attempt": reconcile_attempt,
+                    },
+                    {
+                        "step": "verify_51job_indeterminate_delivery",
+                        "ok": False,
+                        "error": "delivery_indeterminate",
+                        "will_click": False,
+                    },
+                ],
+            },
+        )
+    )
+
+
 def test_job51_legacy_clicked_failure_survives_later_unavailable_audit(tmp_path):
     log = Job51AuditLog(path=tmp_path / "audit.json")
     _append_legacy_indeterminate(log, "job-pending")
@@ -375,3 +407,133 @@ def test_job51_new_ambiguous_click_is_persisted_without_opening_legacy_history(m
     assert attempt.error == "delivery_indeterminate"
     assert "https://i.51job.com/userset/my_apply.php" not in driver.opened
     assert log.list_recent(1)[0]["status"] == "indeterminate"
+
+
+def test_job51_indeterminate_reconciliation_is_bounded_and_terminal_state_never_reopens(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("jobagent.platforms.job51.apply.time.sleep", lambda _: None)
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    _append_legacy_indeterminate(log, "job-pending")
+    _append_reconcile_indeterminate(log, "job-pending", reconcile_attempt=1)
+    driver = CurrentSurfaceReconciliationDriver(pending_card_found=False)
+    sender = Job51ApplySender(driver=driver, audit_log=log)
+    job = {
+        "job_id": "job-pending",
+        "name": "Example pending role",
+        "company": "Example A",
+        "url": "https://we.51job.com/pc/search#jobId=job-pending",
+    }
+
+    exhausted = sender.send_batch([job], wait_seconds=1)[0]
+
+    assert exhausted.delivered is False
+    assert exhausted.error == "delivery_unresolved"
+    assert driver.clicked_job_ids == []
+    assert log.list_recent(1)[0]["status"] == "unresolved"
+    assert any(
+        step.get("step") == "finalize_51job_delivery_unresolved"
+        and step.get("reconcile_attempt") == 2
+        and step.get("reconcile_limit") == 2
+        for step in exhausted.steps
+    )
+
+    opened_after_terminal = list(driver.opened)
+    repeated = sender.send_batch([job], wait_seconds=1)[0]
+
+    assert repeated.error == "delivery_unresolved"
+    assert driver.opened == opened_after_terminal
+    assert driver.clicked_job_ids == []
+    assert any(
+        step.get("step") == "skip_51job_terminal_delivery"
+        and step.get("reason") == "delivery_unresolved"
+        for step in repeated.steps
+    )
+
+
+def test_job51_stale_indeterminate_state_expires_without_browser_navigation(tmp_path):
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    log.append(
+        Job51AuditEvent(
+            action="apply_send",
+            status="indeterminate",
+            error="delivery_indeterminate",
+            created_at="2026-08-01T00:00:00+00:00",
+            evidence={
+                "job_id": "job-stale",
+                "steps": [{"step": "click_51job_apply", "ok": True}],
+            },
+        )
+    )
+
+    attempt = Job51ApplySender(driver=object(), audit_log=log).send_batch(
+        [
+            {
+                "job_id": "job-stale",
+                "url": "https://we.51job.com/pc/search#jobId=job-stale",
+            }
+        ]
+    )[0]
+
+    assert attempt.error == "delivery_unresolved"
+    assert any(
+        step.get("reason") == "reconcile_bound_reached_before_navigation"
+        and step.get("will_click") is False
+        for step in attempt.steps
+    )
+
+
+def test_job51_audit_summary_deduplicates_cumulative_terminal_outcomes(tmp_path):
+    log = Job51AuditLog(path=tmp_path / "audit.json")
+    for index in range(5):
+        log.append_event(
+            "apply_send",
+            "delivered",
+            evidence={"job_id": f"delivered-{index}"},
+        )
+        log.append_event(
+            "apply_send",
+            "skipped",
+            error="already_delivered",
+            evidence={"job_id": f"delivered-{index}"},
+        )
+    for index in range(2):
+        log.append_event(
+            "apply_send",
+            "skipped",
+            error="job_unavailable",
+            evidence={"job_id": f"unavailable-{index}"},
+        )
+    for index in range(2):
+        _append_legacy_indeterminate(log, f"unresolved-{index}")
+        log.append_event(
+            "apply_send",
+            "unresolved",
+            error="delivery_unresolved",
+            evidence={
+                "job_id": f"unresolved-{index}",
+                "reconcile_attempt": 2,
+                "reconcile_limit": 2,
+                "steps": [
+                    {
+                        "step": "finalize_51job_delivery_unresolved",
+                        "ok": True,
+                        "reconcile_attempt": 2,
+                        "reconcile_limit": 2,
+                    }
+                ],
+            },
+        )
+
+    outcomes = log.summary()["apply_send"]["outcomes"]
+
+    assert outcomes == {
+        "total": 9,
+        "terminal": 9,
+        "delivered": 5,
+        "unavailable": 2,
+        "unresolved": 2,
+        "pending": 0,
+        "failed": 0,
+    }

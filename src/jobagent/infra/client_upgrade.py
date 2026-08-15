@@ -16,7 +16,7 @@ from jobagent.infra.profile_contract import profile_compatibility_issues
 from jobagent.infra.rounds import migrate_round_payload
 from jobagent.infra.state import APP_DIR
 
-STATE_MIGRATION_VERSION = 5
+STATE_MIGRATION_VERSION = 6
 
 _EPHEMERAL_FILES = (
     "state/release_manifest_cache.json",
@@ -297,6 +297,90 @@ def _migrate_zhilian_reviewability_state(
         migrated.append(relative)
 
 
+def _migrate_job51_delivery_reconciliation_state(
+    root: Path,
+    *,
+    migrated: list[str],
+) -> None:
+    """Annotate v0.5.25 append-only reconciliation events in place."""
+
+    from jobagent.platforms.job51.audit import (
+        JOB51_DELIVERY_STATE_VERSION,
+        JOB51_RECONCILE_LIMIT,
+    )
+
+    path = root / "state" / "job51_audit_log.json"
+    if not path.exists():
+        return
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(records, list):
+        return
+    first_seen: dict[str, str] = {}
+    reconcile_attempts: dict[str, int] = {}
+    changed = False
+    for record in records:
+        if not isinstance(record, dict) or record.get("action") != "apply_send":
+            continue
+        evidence = record.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        key = str(evidence.get("job_id") or record.get("job_url") or "").strip()
+        if not key:
+            continue
+        steps = evidence.get("steps") if isinstance(evidence.get("steps"), list) else []
+        click_observed = any(
+            isinstance(step, dict)
+            and step.get("step") in {"click_51job_apply", "click_51job_apply_recovery"}
+            and step.get("ok") is True
+            for step in steps
+        )
+        resume_observed = any(
+            isinstance(step, dict)
+            and step.get("step") == "resume_51job_indeterminate_delivery"
+            for step in steps
+        )
+        relevant = (
+            click_observed
+            or resume_observed
+            or str(record.get("status") or "") in {"indeterminate", "unresolved"}
+            or str(record.get("error") or "")
+            in {"delivery_not_verified", "delivery_indeterminate", "delivery_unresolved"}
+        )
+        if not relevant:
+            continue
+        if click_observed and key not in first_seen:
+            first_seen[key] = str(
+                evidence.get("first_indeterminate_at")
+                or record.get("created_at")
+                or ""
+            )
+        if evidence.get("first_indeterminate_at") and key not in first_seen:
+            first_seen[key] = str(evidence["first_indeterminate_at"])
+        explicit = evidence.get("reconcile_attempt")
+        if isinstance(explicit, int) and not isinstance(explicit, bool):
+            reconcile_attempts[key] = max(reconcile_attempts.get(key, 0), explicit)
+        elif resume_observed:
+            reconcile_attempts[key] = reconcile_attempts.get(key, 0) + 1
+        expected = {
+            "delivery_state_version": JOB51_DELIVERY_STATE_VERSION,
+            "first_indeterminate_at": first_seen.get(key, ""),
+            "reconcile_attempt": reconcile_attempts.get(key, 0),
+            "reconcile_limit": JOB51_RECONCILE_LIMIT,
+        }
+        for field, value in expected.items():
+            if evidence.get(field) != value:
+                evidence[field] = value
+                changed = True
+    if changed:
+        _write_json(path, records)
+        relative = _relative(path, root)
+        if relative not in migrated:
+            migrated.append(relative)
+
+
 def run_client_upgrade(
     *,
     app_dir: Path | None = None,
@@ -384,6 +468,11 @@ def run_client_upgrade(
                 root,
                 migrated=migrated,
                 cleared=cleared,
+            )
+        if prior_migration_version < 6:
+            _migrate_job51_delivery_reconciliation_state(
+                root,
+                migrated=migrated,
             )
 
         discoveries = state_dir / "discoveries"

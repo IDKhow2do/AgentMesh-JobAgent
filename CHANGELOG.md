@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.26] - 2026-08-15
+
+### Fixed
+
+- Bound 51Job clicked-but-unverified reconciliation to two read-only attempts or 24 hours. When evidence still cannot converge, preserve the item as terminal `delivery_unresolved` instead of returning the same send command forever.
+- Never reopen or click a delivered, unavailable or terminal-unresolved 51Job item. Older v0.5.25 append-only audit records are migrated in place without losing click evidence, the original round, preview or authorization.
+- Build send and audit summaries from each reviewed job's cumulative terminal outcome instead of the latest command run. A later recovery now retains prior delivered jobs and reports unavailable, pending and unresolved outcomes separately.
+- Complete the send stage and continue to audit when every reviewed job has a terminal outcome, including unresolved items. Unresolved is never counted as delivered or failed, and no additional Discover or cloud charge is created.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, round, paid Discover, signed decision, preview, authorization and audit log remain in place. Follow the installed client's exact `next_suggested`: retry only while `retryable=true`; when `completion_state=completed_with_unresolved`, continue directly to `jobagent 51job audit`.
+
 ## [0.5.25] - 2026-08-15
 
 ### Fixed
