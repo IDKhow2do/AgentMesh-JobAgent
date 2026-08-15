@@ -6,16 +6,24 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urldefrag, urlsplit, urlunsplit
 
 from jobagent.domain.models import SendAttempt
 from jobagent.drivers.boss import create_driver
 
-from .audit import Job51AuditEvent, Job51AuditLog
+from .audit import (
+    JOB51_DELIVERY_STATE_VERSION,
+    JOB51_RECONCILE_LIMIT,
+    JOB51_RECONCILE_MAX_AGE_SECONDS,
+    Job51AuditEvent,
+    Job51AuditLog,
+)
 
 
 _JOB51_INDETERMINATE_ERROR = "delivery_indeterminate"
+_JOB51_UNRESOLVED_ERROR = "delivery_unresolved"
 
 
 @dataclass
@@ -137,16 +145,38 @@ class Job51ApplySender:
         selected = jobs[max(0, start): max(0, start) + max(1, limit)]
         delivered_keys = self.audit_log.delivered_apply_send_keys() if skip_delivered else set()
         indeterminate_evidence = self.audit_log.indeterminate_apply_send_evidence()
+        prior_outcomes = self.audit_log.apply_send_outcomes() if skip_delivered else {}
         attempts: list[SendAttempt] = []
         for index, job in enumerate(selected, start=max(0, start)):
             message = str(job.get("cloud_greeting") or job.get("greeting") or "")
             key = _job51_job_key(job)
             url = _job51_open_url(job)
-            if skip_delivered and key and key in delivered_keys:
+            prior_outcome = str((prior_outcomes.get(key) or {}).get("outcome") or "")
+            if skip_delivered and key and prior_outcome in {"delivered", "unavailable", "unresolved"}:
+                terminal_error = {
+                    "delivered": "already_delivered",
+                    "unavailable": "job_unavailable",
+                    "unresolved": _JOB51_UNRESOLVED_ERROR,
+                }[prior_outcome]
                 attempt = SendAttempt(job_url=url, message=message, delivered=False, error="already_delivered")
-                attempt.steps = [{"step": "skip_51job_apply_send", "ok": True, "reason": "already_delivered", "job_id": key}]
-                status = "skipped"
-                audit_message = "Skipped because this 51Job job was already delivered."
+                attempt.error = terminal_error
+                attempt.steps = [
+                    {
+                        "step": "skip_51job_terminal_delivery",
+                        "ok": True,
+                        "reason": terminal_error,
+                        "will_click": False,
+                        "job_id": key,
+                    }
+                ]
+                status = "unresolved" if terminal_error == _JOB51_UNRESOLVED_ERROR else "skipped"
+                audit_message = {
+                    "already_delivered": "Skipped because this 51Job job was already delivered.",
+                    "job_unavailable": "Skipped because this 51Job job was already unavailable.",
+                    _JOB51_UNRESOLVED_ERROR: (
+                        "Skipped because bounded reconciliation already ended unresolved."
+                    ),
+                }[terminal_error]
             else:
                 if not dry_run and key and key in indeterminate_evidence:
                     attempt = self._reconcile_indeterminate(
@@ -171,7 +201,11 @@ class Job51ApplySender:
                         else (
                             "indeterminate"
                             if attempt.error == _JOB51_INDETERMINATE_ERROR
-                            else ("skipped" if attempt.error == "job_unavailable" else "failed")
+                            else (
+                                "unresolved"
+                                if attempt.error == _JOB51_UNRESOLVED_ERROR
+                                else ("skipped" if attempt.error == "job_unavailable" else "failed")
+                            )
                         )
                     )
                 )
@@ -187,7 +221,11 @@ class Job51ApplySender:
                             else (
                                 "Apply action was observed; final verification remains indeterminate."
                                 if attempt.error == _JOB51_INDETERMINATE_ERROR
-                                else "Failed."
+                                else (
+                                    "Bounded verification ended without enough evidence; no retry will click again."
+                                    if attempt.error == _JOB51_UNRESOLVED_ERROR
+                                    else "Failed."
+                                )
                             )
                         )
                     )
@@ -196,6 +234,7 @@ class Job51ApplySender:
                     delivered_keys.add(key)
                     indeterminate_evidence.pop(key, None)
                 elif attempt.error == _JOB51_INDETERMINATE_ERROR and key:
+                    state_evidence = _job51_attempt_delivery_state_evidence(attempt)
                     indeterminate_evidence[key] = {
                         "click_observed": True,
                         "transition_observed": any(
@@ -204,6 +243,7 @@ class Job51ApplySender:
                             and step.get("ok") is True
                             for step in attempt.steps
                         ),
+                        **state_evidence,
                     }
             attempts.append(attempt)
             self.audit_log.append(
@@ -227,6 +267,7 @@ class Job51ApplySender:
                         "score": job.get("score"),
                         "match_level": job.get("match_level") or job.get("recommendation") or job.get("cloud_recommendation"),
                         "steps": attempt.steps,
+                        **_job51_attempt_delivery_state_evidence(attempt),
                     },
                 )
             )
@@ -255,8 +296,13 @@ class Job51ApplySender:
         if not url:
             attempt.error = "missing_job_url"
             return attempt
-        driver = self.driver or create_driver(platform="51job")
-        self.driver = driver
+        prior_reconcile_attempt = int(evidence.get("reconcile_attempt") or 0)
+        reconcile_attempt = prior_reconcile_attempt + 1
+        first_indeterminate_at = str(
+            evidence.get("first_indeterminate_at")
+            or evidence.get("source_created_at")
+            or attempt.created_at
+        )
         steps: list[dict[str, Any]] = [
             {
                 "step": "resume_51job_indeterminate_delivery",
@@ -265,8 +311,33 @@ class Job51ApplySender:
                 "transition_observed": bool(evidence.get("transition_observed")),
                 "will_click": False,
                 "job_id": job_id,
+                "delivery_state_version": JOB51_DELIVERY_STATE_VERSION,
+                "first_indeterminate_at": first_indeterminate_at,
+                "reconcile_attempt": reconcile_attempt,
+                "reconcile_limit": JOB51_RECONCILE_LIMIT,
             }
         ]
+        if (
+            prior_reconcile_attempt >= JOB51_RECONCILE_LIMIT
+            or _job51_reconciliation_age_seconds(first_indeterminate_at)
+            >= JOB51_RECONCILE_MAX_AGE_SECONDS
+        ):
+            attempt.error = _JOB51_UNRESOLVED_ERROR
+            steps.append(
+                {
+                    "step": "finalize_51job_delivery_unresolved",
+                    "ok": True,
+                    "reason": "reconcile_bound_reached_before_navigation",
+                    "will_click": False,
+                    "job_id": job_id,
+                    "reconcile_attempt": prior_reconcile_attempt,
+                    "reconcile_limit": JOB51_RECONCILE_LIMIT,
+                }
+            )
+            attempt.steps = steps
+            return attempt
+        driver = self.driver or create_driver(platform="51job")
+        self.driver = driver
         state = self._open_and_inspect_for_reconciliation(
             driver,
             job,
@@ -302,15 +373,33 @@ class Job51ApplySender:
                 }
             )
         else:
-            steps.append(
-                {
-                    "step": "verify_51job_indeterminate_delivery",
-                    "ok": False,
-                    "error": _JOB51_INDETERMINATE_ERROR,
-                    "will_click": False,
-                    "job_id": job_id,
-                }
-            )
+            if (
+                reconcile_attempt >= JOB51_RECONCILE_LIMIT
+                or _job51_reconciliation_age_seconds(first_indeterminate_at)
+                >= JOB51_RECONCILE_MAX_AGE_SECONDS
+            ):
+                attempt.error = _JOB51_UNRESOLVED_ERROR
+                steps.append(
+                    {
+                        "step": "finalize_51job_delivery_unresolved",
+                        "ok": True,
+                        "reason": "reconcile_bound_reached",
+                        "will_click": False,
+                        "job_id": job_id,
+                        "reconcile_attempt": reconcile_attempt,
+                        "reconcile_limit": JOB51_RECONCILE_LIMIT,
+                    }
+                )
+            else:
+                steps.append(
+                    {
+                        "step": "verify_51job_indeterminate_delivery",
+                        "ok": False,
+                        "error": _JOB51_INDETERMINATE_ERROR,
+                        "will_click": False,
+                        "job_id": job_id,
+                    }
+                )
         attempt.steps = steps
         return attempt
 
@@ -590,6 +679,40 @@ def _handoff_item(job: dict[str, Any], index: int, status: str, error: str = "")
 def _job51_job_key(job: dict[str, Any]) -> str:
     raw = job.get("raw_data") if isinstance(job.get("raw_data"), dict) else {}
     return str(job.get("job_id") or job.get("jobId") or raw.get("jobId") or _fragment_job_id(str(job.get("url") or "")) or job.get("url") or "").strip()
+
+
+def _job51_attempt_delivery_state_evidence(attempt: SendAttempt) -> dict[str, Any]:
+    if attempt.error not in {_JOB51_INDETERMINATE_ERROR, _JOB51_UNRESOLVED_ERROR}:
+        return {}
+    resume = next(
+        (
+            step
+            for step in attempt.steps
+            if isinstance(step, dict)
+            and step.get("step") == "resume_51job_indeterminate_delivery"
+        ),
+        {},
+    )
+    return {
+        "delivery_state_version": JOB51_DELIVERY_STATE_VERSION,
+        "first_indeterminate_at": str(
+            resume.get("first_indeterminate_at") or attempt.created_at
+        ),
+        "reconcile_attempt": int(resume.get("reconcile_attempt") or 0),
+        "reconcile_limit": JOB51_RECONCILE_LIMIT,
+    }
+
+
+def _job51_reconciliation_age_seconds(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+    except ValueError:
+        return 0.0
 
 
 def _fragment_job_id(url: str) -> str:

@@ -29,6 +29,7 @@ from jobagent.platforms.message_contract import validate_personalized_message
 
 _SKIPPED_SEND_ERRORS = {"already_delivered", "job_unavailable"}
 _INDETERMINATE_SEND_ERRORS = {"delivery_indeterminate"}
+_TERMINAL_UNRESOLVED_SEND_ERRORS = {"delivery_unresolved"}
 
 
 @dataclass
@@ -399,36 +400,66 @@ def send_reviewed(
                         on_attempt=on_attempt,
                     )
                 )
-    delivered = sum(1 for attempt in attempts if attempt.delivered)
-    failed = sum(
+    run_delivered = sum(1 for attempt in attempts if attempt.delivered)
+    run_failed = sum(
         1
         for attempt in attempts
         if not attempt.delivered
         and attempt.error not in _SKIPPED_SEND_ERRORS
         and attempt.error not in _INDETERMINATE_SEND_ERRORS
+        and attempt.error not in _TERMINAL_UNRESOLVED_SEND_ERRORS
     )
-    skipped = sum(1 for attempt in attempts if attempt.error in _SKIPPED_SEND_ERRORS)
-    indeterminate = sum(
+    run_skipped = sum(1 for attempt in attempts if attempt.error in _SKIPPED_SEND_ERRORS)
+    run_indeterminate = sum(
         1 for attempt in attempts if attempt.error in _INDETERMINATE_SEND_ERRORS
     )
+    run_unresolved = sum(
+        1 for attempt in attempts if attempt.error in _TERMINAL_UNRESOLVED_SEND_ERRORS
+    )
+    cumulative = (
+        _delivery_outcome_summary(platform, all_jobs)
+        if platform == "51job" and not dry_run
+        else None
+    )
+    if cumulative and int(cumulative.get("total") or 0) > 0:
+        attempted = int(cumulative.get("total") or 0)
+        delivered = int(cumulative.get("delivered") or 0)
+        failed = int(cumulative.get("failed") or 0)
+        skipped = int(cumulative.get("unavailable") or 0)
+        indeterminate = int(cumulative.get("pending") or 0)
+        unresolved = int(cumulative.get("unresolved") or 0)
+        terminal = int(cumulative.get("terminal") or 0)
+    else:
+        attempted = len(attempts)
+        delivered = run_delivered
+        failed = run_failed
+        skipped = run_skipped
+        indeterminate = run_indeterminate
+        unresolved = run_unresolved
+        terminal = delivered + skipped + unresolved
     emit_stage(
         "delivery_completed",
         platform=platform,
-        attempted=len(attempts),
+        attempted=attempted,
         delivered=delivered,
         failed=failed,
         skipped=skipped,
         indeterminate=indeterminate,
+        unresolved=unresolved,
+        run_delivered=run_delivered,
+        run_indeterminate=run_indeterminate,
+        run_unresolved=run_unresolved,
     )
     print_first_delivery_star_prompt_once(
         platform=platform,
         command=("greet send" if platform == "boss" else "apply send"),
-        delivered=delivered,
+        delivered=run_delivered,
         dry_run=dry_run,
     )
     complete_batch = (
         failed == 0
         and indeterminate == 0
+        and terminal == len(all_jobs)
         and len(attempts) == len(jobs)
         and len(jobs) == len(all_jobs)
     )
@@ -459,11 +490,12 @@ def send_reviewed(
         ),
         evidence={
             "discover_id": reviewed["discover_id"],
-            "attempted": len(attempts),
+            "attempted": attempted,
             "delivered": delivered,
             "failed": failed,
             "skipped": skipped,
             "indeterminate": indeterminate,
+            "unresolved": unresolved,
             "reviewed_count": len(all_jobs),
         },
         next_suggested=next_suggested,
@@ -485,11 +517,26 @@ def send_reviewed(
         "ok": failed == 0 and indeterminate == 0,
         "platform": platform,
         "discover_id": reviewed["discover_id"],
-        "attempted": len(attempts),
+        "attempted": attempted,
         "delivered": delivered,
         "failed": failed,
         "skipped": skipped,
         "indeterminate": indeterminate,
+        "unresolved": unresolved,
+        "completion_state": (
+            "completed_with_unresolved"
+            if complete_batch and unresolved > 0
+            else ("completed" if complete_batch else "in_progress")
+        ),
+        "run_summary": {
+            "attempted": len(attempts),
+            "delivered": run_delivered,
+            "failed": run_failed,
+            "skipped": run_skipped,
+            "indeterminate": run_indeterminate,
+            "unresolved": run_unresolved,
+        },
+        "cumulative_summary": cumulative,
         "dry_run": dry_run,
         "attempts": [attempt.to_dict() for attempt in attempts],
         "next_suggested": next_suggested,
@@ -500,17 +547,37 @@ def send_reviewed(
             "51Job 已观察到投递动作，但仍有岗位缺少足够的最终核验证据。"
             "其余岗位已继续处理；不要重建轮次、重新 Discover 或重复点击这些待核验岗位。"
             if indeterminate > 0
-            else ""
+            else (
+                "51Job 本轮发送已完成；部分岗位在有界核验后仍缺少足够证据，"
+                "已保留为 unresolved 并进入审计，不会再次点击或误报成功。"
+                if unresolved > 0
+                else ""
+            )
         ),
-        "delivery_state_preserved": indeterminate > 0,
-        "request_preserved": indeterminate > 0,
-        "preview_preserved": bool(indeterminate > 0 and preview_id),
-        "authorization_preserved": bool(indeterminate > 0 and authorization_id),
+        "delivery_state_preserved": indeterminate > 0 or unresolved > 0,
+        "request_preserved": indeterminate > 0 or unresolved > 0,
+        "preview_preserved": bool((indeterminate > 0 or unresolved > 0) and preview_id),
+        "authorization_preserved": bool(
+            (indeterminate > 0 or unresolved > 0) and authorization_id
+        ),
         "no_charge": True,
         "billing": {"additional_credits": 0},
         "additional_credits": 0,
         "workflow": rounds.round_status(),
     }
+
+
+def _delivery_outcome_summary(
+    platform: str,
+    jobs: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    if platform != "51job":
+        return None
+    from jobagent.platforms.job51.apply import _job51_job_key
+
+    keys = {_job51_job_key(job) for job in jobs}
+    keys.discard("")
+    return _audit_log("51job").outcome_summary(keys)
 
 
 def _audit_log(platform: str):
@@ -542,6 +609,7 @@ def _failed_record(record: dict[str, Any]) -> bool:
         "dry_run",
         "job_unavailable",
         "delivery_indeterminate",
+        "delivery_unresolved",
     }:
         return True
     return False

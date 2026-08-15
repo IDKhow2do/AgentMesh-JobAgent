@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching and recruiter greetings.
-version: 0.5.25
+version: 0.5.26
 ---
 
 # Job Agent
@@ -22,6 +22,7 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - If Zhilian review reports that a preserved signed decision has a generic title or missing company/salary, run its exact `jobagent zhilian apply review` recovery. The CLI reads only the signed job detail URLs, repairs trusted fields, safely excludes only a candidate that remains unreviewable, and requests a replacement signature for the same Discover with zero additional credits. It regenerates the remaining complete preview and still waits for the user's confirmation. Never start another round or Discover for this repair.
 - On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - On 51Job `delivery_verification_indeterminate` with `retryable=true` and `request_preserved=true`, run the exact `next_suggested` with the same preview and authorization. Pending clicked jobs are reconciled from current-site evidence and are never clicked again; the remaining authorized jobs continue. Do not repeat Discover, clear state, rebuild the round or infer logout from the legacy history domain.
+- On 51Job `completion_state=completed_with_unresolved`, do not run send again. Report the cumulative delivered, unavailable and unresolved counts separately, then run the exact `jobagent 51job audit` continuation. An unresolved job is neither delivered nor failed and must never be clicked again.
 - `review` is excluded by default. Promote only IDs named by the user and always pass `--confirm-promote`.
 - Never automatically promote `rejected`.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.

@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.25
+version: 0.5.26
 metadata:
   openclaw:
     emoji: "💼"
@@ -33,6 +33,7 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - For `exclude_jobs`, collect displayed job numbers and pass each as `--exclude-index`. Show the regenerated complete preview and stop for final confirmation again. Run send only after `event=delivery_authorized`, using the exact command containing both `--preview-id` and `--authorization-id`.
 - On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - On 51Job `delivery_verification_indeterminate` with `retryable=true` and `request_preserved=true`, run the exact `next_suggested` with the same preview and authorization. Pending clicked jobs are reconciled from current-site evidence and are never clicked again; the remaining authorized jobs continue. Do not repeat Discover, clear state, rebuild the round or infer logout from the legacy history domain.
+- On 51Job `completion_state=completed_with_unresolved`, do not run send again. Report cumulative delivered, unavailable and unresolved outcomes separately, then run the exact `jobagent 51job audit` continuation. Unresolved is neither delivered nor failed and must never be clicked again.
 - Show `skipped_delivered` when present and never add those jobs back to the send list.
 - Never promote `review` without IDs chosen by the user and `--confirm-promote`. Never auto-promote `rejected`.
 - Starting the round authorizes discovery and signed review. Each platform's final list requires its own structured confirmation before real delivery.

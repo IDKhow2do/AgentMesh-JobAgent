@@ -161,6 +161,55 @@ def _seed_legacy_indeterminate(log: Job51AuditLog, job_id: str) -> None:
     )
 
 
+def _seed_prior_reconciliation(log: Job51AuditLog, job_id: str) -> None:
+    log.append(
+        Job51AuditEvent(
+            action="apply_send",
+            status="indeterminate",
+            error="delivery_indeterminate",
+            evidence={
+                "job_id": job_id,
+                "reconcile_attempt": 1,
+                "reconcile_limit": 2,
+                "steps": [
+                    {
+                        "step": "resume_51job_indeterminate_delivery",
+                        "ok": True,
+                        "will_click": False,
+                        "reconcile_attempt": 1,
+                    },
+                    {
+                        "step": "verify_51job_indeterminate_delivery",
+                        "ok": False,
+                        "will_click": False,
+                    },
+                ],
+            },
+        )
+    )
+
+
+def _install_missing_target_fixture(driver: CDPBossDriver) -> dict[str, Any]:
+    return driver._exec_js(
+        """
+        (function(){
+          document.body.innerHTML = `
+            <main id="app">
+              <section class="empty-state">No matching card in this result surface.</section>
+            </main>`;
+          return JSON.stringify({
+            ok: true,
+            readyState: document.readyState,
+            cardCount: document.querySelectorAll('.joblist-item').length,
+            applyControlCount: Array.from(document.querySelectorAll('button')).filter(
+              (node) => /投递|申请/.test(node.textContent || '')
+            ).length
+          });
+        })()
+        """
+    )
+
+
 def _write_report(report: dict[str, Any]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -263,6 +312,84 @@ def main() -> int:
             != "persisted_click_plus_stable_card_transition"
         ):
             report["status"] = "failed_read_only_reconciliation"
+            _write_report(report)
+            return 1
+
+        stage = "run_bounded_terminal_reconciliation"
+        terminal_fixture = _install_missing_target_fixture(driver)
+        if not (
+            terminal_fixture.get("ok")
+            and int(terminal_fixture.get("cardCount") or 0) == 0
+            and int(terminal_fixture.get("applyControlCount") or 0) == 0
+        ):
+            report["status"] = "failed_terminal_fixture_install"
+            _write_report(report)
+            return 1
+        terminal_job_id = "isolated-gate-unresolved"
+        with tempfile.TemporaryDirectory(prefix="job51-terminal-gate-") as directory:
+            terminal_audit = Job51AuditLog(path=Path(directory) / "audit.json")
+            _seed_legacy_indeterminate(terminal_audit, terminal_job_id)
+            _seed_prior_reconciliation(terminal_audit, terminal_job_id)
+            terminal_sender = Job51ApplySender(
+                driver=guarded_driver,
+                audit_log=terminal_audit,
+            )
+            terminal_job = {
+                "job_id": terminal_job_id,
+                "url": (
+                    "https://we.51job.com/pc/search"
+                    "#jobId=isolated-gate-unresolved"
+                ),
+            }
+            terminal_attempt = terminal_sender.send_batch(
+                [terminal_job],
+                wait_seconds=1,
+            )[0]
+            opens_after_terminal = guarded_driver.open_requests
+            repeated_attempt = terminal_sender.send_batch(
+                [terminal_job],
+                wait_seconds=1,
+            )[0]
+            terminal_summary = terminal_audit.outcome_summary({terminal_job_id})
+
+        terminal_steps = [
+            step
+            for step in terminal_attempt.steps
+            if isinstance(step, dict)
+        ]
+        repeated_steps = [
+            step
+            for step in repeated_attempt.steps
+            if isinstance(step, dict)
+        ]
+        report.update(
+            terminal_error=str(terminal_attempt.error or ""),
+            terminal_reconcile_attempt=max(
+                [int(step.get("reconcile_attempt") or 0) for step in terminal_steps]
+                or [0]
+            ),
+            terminal_repeat_error=str(repeated_attempt.error or ""),
+            terminal_repeat_open_requests=(
+                guarded_driver.open_requests - opens_after_terminal
+            ),
+            terminal_repeat_skipped=any(
+                step.get("step") == "skip_51job_terminal_delivery"
+                and step.get("will_click") is False
+                for step in repeated_steps
+            ),
+            terminal_summary=terminal_summary,
+        )
+        if not (
+            report["terminal_error"] == "delivery_unresolved"
+            and report["terminal_reconcile_attempt"] == 2
+            and report["terminal_repeat_error"] == "delivery_unresolved"
+            and report["terminal_repeat_open_requests"] == 0
+            and report["terminal_repeat_skipped"] is True
+            and terminal_summary.get("unresolved") == 1
+            and terminal_summary.get("terminal") == 1
+            and guarded_driver.mutating_script_attempts == 0
+        ):
+            report["status"] = "failed_bounded_terminal_reconciliation"
             _write_report(report)
             return 1
 

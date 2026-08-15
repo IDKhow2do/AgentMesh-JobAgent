@@ -178,6 +178,74 @@ def test_upgrade_migration_is_idempotent(tmp_path):
     assert (app_dir / "state" / "discoveries" / "boss-old.json").exists()
 
 
+def test_upgrade_migrates_legacy_51job_reconciliation_state_without_losing_click_evidence(
+    tmp_path,
+):
+    upgrade = importlib.import_module("jobagent.infra.client_upgrade")
+    app_dir = tmp_path / ".jobagent"
+    state = app_dir / "state"
+    _seed_preserved_state(app_dir)
+    _write_json(
+        state / "client_upgrade_state.json",
+        {
+            "client_version": "0.5.25",
+            "protocol_version": 1,
+            "state_migration_version": 5,
+            "status": "ready",
+        },
+    )
+    _write_json(
+        state / "job51_audit_log.json",
+        [
+            {
+                "action": "apply_send",
+                "status": "indeterminate",
+                "error": "delivery_indeterminate",
+                "created_at": "2026-08-15T01:00:00+00:00",
+                "evidence": {
+                    "job_id": "job-pending",
+                    "steps": [
+                        {"step": "click_51job_apply", "ok": True},
+                    ],
+                },
+            },
+            {
+                "action": "apply_send",
+                "status": "indeterminate",
+                "error": "delivery_indeterminate",
+                "created_at": "2026-08-15T01:05:00+00:00",
+                "evidence": {
+                    "job_id": "job-pending",
+                    "steps": [
+                        {
+                            "step": "resume_51job_indeterminate_delivery",
+                            "ok": True,
+                            "will_click": False,
+                        },
+                    ],
+                },
+            },
+        ],
+    )
+
+    report = upgrade.run_client_upgrade(
+        app_dir=app_dir,
+        current_version="0.5.26",
+        protocol_version=1,
+    )
+
+    records = json.loads((state / "job51_audit_log.json").read_text(encoding="utf-8"))
+    assert report["state_migration_version"] == 6
+    assert "state/job51_audit_log.json" in report["migrated"]
+    assert records[0]["evidence"]["delivery_state_version"] == 1
+    assert records[0]["evidence"]["reconcile_attempt"] == 0
+    assert records[0]["evidence"]["first_indeterminate_at"] == "2026-08-15T01:00:00+00:00"
+    assert records[1]["evidence"]["delivery_state_version"] == 1
+    assert records[1]["evidence"]["reconcile_attempt"] == 1
+    assert records[1]["evidence"]["reconcile_limit"] == 2
+    assert records[1]["evidence"]["first_indeterminate_at"] == "2026-08-15T01:00:00+00:00"
+
+
 def test_delivery_confirmation_upgrade_preserves_decision_and_requires_fresh_review(tmp_path):
     upgrade = importlib.import_module("jobagent.infra.client_upgrade")
     app_dir = tmp_path / ".jobagent"
@@ -254,7 +322,7 @@ def test_delivery_confirmation_upgrade_preserves_decision_and_requires_fresh_rev
         (state / "current_round.json").read_text(encoding="utf-8")
     )
     assert report["ok"] is True
-    assert report["state_migration_version"] == 5
+    assert report["state_migration_version"] == upgrade.STATE_MIGRATION_VERSION
     assert "delivery_preview" not in migrated_review
     assert "delivery_authorization" not in migrated_review
     assert [item["id"] for item in migrated_review["send_candidates"]] == [
@@ -352,7 +420,7 @@ def test_reviewability_upgrade_invalidates_pending_zhilian_preview_without_losin
         (state / "current_round.json").read_text(encoding="utf-8")
     )
     migrated_review = json.loads(review_path.read_text(encoding="utf-8"))
-    assert report["state_migration_version"] == 5
+    assert report["state_migration_version"] == upgrade.STATE_MIGRATION_VERSION
     assert decision_path.exists()
     assert migrated_review["manifest"] == signed_manifest
     assert "delivery_preview" not in migrated_review
