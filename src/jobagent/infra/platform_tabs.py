@@ -125,18 +125,27 @@ def ensure_platform_tab(
     platform: str,
     port: int,
     initial_url: str | None = None,
+    track_round: bool = True,
 ) -> dict[str, Any]:
     """Return a CDP page target for the requested platform and persist it."""
     platform = platform if platform in PLATFORM_TAB_DEFAULTS else "boss"
-    round_state = ensure_current_round()
-    mark_browser_session(f"local-cdp-{port}")
-
-    registry = _load_registry()
-    tabs = registry.setdefault("tabs", {})
-    item = tabs.get(platform, {})
+    round_state = None
+    registry: dict[str, Any] | None = None
+    tabs: dict[str, Any] = {}
+    item: dict[str, Any] = {}
+    if track_round:
+        round_state = ensure_current_round()
+        mark_browser_session(f"local-cdp-{port}")
+        registry = _load_registry()
+        tabs = registry.setdefault("tabs", {})
+        item = tabs.get(platform, {})
     targets = list_targets(port)
 
-    target = _find_target_by_id(targets, str(item.get("target_id") or ""))
+    target = (
+        _find_target_by_id(targets, str(item.get("target_id") or ""))
+        if track_round
+        else None
+    )
     if target and not _target_matches_platform(target, platform):
         target = None
     if target is None:
@@ -148,16 +157,17 @@ def ensure_platform_tab(
     if target_id:
         _activate_target(port, target_id)
 
-    tabs[platform] = {
-        "target_id": target_id,
-        "url": target.get("url", ""),
-        "title": target.get("title", ""),
-        "webSocketDebuggerUrl": target.get("webSocketDebuggerUrl", ""),
-        "last_seen_at": utc_now(),
-    }
-    registry["round_id"] = round_state["round_id"]
-    registry["updated_at"] = utc_now()
-    _save_registry(registry)
+    if track_round and registry is not None and round_state is not None:
+        tabs[platform] = {
+            "target_id": target_id,
+            "url": target.get("url", ""),
+            "title": target.get("title", ""),
+            "webSocketDebuggerUrl": target.get("webSocketDebuggerUrl", ""),
+            "last_seen_at": utc_now(),
+        }
+        registry["round_id"] = round_state["round_id"]
+        registry["updated_at"] = utc_now()
+        _save_registry(registry)
 
     if not target.get("webSocketDebuggerUrl"):
         raise RuntimeError(f"CDP target for platform `{platform}` has no WebSocket URL")

@@ -498,6 +498,53 @@ def test_platform_tab_registry_creates_missing_platform_target(monkeypatch, tmp_
     assert target["webSocketDebuggerUrl"] == "ws://new"
 
 
+def test_untracked_platform_tab_does_not_require_or_write_round_state(
+    monkeypatch,
+    tmp_path,
+):
+    registry_path = tmp_path / "platform_tabs.json"
+    monkeypatch.setattr(platform_tabs, "platform_tabs_path", lambda: registry_path)
+    monkeypatch.setattr(
+        platform_tabs,
+        "ensure_current_round",
+        lambda: (_ for _ in ()).throw(AssertionError("round must not be read")),
+    )
+    monkeypatch.setattr(
+        platform_tabs,
+        "mark_browser_session",
+        lambda _session_id: (_ for _ in ()).throw(
+            AssertionError("round must not be changed")
+        ),
+    )
+    monkeypatch.setattr(
+        platform_tabs,
+        "list_targets",
+        lambda _port: [
+            {
+                "id": "canary-target",
+                "type": "page",
+                "url": "https://www.zhipin.com/",
+                "title": "Boss",
+                "webSocketDebuggerUrl": "ws://canary",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        platform_tabs,
+        "_activate_target",
+        lambda _port, _target_id: None,
+    )
+
+    target = platform_tabs.ensure_platform_tab(
+        platform="boss",
+        port=19322,
+        track_round=False,
+    )
+
+    assert target["webSocketDebuggerUrl"] == "ws://canary"
+    assert not registry_path.exists()
+
+
 def test_adopt_platform_tab_target_updates_registry_before_closing_previous(
     monkeypatch,
     tmp_path,
