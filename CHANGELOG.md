@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.25] - 2026-08-15
+
+### Fixed
+
+- Verify 51Job resume submission from the current `we.51job.com` surface using an explicit success notice or a stable, exact-card apply-button transition instead of depending on the legacy application-history domain, whose login session may be separate.
+- Recover older clicked-but-unverified audit records as an idempotent `delivery_indeterminate` state. A later missing card no longer erases the observed click, and recovery inspects before deciding without clicking that job again.
+- Continue the authorized batch after one uncertain item while reporting delivered, unavailable and indeterminate jobs separately; never convert an observed click into `job_unavailable` or claim an uncertain submission as delivered.
+- Preserve the original delivery preview, authorization, round and Discover result during reconciliation. The exact returned recovery command adds no cloud charge and does not recollect candidates.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, round, paid Discover, signed decision, preview, authorization and audits remain in place. Follow the exact top-level `next_suggested` command after upgrade; do not start another round, repeat Discover, delete `~/.jobagent` or re-click a pending 51Job item.
+
 ## [0.5.24] - 2026-08-15
 
 ### Fixed

@@ -28,6 +28,7 @@ from jobagent.platforms.message_contract import validate_personalized_message
 
 
 _SKIPPED_SEND_ERRORS = {"already_delivered", "job_unavailable"}
+_INDETERMINATE_SEND_ERRORS = {"delivery_indeterminate"}
 
 
 @dataclass
@@ -402,9 +403,14 @@ def send_reviewed(
     failed = sum(
         1
         for attempt in attempts
-        if not attempt.delivered and attempt.error not in _SKIPPED_SEND_ERRORS
+        if not attempt.delivered
+        and attempt.error not in _SKIPPED_SEND_ERRORS
+        and attempt.error not in _INDETERMINATE_SEND_ERRORS
     )
     skipped = sum(1 for attempt in attempts if attempt.error in _SKIPPED_SEND_ERRORS)
+    indeterminate = sum(
+        1 for attempt in attempts if attempt.error in _INDETERMINATE_SEND_ERRORS
+    )
     emit_stage(
         "delivery_completed",
         platform=platform,
@@ -412,6 +418,7 @@ def send_reviewed(
         delivered=delivered,
         failed=failed,
         skipped=skipped,
+        indeterminate=indeterminate,
     )
     print_first_delivery_star_prompt_once(
         platform=platform,
@@ -419,7 +426,12 @@ def send_reviewed(
         delivered=delivered,
         dry_run=dry_run,
     )
-    complete_batch = failed == 0 and len(jobs) == len(all_jobs)
+    complete_batch = (
+        failed == 0
+        and indeterminate == 0
+        and len(attempts) == len(jobs)
+        and len(jobs) == len(all_jobs)
+    )
     next_suggested = (
         f"jobagent {platform} audit"
         if complete_batch
@@ -451,6 +463,7 @@ def send_reviewed(
             "delivered": delivered,
             "failed": failed,
             "skipped": skipped,
+            "indeterminate": indeterminate,
             "reviewed_count": len(all_jobs),
         },
         next_suggested=next_suggested,
@@ -461,7 +474,7 @@ def send_reviewed(
     )
 
     pending = load_pending_interaction()
-    if pending and str(pending.get("stage") or "") == "delivery_authorized":
+    if complete_batch and pending and str(pending.get("stage") or "") == "delivery_authorized":
         context = pending.get("context") or {}
         if (
             str(context.get("platform") or "") == platform
@@ -469,16 +482,33 @@ def send_reviewed(
         ):
             clear_pending_interaction()
     return {
-        "ok": failed == 0,
+        "ok": failed == 0 and indeterminate == 0,
         "platform": platform,
         "discover_id": reviewed["discover_id"],
         "attempted": len(attempts),
         "delivered": delivered,
         "failed": failed,
         "skipped": skipped,
+        "indeterminate": indeterminate,
         "dry_run": dry_run,
         "attempts": [attempt.to_dict() for attempt in attempts],
         "next_suggested": next_suggested,
+        "error": "delivery_verification_indeterminate" if indeterminate > 0 else "",
+        "retryable": indeterminate > 0,
+        "requires_user_action": False,
+        "message": (
+            "51Job 已观察到投递动作，但仍有岗位缺少足够的最终核验证据。"
+            "其余岗位已继续处理；不要重建轮次、重新 Discover 或重复点击这些待核验岗位。"
+            if indeterminate > 0
+            else ""
+        ),
+        "delivery_state_preserved": indeterminate > 0,
+        "request_preserved": indeterminate > 0,
+        "preview_preserved": bool(indeterminate > 0 and preview_id),
+        "authorization_preserved": bool(indeterminate > 0 and authorization_id),
+        "no_charge": True,
+        "billing": {"additional_credits": 0},
+        "additional_credits": 0,
         "workflow": rounds.round_status(),
     }
 
@@ -511,6 +541,7 @@ def _failed_record(record: dict[str, Any]) -> bool:
         "already_delivered",
         "dry_run",
         "job_unavailable",
+        "delivery_indeterminate",
     }:
         return True
     return False

@@ -394,3 +394,92 @@ def test_empty_delivery_preview_is_visible_and_can_advance_without_platform_acti
     assert result["attempted"] == 0
     assert result["next_suggested"] == "jobagent 51job audit"
     assert statuses[0][1] == "sent"
+
+
+def test_51job_indeterminate_delivery_preserves_authorization_and_exact_resume(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+
+    from jobagent.application import delivery
+    from jobagent.domain.models import SendAttempt
+    from jobagent.infra import interaction_state
+
+    reviewed = {
+        "discover_id": "dis-preserved",
+        "send_candidates": [
+            {"job_id": "job-pending", "url": "https://example.invalid/pending"},
+            {"job_id": "job-complete", "url": "https://example.invalid/complete"},
+        ],
+        "source_path": "/tmp/preserved.review.json",
+    }
+    statuses = []
+    cleared = []
+    monkeypatch.setattr(delivery, "_load_reviewed", lambda *_args, **_kwargs: reviewed)
+    monkeypatch.setattr(delivery, "_check_apply_login", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        delivery,
+        "_apply_send",
+        lambda *_args, **_kwargs: [
+            SendAttempt(
+                job_url="https://example.invalid/pending",
+                message="",
+                delivered=False,
+                error="delivery_indeterminate",
+            ),
+            SendAttempt(
+                job_url="https://example.invalid/complete",
+                message="",
+                delivered=True,
+            ),
+        ],
+    )
+    monkeypatch.setattr(delivery, "progress_heartbeat", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "active_command", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "emit_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(delivery, "print_first_delivery_star_prompt_once", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        delivery.rounds,
+        "set_platform_status",
+        lambda platform, status, **kwargs: statuses.append((platform, status, kwargs)),
+    )
+    monkeypatch.setattr(
+        delivery.rounds,
+        "round_status",
+        lambda: {"round_id": "round-preserved", "current_platform": "51job"},
+    )
+    monkeypatch.setattr(
+        interaction_state,
+        "load_pending_interaction",
+        lambda: {
+            "stage": "delivery_authorized",
+            "context": {"platform": "51job", "authorization_id": "auth-preserved"},
+        },
+    )
+    monkeypatch.setattr(interaction_state, "clear_pending_interaction", lambda: cleared.append(True))
+
+    result = delivery.send_reviewed(
+        "51job",
+        input_path="/tmp/preserved.review.json",
+        preview_id="preview-preserved",
+        authorization_id="auth-preserved",
+        limit=100,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "delivery_verification_indeterminate"
+    assert result["retryable"] is True
+    assert result["requires_user_action"] is False
+    assert result["failed"] == 0
+    assert result["indeterminate"] == 1
+    assert result["delivered"] == 1
+    assert result["authorization_preserved"] is True
+    assert result["request_preserved"] is True
+    assert result["no_charge"] is True
+    assert result["billing"] == {"additional_credits": 0}
+    assert result["additional_credits"] == 0
+    assert "--preview-id preview-preserved" in result["next_suggested"]
+    assert "--authorization-id auth-preserved" in result["next_suggested"]
+    assert statuses[0][1] == "reviewed"
+    assert cleared == []

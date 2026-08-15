@@ -33,9 +33,16 @@ class CDPBossDriver(BossActionDriver):
     and controls it via WebSocket CDP commands.
     """
 
-    def __init__(self, manager: ChromeInstanceManager | None = None, platform: str = "boss"):
+    def __init__(
+        self,
+        manager: ChromeInstanceManager | None = None,
+        platform: str = "boss",
+        *,
+        track_round: bool = True,
+    ):
         self.manager = manager or ChromeInstanceManager()
         self.platform = platform
+        self.track_round = track_round
         self.current_platform = ""
         self.current_target_id = ""
         self.cdp = CDPClient()
@@ -57,10 +64,15 @@ class CDPBossDriver(BossActionDriver):
         if self.cdp.connected and current_platform == target_platform and not force:
             return
         self.manager.ensure_running()
+        tab_options: dict[str, Any] = {
+            "platform": target_platform,
+            "port": self.manager.port,
+            "initial_url": initial_url or default_url_for_platform(target_platform),
+        }
+        if not getattr(self, "track_round", True):
+            tab_options["track_round"] = False
         target = ensure_platform_tab(
-            platform=target_platform,
-            port=self.manager.port,
-            initial_url=initial_url or default_url_for_platform(target_platform),
+            **tab_options,
         )
         ws_url = target["webSocketDebuggerUrl"]
         self.cdp.connect(ws_url)

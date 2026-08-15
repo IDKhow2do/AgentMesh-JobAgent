@@ -19,6 +19,7 @@ This is the public instruction source for an Agent operating Job Agent on behalf
 13. Continue the user's answer through the exact interaction ID. For exclusions, pass each displayed job number as `--exclude-index`, show the regenerated complete list, and stop for final confirmation again. Run send only after the CLI returns `event=delivery_authorized` with both `--preview-id` and `--authorization-id` in its exact command.
 14. When send returns `delivery_preview_required` or `delivery_confirmation_required`, run only its safe review recovery command. Preserve prior promotions, do not recollect or recharge, and obtain a fresh user confirmation.
 15. If Zhilian review detects a generic title or missing company/salary in a preserved signed decision, run its exact `jobagent zhilian apply review` recovery. It reads only the signed detail URLs, repairs trusted fields and safely excludes only a candidate that remains unreviewable, then replaces the signature on the same Discover with zero additional credits. It regenerates the remaining complete preview and still waits for confirmation. Never create a replacement round or Discover.
+16. When 51Job send returns `delivery_verification_indeterminate`, `retryable=true` and `request_preserved=true`, immediately run its exact `next_suggested` command with the same preview and authorization. The CLI reconciles clicked jobs from current-site evidence without clicking them again and continues the remaining authorized jobs. Do not rebuild the round, repeat Discover, clear state or manually retry a pending card.
 
 ## Goal, Actions and Acceptance
 
@@ -237,6 +238,8 @@ jobagent 51job audit
 ```
 
 猎聘 must deliver both the account resume and the signed personalized greeting for each selected job. Verify the resume card/message and the exact greeting separately; the platform's default introduction is not the personalized greeting. 智联和 51Job only submit the account resume. The 51Job web chat entry is a QR handoff and is not part of the send flow.
+
+51Job submission is verified on the current `we.51job.com` surface. If a click was observed but final proof is still insufficient, the CLI records `delivery_indeterminate`, continues other authorized jobs, preserves the same preview and authorization, and returns an exact zero-additional-credit reconciliation command. Run that command as instructed; it inspects pending jobs before any decision and never repeats their apply click. Do not use the legacy application-history login page as proof that the current 51Job session is logged out.
 
 ## 5. Handling Review Jobs
 
