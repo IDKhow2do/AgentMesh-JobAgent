@@ -51,7 +51,7 @@ The official installer creates a managed installation. Starting with `0.3.0`, ma
 ```bash
 jobagent init --key <your_api_key>
 jobagent doctor env
-jobagent resume analyze --file ~/Downloads/resume.pdf
+jobagent resume analyze --file ~/Downloads/resume.pdf --target-cities <city1> [city2 ...]
 jobagent round start
 ```
 
@@ -60,7 +60,7 @@ the user already chose one. When the user explicitly states a target role, pass
 that exact intent directly:
 
 ```bash
-jobagent resume analyze --file ~/Downloads/resume.pdf --target-role "<user-stated target role>"
+jobagent resume analyze --file ~/Downloads/resume.pdf --target-role "<user-stated target role>" --target-cities <city1> [city2 ...]
 jobagent round start --target-role "<user-stated target role>"
 ```
 
@@ -94,7 +94,11 @@ Start a new round explicitly. Reading status never creates a round:
 jobagent round start
 ```
 
-When no target role was supplied, `round start` returns an AgentMesh360
+At least one target city is required. A fresh `resume analyze` asks for cities
+before the cloud call when none were supplied or saved, preventing a second
+paid analysis just to repair an empty city. An older city-less profile receives
+a structured city-input interaction from `round start`; answer it with repeated
+`--target-city` arguments. When no target role was supplied, `round start` returns an AgentMesh360
 `interaction_required` payload with three stable choices: accept the suggested
 roles, keep them and append roles, or replace them. A host Agent must render a
 native prompt card when the card interface is callable in its current surface
@@ -112,6 +116,7 @@ jobagent interaction respond --interaction-id "<id>" --choice accept_suggested
 jobagent interaction respond --interaction-id "<id>" --choice append_roles
 jobagent interaction respond --interaction-id "<id>" --choice replace_roles
 jobagent interaction respond --interaction-id "<id>" --target-role "<user-stated target role>"
+jobagent interaction respond --interaction-id "<id>" --target-city "<city1>" --target-city "<city2>"
 jobagent round status
 ```
 
@@ -131,6 +136,11 @@ jobagent round start --accept-suggested --target-role "<user-stated target role>
 The confirmed target roles belong to this round and do not rewrite resume job
 history. If the user already named a target role, the host Agent passes it
 directly and does not ask again.
+
+If the user explicitly refreshes the profile before any candidate or delivery
+evidence exists, Job Agent safely rebinds the active round and preserves a recent
+login receipt. Once discovery has progressed, profile replacement fails closed;
+the CLI never mixes old search results with a new city or resume.
 
 Every platform command returns a `workflow` object. A platform audit does not end the overall task while `workflow.continue_required=true`; the Agent must run `workflow.next_suggested` and continue to the next platform. The overall task is complete only when `workflow.workflow_complete=true`. A platform may be skipped for the current round only after the user explicitly approves:
 

@@ -124,6 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target role supplied for append or replace choices; repeat for multiple roles",
     )
     interaction_respond.add_argument(
+        "--target-city",
+        action="append",
+        default=[],
+        help="Target city supplied for city confirmation; repeat for multiple cities",
+    )
+    interaction_respond.add_argument(
         "--exclude-index",
         action="append",
         type=int,
@@ -484,16 +490,62 @@ def _doctor_env() -> dict[str, Any]:
 
 def _resume_analyze(args: argparse.Namespace) -> dict[str, Any]:
     from jobagent.domain.resume_parser import ResumeParser
+    from jobagent.application.round_intent import (
+        confirmed_target_cities,
+        with_target_cities,
+    )
     from jobagent.infra import cloud_client
-    from jobagent.infra.state import profile_path, save_json
+    from jobagent.infra import rounds
+    from jobagent.infra.state import (
+        current_round_path,
+        load_json,
+        profile_path,
+        save_json,
+    )
 
     source = Path(args.file).expanduser()
+    canonical_profile_path = profile_path()
+    output = Path(args.output).expanduser() if args.output else canonical_profile_path
+    existing_profile = load_json(canonical_profile_path) or {}
+    target_cities = list(args.target_cities or confirmed_target_cities(existing_profile))
+    if not target_cities:
+        prompt = (
+            "当前简历画像还没有目标城市。请告诉我本轮想看的城市，可以填写多个，"
+            "例如：郑州、杭州。"
+        )
+        return {
+            "ok": False,
+            "error": "target_cities_required",
+            "requires_user_action": True,
+            "user_action": "confirm_target_cities",
+            "user_prompt": prompt,
+            "next_suggested": (
+                "jobagent resume analyze --file <resume> "
+                "--target-cities <city1> [city2 ...]"
+            ),
+        }
+    if output == canonical_profile_path:
+        current = load_json(current_round_path()) or {}
+        conflict = rounds.active_round_profile_refresh_conflict(current)
+        if conflict is not None:
+            return {
+                "ok": False,
+                "error": "profile_update_blocked_active_round",
+                "message": conflict["message"],
+                "conflict": conflict["code"],
+                "requires_user_action": True,
+                "user_prompt": (
+                    "当前轮次已经产生可审计进度，不能在本轮中更换简历画像。"
+                    "请先查看当前轮次状态。"
+                ),
+                "next_suggested": "jobagent round status",
+            }
     text = ResumeParser().parse(source)
     hints = {
         key: value
         for key, value in {
             "target_role": args.target_role,
-            "target_cities": args.target_cities,
+            "target_cities": target_cities,
         }.items()
         if value
     }
@@ -501,19 +553,33 @@ def _resume_analyze(args: argparse.Namespace) -> dict[str, Any]:
     from jobagent.infra.profile_contract import stamp_profile
 
     profile = stamp_profile(response["profile"])
-    output = Path(args.output).expanduser() if args.output else profile_path()
+    profile, target_cities = with_target_cities(profile, target_cities)
     save_json(output, profile)
-    return {
+    result = {
         "ok": True,
         "profile_path": str(output),
+        "target_cities": target_cities,
         "next_suggested": "jobagent round start",
     }
+    if output == canonical_profile_path:
+        reconciliation = rounds.reconcile_active_round_profile(profile)
+        workflow = reconciliation["workflow"]
+        if workflow.get("status") == "active":
+            result.update(
+                {
+                    "profile_reconciled": reconciliation["changed"],
+                    "workflow": workflow,
+                    "next_suggested": workflow.get("next_suggested"),
+                }
+            )
+    return result
 
 
 def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
     from jobagent.application.round_intent import (
         build_round_intent_from_choice,
         target_role_input_request,
+        with_target_cities,
     )
     from jobagent.infra.interaction_state import (
         clear_pending_interaction,
@@ -521,8 +587,18 @@ def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
         save_pending_interaction,
     )
     from jobagent.infra.protocol import digest_payload
-    from jobagent.infra.rounds import round_status, start_new_round, utc_now
-    from jobagent.infra.state import current_round_path, load_json, profile_path
+    from jobagent.infra.rounds import (
+        reconcile_active_round_profile,
+        round_status,
+        start_new_round,
+        utc_now,
+    )
+    from jobagent.infra.state import (
+        current_round_path,
+        load_json,
+        profile_path,
+        save_json,
+    )
 
     interaction_id = str(args.interaction_id or "").strip()
     pending = load_pending_interaction()
@@ -618,6 +694,38 @@ def _interaction_respond(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     stage = str(pending.get("stage") or "")
+    if stage == "cities" or str(pending.get("kind") or "") == "target_city_input":
+        try:
+            updated_profile, target_cities = with_target_cities(
+                profile,
+                list(args.target_city or []),
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": "invalid_interaction_response",
+                "message": str(exc),
+                "next_suggested": str(
+                    (pending.get("interaction") or {}).get("fallback_text") or ""
+                ),
+            }
+        save_json(profile_path(), updated_profile)
+        reconciliation = reconcile_active_round_profile(updated_profile)
+        clear_pending_interaction()
+        workflow = reconciliation["workflow"]
+        next_suggested = (
+            workflow.get("next_suggested")
+            if workflow.get("status") == "active"
+            else "jobagent round start"
+        )
+        return {
+            "ok": True,
+            "target_cities": target_cities,
+            "profile_reconciled": reconciliation["changed"],
+            "workflow": workflow,
+            "next_suggested": next_suggested,
+        }
+
     choice = str(args.choice or pending.get("choice") or "")
     if stage == "choice" and not args.choice:
         return {
@@ -997,6 +1105,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.round_command == "start":
             from jobagent.application.round_intent import (
                 build_round_intent,
+                confirmed_target_cities,
+                target_city_input_request,
                 target_role_confirmation,
             )
             from jobagent.infra.interaction_state import (
@@ -1007,6 +1117,39 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             from jobagent.infra.state import current_round_path, load_json, profile_path
 
             current = load_json(current_round_path())
+            profile = load_json(profile_path())
+            if not profile:
+                return {
+                    "ok": False,
+                    "error": "profile_required",
+                    "message": "Analyze a resume before confirming target roles.",
+                    "next_suggested": "jobagent resume analyze --file <resume>",
+                }
+            if not confirmed_target_cities(profile):
+                confirmation = target_city_input_request(
+                    profile,
+                    previous_round_id=(
+                        str(current.get("round_id"))
+                        if current and current.get("round_id")
+                        else None
+                    ),
+                )
+                save_pending_interaction(
+                    confirmation["interaction"],
+                    stage="cities",
+                    profile_digest=digest_payload(profile),
+                    previous_round_id=(
+                        str(current.get("round_id"))
+                        if current and current.get("round_id")
+                        else None
+                    ),
+                )
+                return confirmation
+            if current and current.get("status") == "active" and current.get("round_id"):
+                from jobagent.infra.rounds import reconcile_active_round_profile
+
+                reconcile_active_round_profile(profile)
+                current = load_json(current_round_path())
             if (
                 current
                 and current.get("status") == "active"
@@ -1017,14 +1160,6 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 clear_pending_interaction()
                 start_new_round()
                 return {"ok": True, "workflow": round_status()}
-            profile = load_json(profile_path())
-            if not profile:
-                return {
-                    "ok": False,
-                    "error": "profile_required",
-                    "message": "Analyze a resume before confirming target roles.",
-                    "next_suggested": "jobagent resume analyze --file <resume>",
-                }
             if not args.accept_suggested and not args.target_role:
                 confirmation = target_role_confirmation(
                     profile,

@@ -90,6 +90,19 @@ def test_public_parser_exposes_only_v3_platform_commands():
     )
     assert round_start.accept_suggested is True
     assert round_start.target_role == ["数据运营经理"]
+    interaction = parser.parse_args(
+        [
+            "interaction",
+            "respond",
+            "--interaction-id",
+            "city-1",
+            "--target-city",
+            "郑州",
+            "--target-city",
+            "杭州",
+        ]
+    )
+    assert interaction.target_city == ["郑州", "杭州"]
     assert (
         parser.parse_args(["round", "audit", "--failures-only"]).failures_only is True
     )
@@ -179,13 +192,57 @@ def test_resume_analyze_stamps_profile_schema_version(tmp_path, monkeypatch):
         },
     )
     args = build_parser().parse_args(
-        ["resume", "analyze", "--file", str(source), "--output", str(output)]
+        [
+            "resume",
+            "analyze",
+            "--file",
+            str(source),
+            "--target-cities",
+            "深圳",
+            "--output",
+            str(output),
+        ]
     )
 
     cli._resume_analyze(args)
 
     saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["schema_version"] >= 1
+
+
+def test_first_resume_analysis_requires_target_cities_before_cloud_call(
+    tmp_path,
+    monkeypatch,
+):
+    from jobagent import cli
+
+    source = tmp_path / "resume.txt"
+    source.write_text("A sufficiently long resume body for city testing.", encoding="utf-8")
+    monkeypatch.setattr(
+        "jobagent.domain.resume_parser.ResumeParser.parse",
+        lambda self, path: source.read_text(),
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.cloud_client.resume_analyze",
+        lambda *_args, **_kwargs: pytest.fail("missing cities reached the cloud"),
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.state.profile_path",
+        lambda: tmp_path / "profile.json",
+    )
+
+    result = cli._resume_analyze(
+        build_parser().parse_args(["resume", "analyze", "--file", str(source)])
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "target_cities_required"
+    assert result["requires_user_action"] is True
+    assert "本轮想看的城市" in result["user_prompt"]
+    assert result["next_suggested"] == (
+        "jobagent resume analyze --file <resume> --target-cities <city1> [city2 ...]"
+    )
+    assert not (tmp_path / "profile.json").exists()
 
 
 def test_init_rejects_legacy_license_key_without_overwriting_credentials(monkeypatch):
