@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from jobagent.infra.protocol import digest_payload
 from jobagent.infra.state import current_round_path, rounds_dir, save_json, load_json
 
 DEFAULT_PLATFORM_ORDER = ["boss", "liepin", "zhilian", "51job"]
@@ -196,6 +198,201 @@ def _same_intent(current: Any, requested: dict[str, Any]) -> bool:
     return current_roles == requested_roles
 
 
+_PROFILE_REFRESH_SAFE_STATUSES = {"pending", "login_verified", "active", "blocked"}
+_PROFILE_REFRESH_UNSAFE_EVIDENCE = {
+    "discover_id",
+    "preview_id",
+    "authorization_id",
+    "attempted",
+    "delivered",
+    "reviewed_count",
+}
+
+
+def active_round_profile_refresh_conflict(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Return why an active round cannot be rebound to a newly analyzed profile."""
+
+    if state.get("status") != "active" or not state.get("round_id"):
+        return None
+    intent = state.get("intent")
+    if not isinstance(intent, dict) or intent.get("status") != "confirmed":
+        return {
+            "code": "active_round_intent_not_confirmed",
+            "message": "The active round does not have a confirmed target-role intent.",
+        }
+    platforms = state.get("platforms")
+    if not isinstance(platforms, dict):
+        return {
+            "code": "active_round_platform_state_invalid",
+            "message": "The active round platform state is invalid.",
+        }
+    for platform in state.get("platform_order") or DEFAULT_PLATFORM_ORDER:
+        item = platforms.get(platform) or {}
+        status = str(item.get("status") or "pending")
+        if status not in _PROFILE_REFRESH_SAFE_STATUSES:
+            return {
+                "code": "active_round_already_progressed",
+                "message": (
+                    f"The active round already progressed to {platform}:{status}; "
+                    "its profile binding cannot be changed."
+                ),
+            }
+        evidence = item.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        resume_status = str(evidence.get("resume_status") or "")
+        if resume_status and resume_status not in _PROFILE_REFRESH_SAFE_STATUSES:
+            return {
+                "code": "active_round_already_progressed",
+                "message": (
+                    f"The active round has resumable {platform}:{resume_status} progress; "
+                    "its profile binding cannot be changed."
+                ),
+            }
+        for key in _PROFILE_REFRESH_UNSAFE_EVIDENCE:
+            value = evidence.get(key)
+            if value is not None and value != "" and value != 0 and value is not False:
+                return {
+                    "code": "active_round_has_delivery_evidence",
+                    "message": (
+                        f"The active round already records {platform} {key}; "
+                        "its profile binding cannot be changed."
+                    ),
+                }
+    return None
+
+
+def _round_current_platform(state: dict[str, Any]) -> str | None:
+    platforms = state.get("platforms") or {}
+    for platform in state.get("platform_order") or DEFAULT_PLATFORM_ORDER:
+        status = str((platforms.get(platform) or {}).get("status") or "pending")
+        if status not in TERMINAL_PLATFORM_STATUSES:
+            return platform
+    return None
+
+
+def _login_receipt_is_recent(
+    state: dict[str, Any],
+    platform: str,
+    login: dict[str, Any],
+) -> bool:
+    if not login.get("logged_in"):
+        return False
+    if str(login.get("platform") or "") != platform:
+        return False
+    if str(login.get("round_id") or "") != str(state.get("round_id") or ""):
+        return False
+    if str(login.get("browser_session_id") or "") != str(
+        state.get("browser_session_id") or ""
+    ):
+        return False
+    try:
+        verified_at = datetime.fromisoformat(
+            str(login.get("verified_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    if verified_at.tzinfo is None:
+        verified_at = verified_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - verified_at).total_seconds()
+    return -300 <= age_seconds <= PLATFORM_LOGIN_VERIFICATION_TTL_SECONDS
+
+
+def reconcile_round_profile_payload(
+    state: dict[str, Any],
+    profile: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Rebind a pre-delivery active round to an explicitly updated profile."""
+
+    updated = deepcopy(state)
+    intent = updated.get("intent")
+    if not isinstance(intent, dict) or intent.get("status") != "confirmed":
+        return updated, False
+    current_digest = str(intent.get("profile_digest") or "")
+    profile_digest = digest_payload(profile)
+    if current_digest == profile_digest:
+        return updated, False
+    conflict = active_round_profile_refresh_conflict(updated)
+    if conflict is not None:
+        raise RoundOrderError(
+            {
+                "ok": False,
+                "error": "active_round_profile_changed",
+                "message": conflict["message"],
+                "conflict": conflict["code"],
+                "round_id": updated.get("round_id"),
+                "next_suggested": "jobagent round status",
+            }
+        )
+    intent["profile_digest"] = profile_digest
+    reconciled_at = utc_now()
+    updated["profile_reconciliation"] = {
+        "reason": "pre_delivery_profile_update",
+        "from_profile_digest": current_digest or None,
+        "to_profile_digest": profile_digest,
+        "reconciled_at": reconciled_at,
+    }
+    platform = _round_current_platform(updated)
+    if platform:
+        item = (updated.get("platforms") or {}).setdefault(platform, {"status": "pending"})
+        evidence = item.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+        login = evidence.get("login")
+        evidence.pop("error", None)
+        evidence.pop("resume_status", None)
+        evidence.pop("resume_next_suggested", None)
+        if evidence:
+            item["evidence"] = evidence
+        else:
+            item.pop("evidence", None)
+        status = (
+            "login_verified"
+            if isinstance(login, dict)
+            and _login_receipt_is_recent(updated, platform, login)
+            else "pending"
+        )
+        item["status"] = status
+        item["updated_at"] = reconciled_at
+        item["next_suggested"] = _default_next_command(platform, status)
+    return updated, True
+
+
+def reconcile_active_round_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Persist a safe profile rebind and invalidate only its stale start request."""
+
+    state = load_json(current_round_path())
+    if not state or state.get("status") != "active" or not state.get("round_id"):
+        return {"changed": False, "workflow": round_status()}
+    platform = _round_current_platform(state)
+    if platform:
+        from jobagent.infra.discovery_state import (
+            clear_pending_start,
+            load_pending_decision,
+        )
+
+        if load_pending_decision(platform) is not None:
+            raise RoundOrderError(
+                {
+                    "ok": False,
+                    "error": "active_round_profile_changed",
+                    "message": (
+                        "The active round already has a preserved signed decision; "
+                        "its profile binding cannot be changed."
+                    ),
+                    "conflict": "active_round_has_pending_decision",
+                    "round_id": state.get("round_id"),
+                    "next_suggested": "jobagent round status",
+                }
+            )
+    updated, changed = reconcile_round_profile_payload(state, profile)
+    if changed:
+        if platform:
+            clear_pending_start(platform)
+        save_round(updated)
+    return {"changed": changed, "workflow": round_status()}
+
+
 def save_round(state: dict[str, Any]) -> None:
     state["updated_at"] = utc_now()
     save_json(current_round_path(), state)
@@ -382,6 +579,7 @@ def round_status() -> dict[str, Any]:
         "platform_order": order,
         "browser_session_id": state.get("browser_session_id"),
         "intent": state.get("intent"),
+        "profile_reconciliation": state.get("profile_reconciliation"),
         "platforms": platforms,
         "current_platform": current_platform,
         "remaining_platforms": remaining,

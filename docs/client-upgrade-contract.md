@@ -23,7 +23,7 @@
 | `state/profile.json` | 保留并校验 schema | 可兼容则原样保留；不兼容时阻断平台命令并要求重新分析简历 |
 | 四个平台 audit log | 永远保留 | 它们是投递、消息送达和去重证据，不参与缓存清理 |
 | `state/support_state.json` | 保留 | 首次投递后的单次提示状态不得因升级重置 |
-| `state/current_round.json` | 按 schema 迁移 | v2 活动 round 原样保留平台进度并标记 `legacy_implicit` 目标岗位意图；状态迁移 v4 将旧版尚未发送的 `reviewed` 平台退回 `awaiting_delivery_confirmation`，不得沿用旧自动发送命令；更旧且含义不明确的平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
+| `state/current_round.json` | 按 schema 迁移 | v2 活动 round 原样保留平台进度并标记 `legacy_implicit` 目标岗位意图；状态迁移 v4 将旧版尚未发送的 `reviewed` 平台退回 `awaiting_delivery_confirmation`，不得沿用旧自动发送命令；状态迁移 v7 仅允许尚未产生候选、签名决策、预览、授权或投递证据的活动轮次重新绑定用户明确更新后的画像；更旧且含义不明确的平台状态重置为安全的待执行状态；损坏 JSON 保留到 archive 后重建 |
 | `state/rounds/` | 保留 | 历史轮次不覆盖、不删除 |
 | `state/discoveries/` | 同协议保留，协议变化时归档 | 归档到 `state/archive/`，不得连同 audit 一起删除；状态迁移 v4 只移除旧 review 文件中的自动继续预览与旧授权，保留签名 manifest、`send_candidates`、用户提升项和 pending Discover，从 review 原地重建清单，不重新采集或收费 |
 | `state/pending_interaction.json` | 按交互类型迁移 | 目标岗位等仍有效交互原样保留；旧投递确认交互在迁移 v4 清除并从保留的 review 重新生成，避免旧交互 ID 授权新清单 |
@@ -77,6 +77,7 @@
 - `0.5.9 -> 0.5.10`：不迁移或清理任何持久状态。升级只替换智联会话证据裁决器：常驻通用登录入口降为弱证据，独立账户导航与简历/投递活动证据达到阈值时继续当前登录会话；强登录界面与强账户证据冲突时仍 fail closed。现有 profile、轮次、同一 Discover `request_id`、候选、计费状态、Chrome 登录态与 audit 全部保留。
 - `0.5.10 -> 0.5.11`：不迁移或清理任何持久状态。已保存的 Discover `request_id`、`discover_id` 与本地候选原样保留；有效签名 SearchPlan 跨过 TTL 后由 Server 针对同一请求重新签发，续签本身不收费，也不重新采集。签名篡改、账户错配、画像或意图上下文变化不能借过期恢复绕过校验，必须 fail closed。
 - `0.5.11 -> 0.5.12`：不迁移或清理任何持久状态。智联最近一次成功登录检查以短时凭证绑定当前 round、platform 与 managed Chrome session；结果页缺少首页账户区时可作为辅助证据，凭证过期、轮次或浏览器会话变化即失效，强登录表单或验证界面始终优先。采集失败保留该凭证与原 Discover `request_id`，页面已就绪但岗位 DOM 无法解析时返回 `zhilian_job_cards_not_found`、`retryable=true`、`no_charge=true`，不新建轮次、不重复登录、不重复收费。
+- `0.5.26 -> 0.5.27`：若用户在空城市的浏览器采集失败后明确补充了目标城市，且活动轮次尚未产生候选、签名决策、预览、授权或投递证据，则状态迁移 v7 原地更新该轮次的画像摘要，保留 round ID、账户、API Key、画像、Chrome profile、近期登录凭证与 audit，只清除与旧画像绑定且尚未收费的 Discover start 上下文，并从当前平台 Discover 继续。已有任何候选或投递进度时不自动重绑，返回冲突并保持原状态。
 - 损坏状态：原文件可追溯归档，后续命令不因 JSON 解析错误崩溃。
 - Release archive 校验固定 `tar.umask=002`，忽略系统级 Git 配置、全局 attributes 和 replace refs；发布机与客户机必须对同一 commit 得到相同 SHA256。
 - 旧客户端若返回 `release artifact hash mismatch`，不得关闭校验或删除 `~/.jobagent`。重新运行官方安装器一次以修复受管仓库配置，并保留账户状态、浏览器登录、画像、轮次和审计。

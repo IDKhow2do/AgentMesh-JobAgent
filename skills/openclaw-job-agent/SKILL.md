@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.26
+version: 0.5.27
 metadata:
   openclaw:
     emoji: "💼"
@@ -41,6 +41,7 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - Never stop after one platform. Follow `workflow.next_suggested` while `workflow.continue_required=true`; only `workflow.workflow_complete=true` ends the round.
 - Create a round only by executing `jobagent round start`. Never infer that `doctor env`, `round status` or a platform command created or authorized a new round.
 - Never copy a target role from README, skill examples, prior users or test data. Pass `--target-role` only when the current user explicitly stated that role; otherwise omit it and use the returned target-role interaction.
+- Require at least one user-confirmed target city. If `resume analyze` returns `target_cities_required`, ask for the cities and rerun the same resume command with `--target-cities`; no cloud analysis charge occurred. If `round start` returns `target_city_input`, continue through its exact interaction ID with repeated `--target-city` arguments. Never infer a city from browser location or old examples.
 - On `error=interaction_required`, render the structured `interaction` as a native host card only when the card interface is callable in the current surface and mode. Codex uses the ready-to-call `host_presentations.adapters.codex.arguments` when `request_user_input` is callable and maps the returned label through `answer_mapping`; other hosts map every declared field option exactly and use `default_option_ids` as the recommendation marker. If the interface is unavailable in the current mode, show `interaction.fallback_text` unchanged and describe that as a mode-level text fallback, not a lack of host card support. Continue every answer through `jobagent interaction respond` with the exact interaction ID. Append/replace may return a second role-input interaction. If the user already named a target role, pass it directly to `round start` and do not ask again.
 - Skip a platform only after explicit user approval with `jobagent round skip --platform <platform> --confirm-skip`.
 - After an existing installation updates, run `jobagent upgrade-check` and resolve its `next_suggested` action before opening a platform. Never delete `~/.jobagent` or the Job Agent Chrome profile as a general fix; preserve credentials, login cookies, profiles, audits and preferences.
@@ -71,7 +72,7 @@ irm https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/
 ```bash
 jobagent init --key <your_api_key>
 jobagent doctor env
-jobagent resume analyze --file <resume-path>
+jobagent resume analyze --file <resume-path> --target-cities <city1> [city2 ...]
 jobagent round start
 ```
 

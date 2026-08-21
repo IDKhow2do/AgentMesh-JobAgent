@@ -235,7 +235,7 @@ def test_upgrade_migrates_legacy_51job_reconciliation_state_without_losing_click
     )
 
     records = json.loads((state / "job51_audit_log.json").read_text(encoding="utf-8"))
-    assert report["state_migration_version"] == 6
+    assert report["state_migration_version"] == 7
     assert "state/job51_audit_log.json" in report["migrated"]
     assert records[0]["evidence"]["delivery_state_version"] == 1
     assert records[0]["evidence"]["reconcile_attempt"] == 0
@@ -244,6 +244,118 @@ def test_upgrade_migrates_legacy_51job_reconciliation_state_without_losing_click
     assert records[1]["evidence"]["reconcile_attempt"] == 1
     assert records[1]["evidence"]["reconcile_limit"] == 2
     assert records[1]["evidence"]["first_indeterminate_at"] == "2026-08-15T01:00:00+00:00"
+
+
+def test_upgrade_reconciles_pre_delivery_round_after_profile_city_update(tmp_path):
+    upgrade = importlib.import_module("jobagent.infra.client_upgrade")
+    from jobagent.infra.protocol import digest_payload
+
+    app_dir = tmp_path / ".jobagent"
+    state = app_dir / "state"
+    profile = {
+        "schema_version": 1,
+        "_meta": {"targetRolePolicyVersion": 2},
+        "preferences": {
+            "targetRoles": [{"title": "AI产品经理", "priority": 1}],
+            "targetCities": [
+                {"city": "郑州", "priority": 1},
+                {"city": "杭州", "priority": 2},
+            ],
+        },
+    }
+    _write_json(state / "profile.json", profile)
+    _write_json(
+        state / "current_round.json",
+        {
+            "schema_version": 3,
+            "round_id": "round-city-refresh",
+            "status": "active",
+            "created_at": upgrade._utc_now(),
+            "updated_at": upgrade._utc_now(),
+            "platform_order": ["boss", "liepin", "zhilian", "51job"],
+            "browser_session_id": "local-cdp-19222",
+            "intent": {
+                "status": "confirmed",
+                "target_roles": ["AI产品经理"],
+                "source": "suggested",
+                "profile_digest": "sha256:old-profile",
+                "confirmed_at": upgrade._utc_now(),
+            },
+            "platforms": {
+                "boss": {
+                    "status": "blocked",
+                    "last_command": "jobagent boss discover",
+                    "next_suggested": "jobagent boss discover",
+                    "evidence": {
+                        "login": {
+                            "schema_version": 1,
+                            "logged_in": True,
+                            "platform": "boss",
+                            "round_id": "round-city-refresh",
+                            "browser_session_id": "local-cdp-19222",
+                            "verified_at": upgrade._utc_now(),
+                            "requires_user_action": False,
+                            "error": None,
+                        },
+                        "error": "Boss adapter does not have a city code for empty city",
+                    },
+                },
+                "liepin": {"status": "pending"},
+                "zhilian": {"status": "pending"},
+                "51job": {"status": "pending"},
+            },
+        },
+    )
+    pending_start = state / "discoveries" / "boss" / "pending-start.json"
+    _write_json(
+        pending_start,
+        {
+            "schema_version": 1,
+            "platform": "boss",
+            "request_id": "boss:old-context",
+            "round_id": "round-city-refresh",
+            "profile_digest": "sha256:old-profile",
+            "intent_digest": "sha256:old-intent",
+            "account_ref": "acct_test",
+        },
+    )
+    _write_json(
+        state / "client_upgrade_state.json",
+        {
+            "state_migration_version": 6,
+            "client_version": "0.5.26",
+            "protocol_version": 1,
+            "status": "ready",
+        },
+    )
+
+    report = upgrade.run_client_upgrade(
+        app_dir=app_dir,
+        current_version="0.5.27",
+        protocol_version=1,
+    )
+
+    current = json.loads((state / "current_round.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["state_migration_version"] == 7
+    assert "state/current_round.json" in report["migrated"]
+    assert "state/discoveries/boss/pending-start.json" in report["cleared"]
+    assert current["intent"]["profile_digest"] == digest_payload(profile)
+    assert current["platforms"]["boss"]["status"] == "login_verified"
+    assert current["platforms"]["boss"]["next_suggested"] == "jobagent boss discover"
+    assert current["profile_reconciliation"]["reason"] == (
+        "pre_delivery_profile_update"
+    )
+    assert not pending_start.exists()
+
+    repeated = upgrade.run_client_upgrade(
+        app_dir=app_dir,
+        current_version="0.5.27",
+        protocol_version=1,
+    )
+    assert repeated["upgrade_detected"] is False
+    assert repeated["migrated"] == []
+    assert repeated["cleared"] == []
 
 
 def test_delivery_confirmation_upgrade_preserves_decision_and_requires_fresh_review(tmp_path):

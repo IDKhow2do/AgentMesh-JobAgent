@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.27] - 2026-08-21
+
+### Fixed
+
+- Require at least one explicit target city before paid resume analysis or round creation, and provide a structured city-input interaction when an older profile has no city.
+- Preserve explicitly supplied target cities in the saved profile even when cloud analysis omits them, with normalized ordering, deduplication and a five-city bound.
+- Rebind an active round to an explicitly refreshed profile only before candidate discovery has produced signed or delivery evidence. The original round and recent platform login receipt remain available, while stale failed-start context is replaced without charging for the failed browser collection.
+- Block profile replacement after candidate discovery, preview, authorization or delivery evidence exists so results from one profile cannot be delivered under another.
+
+### Compatibility
+
+- The `0.5.26 -> 0.5.27` migration repairs the specific pre-delivery state where a user added cities after an empty-city Discover failure. It preserves the account, API Key, managed Chrome profile, recent login receipt, round ID, profile and audits; clears only the uncharged stale Discover-start context; and resumes from the current platform's Discover command. Progressed rounds fail closed and remain unchanged.
+
 ## [0.5.26] - 2026-08-15
 
 ### Fixed

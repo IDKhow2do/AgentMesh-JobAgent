@@ -12,12 +12,94 @@ from jobagent.infra.protocol import digest_payload
 from jobagent.infra.rounds import utc_now
 
 MAX_TARGET_ROLES = 4
+MAX_TARGET_CITIES = 5
 TARGET_ROLE_POLICY_VERSION = 2
 TARGET_ROLE_CHOICES = {
     "accept_suggested",
     "append_roles",
     "replace_roles",
 }
+
+
+def confirmed_target_cities(profile: dict[str, Any]) -> list[str]:
+    preferences = profile.get("preferences") or {}
+    raw_cities = preferences.get("targetCities") or []
+    ordered = sorted(
+        (item for item in raw_cities if isinstance(item, dict)),
+        key=lambda item: int(item.get("priority") or 999),
+    )
+    return _normalize_cities([str(item.get("city") or "") for item in ordered])
+
+
+def with_target_cities(
+    profile: dict[str, Any],
+    target_cities: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    cities = _normalize_cities(target_cities)
+    if not cities:
+        raise ValueError("Enter at least one target city before starting a round.")
+    updated = dict(profile)
+    preferences = dict(updated.get("preferences") or {})
+    preferences["targetCities"] = [
+        {"city": city, "priority": index}
+        for index, city in enumerate(cities, start=1)
+    ]
+    updated["preferences"] = preferences
+    return updated, cities
+
+
+def target_city_input_request(
+    profile: dict[str, Any],
+    *,
+    previous_round_id: str | None,
+) -> dict[str, Any]:
+    profile_digest = digest_payload(profile)
+    context = previous_round_id or "initial"
+    interaction_key = digest_payload(
+        {
+            "product_id": "job_agent",
+            "kind": "target_city_input",
+            "profile_digest": profile_digest,
+            "previous_round_id": context,
+        }
+    ).split(":", 1)[1][:20]
+    interaction_id = f"jobagent:target-city:{interaction_key}"
+    fallback = (
+        "当前简历画像还没有目标城市。请告诉我本轮想看的城市，可以填写多个，"
+        "例如：郑州、杭州。"
+    )
+    interaction = build_interaction_required(
+        interaction_id=interaction_id,
+        product_id="job_agent",
+        kind="target_city_input",
+        title="确认本轮目标城市",
+        prompt="请确认本轮想看的目标城市，可以填写多个。",
+        fields=[
+            {
+                "field_id": "target_cities",
+                "type": "text",
+                "label": "目标城市",
+                "required": True,
+                "placeholder": "例如：郑州、杭州",
+            }
+        ],
+        fallback_text=fallback,
+        continuation_action="jobagent.interaction.respond",
+        idempotency_key=interaction_id,
+    )
+    return {
+        "ok": False,
+        "error": "interaction_required",
+        "requires_user_action": True,
+        "user_action": "confirm_target_cities",
+        "user_prompt": fallback,
+        "interaction": interaction,
+        "host_presentations": build_host_presentations(interaction),
+        "next_suggested": (
+            f'jobagent interaction respond --interaction-id "{interaction_id}" '
+            '--target-city "<city>"'
+        ),
+    }
 
 
 def suggested_target_roles(profile: dict[str, Any]) -> list[str]:
@@ -262,3 +344,23 @@ def _normalize_roles(values: list[str]) -> list[str]:
         seen.add(key)
         roles.append(role)
     return roles
+
+
+def _normalize_cities(values: list[str]) -> list[str]:
+    cities: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        city = " ".join(value.split()).strip().removesuffix("市")
+        key = city.casefold()
+        if (
+            not city
+            or len(city) > 30
+            or any(ord(character) < 32 for character in city)
+            or key in seen
+        ):
+            continue
+        seen.add(key)
+        cities.append(city)
+    if len(cities) > MAX_TARGET_CITIES:
+        raise ValueError(f"A round supports at most {MAX_TARGET_CITIES} target cities.")
+    return cities

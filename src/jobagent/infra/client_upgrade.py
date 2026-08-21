@@ -13,10 +13,15 @@ from jobagent import __version__
 from jobagent.domain.reviewability import delivery_reviewability_issues
 from jobagent.infra.cloud_client import PROTOCOL_VERSION
 from jobagent.infra.profile_contract import profile_compatibility_issues
-from jobagent.infra.rounds import migrate_round_payload
+from jobagent.infra.protocol import digest_payload
+from jobagent.infra.rounds import (
+    RoundOrderError,
+    migrate_round_payload,
+    reconcile_round_profile_payload,
+)
 from jobagent.infra.state import APP_DIR
 
-STATE_MIGRATION_VERSION = 6
+STATE_MIGRATION_VERSION = 7
 
 _EPHEMERAL_FILES = (
     "state/release_manifest_cache.json",
@@ -381,6 +386,102 @@ def _migrate_job51_delivery_reconciliation_state(
             migrated.append(relative)
 
 
+def _migrate_pre_delivery_profile_binding(
+    root: Path,
+    *,
+    migrated: list[str],
+    cleared: list[str],
+    conflicts: list[dict[str, Any]],
+) -> None:
+    """Rebind only an unprogressed active round after an explicit profile update."""
+
+    state_dir = root / "state"
+    round_path = state_dir / "current_round.json"
+    profile = _read_json(state_dir / "profile.json")
+    current = _read_json(round_path)
+    if profile is None or current is None or current.get("status") != "active":
+        return
+    intent = current.get("intent")
+    if (
+        not isinstance(intent, dict)
+        or intent.get("status") != "confirmed"
+        or not str(intent.get("profile_digest") or "")
+        or str(intent.get("profile_digest") or "") == digest_payload(profile)
+    ):
+        return
+
+    platforms = current.get("platforms") or {}
+    current_platform = next(
+        (
+            platform
+            for platform in current.get("platform_order") or []
+            if str((platforms.get(platform) or {}).get("status") or "pending")
+            not in {"completed", "skipped_this_round"}
+        ),
+        None,
+    )
+    if current_platform:
+        pending_decision = (
+            state_dir
+            / "discoveries"
+            / current_platform
+            / "pending-decision.json"
+        )
+        if pending_decision.exists():
+            conflicts.append(
+                {
+                    "code": "active_round_has_pending_decision",
+                    "message": (
+                        "The active round already has a preserved signed decision; "
+                        "its profile binding cannot be changed automatically."
+                    ),
+                    "next_suggested": "jobagent round status",
+                }
+            )
+            return
+    try:
+        updated, changed = reconcile_round_profile_payload(current, profile)
+    except RoundOrderError as exc:
+        conflicts.append(
+            {
+                "code": str(exc.payload.get("conflict") or exc.payload["error"]),
+                "message": str(exc.payload.get("message") or exc),
+                "next_suggested": str(
+                    exc.payload.get("next_suggested") or "jobagent round status"
+                ),
+            }
+        )
+        return
+    if not changed:
+        return
+
+    _write_json(round_path, updated)
+    relative_round = _relative(round_path, root)
+    if relative_round not in migrated:
+        migrated.append(relative_round)
+
+    if not current_platform:
+        return
+    pending_start_path = (
+        state_dir / "discoveries" / current_platform / "pending-start.json"
+    )
+    pending_start = _read_json(pending_start_path)
+    if pending_start is None:
+        return
+    expected_intent_digest = digest_payload(updated["intent"])
+    stale_context = (
+        str(pending_start.get("round_id") or "") == str(updated.get("round_id") or "")
+        and (
+            str(pending_start.get("profile_digest") or "") != digest_payload(profile)
+            or str(pending_start.get("intent_digest") or "")
+            != expected_intent_digest
+        )
+    )
+    if stale_context:
+        pending_start_path.unlink()
+        cleared.append(_relative(pending_start_path, root))
+
+
 def run_client_upgrade(
     *,
     app_dir: Path | None = None,
@@ -473,6 +574,13 @@ def run_client_upgrade(
             _migrate_job51_delivery_reconciliation_state(
                 root,
                 migrated=migrated,
+            )
+        if prior_migration_version < 7:
+            _migrate_pre_delivery_profile_binding(
+                root,
+                migrated=migrated,
+                cleared=cleared,
+                conflicts=conflicts,
             )
 
         discoveries = state_dir / "discoveries"

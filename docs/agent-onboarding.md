@@ -35,7 +35,14 @@ At the start of a round, run:
 jobagent round start
 ```
 
-For a new round this first returns an AgentMesh360 `interaction_required` target-role confirmation. It contains three choices: accept the suggestions, append roles, or replace the suggestions. Render its native card when the current host interface is callable; otherwise show the numbered text fallback. Continue with the exact interaction ID:
+For a new round, the profile must contain at least one explicitly confirmed target city. If an older profile has none, `round start` first returns an AgentMesh360 `interaction_required` city-input request; relay its fallback text and continue with the exact interaction ID:
+
+```bash
+jobagent interaction respond --interaction-id "<id>" \
+  --target-city "<city1>" --target-city "<city2>"
+```
+
+It then returns the target-role confirmation. That interaction contains three choices: accept the suggestions, append roles, or replace the suggestions. Render its native card when the current host interface is callable; otherwise show the numbered text fallback. Continue with the exact interaction ID:
 
 ```bash
 # Accept the suggested roles
@@ -138,7 +145,7 @@ If authentication fails, show the exact error. Do not silently change workflows.
 
 ## 3. Analyze Resume
 
-Ask for a PDF, DOCX, TXT or Markdown resume. Target role and cities are optional hints when the user has already stated them.
+Ask for a PDF, DOCX, TXT or Markdown resume. A target role is an optional hint only when the user already stated it. At least one target city is required; when none was supplied or saved, the CLI stops before the paid cloud call and asks for it.
 
 ```bash
 jobagent resume analyze --file <resume-path> \
@@ -147,6 +154,8 @@ jobagent resume analyze --file <resume-path> \
 ```
 
 Acceptance: output reports `ok=true` and a saved profile path.
+
+If `resume analyze` returns `target_cities_required`, ask for the cities and rerun the exact resume command with `--target-cities`; the failed attempt did not call the cloud or consume profile-analysis credits. If a profile is explicitly refreshed while an active round is still before candidate discovery, the CLI may safely retain that round and recent login receipt. Any existing candidate, preview, authorization or delivery evidence makes the profile update a hard boundary; follow `round status` and never mix it with the new profile.
 
 Then execute the returned `jobagent round start`. If it returns `interaction_required`, render its card or fallback text and wait for the target-role answer. Continue through `jobagent interaction respond`; only an accepted structured response or an already-explicit direct `round start` creates the four-platform round. Final delivery authorization is still collected separately after each platform preview.
 
