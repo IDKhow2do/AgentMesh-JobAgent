@@ -9,6 +9,7 @@ from jobagent.platforms.liepin import (
     liepin_job_id,
     parse_liepin_job,
 )
+from jobagent.platforms.liepin.city_resolver import LiepinCityResolver
 from jobagent.platforms.liepin.collect import build_liepin_search_url
 from jobagent.platforms.zhilian import parse_zhilian_job, zhilian_job_id
 
@@ -95,7 +96,11 @@ class _LiepinCityResolutionDriver:
                 "candidateCount": 300,
             }
         if "liepin_city_search_evidence" in js_code:
-            if not self.opened or not self.resolved_code:
+            if not self.opened:
+                return {
+                    "url": "https://www.liepin.com/zhaopin/?city=050090&dq=050090"
+                }
+            if not self.resolved_code:
                 return {}
             query = parse_qs(urlparse(self.opened[-1]).query).get("key", [""])[0]
             return _liepin_city_evidence("佛山", self.resolved_code, query)
@@ -143,7 +148,12 @@ def test_liepin_collector_resolves_unbundled_city_from_page_metadata(tmp_path):
     ).collect("AI产品经理", city="佛山市")
 
     assert result.ok is True
-    assert "city=0757" in driver.opened[-1]
+    assert "/city-foshan/zhaopin/" in driver.opened[-1]
+    assert "city=0757" not in driver.opened[-1]
+    assert LiepinCityResolver(tmp_path / "liepin-cities.json").lookup("佛山") == (
+        "0757",
+        "verified_cache",
+    )
     assert result.jobs[0].city == "佛山"
 
 

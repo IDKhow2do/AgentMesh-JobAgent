@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from jobagent.infra.state import APP_DIR
 
@@ -142,6 +143,89 @@ class LiepinCityResolver:
             "code": code,
             "city_sources": city_sources,
             "query_sources": query_sources,
+            "result_state": (
+                "jobs" if card_count > 0 else ("no_results" if no_results else "unknown")
+            ),
+            "conflicts": sorted(set(conflicts)),
+        }
+
+    def verify_route_evidence(
+        self,
+        evidence: dict[str, Any],
+        *,
+        city: str,
+        query: str,
+        expected_route: str,
+        previous_url: str,
+    ) -> dict[str, Any]:
+        """Verify a readable official city route without inventing a numeric code."""
+        expected_city = normalize_city_name(city)
+        expected_query = str(query or "").strip()
+        city_values = {
+            "control": normalize_city_name(str(evidence.get("controlCity") or "")),
+            "meta": normalize_city_name(str(evidence.get("metaCity") or "")),
+            "title": normalize_city_name(str(evidence.get("titleCity") or "")),
+            "visible": normalize_city_name(str(evidence.get("visibleCity") or "")),
+        }
+        city_sources = [
+            source
+            for source, observed in city_values.items()
+            if observed and observed == expected_city
+        ]
+        conflicts: list[str] = []
+        if any(observed and observed != expected_city for observed in city_values.values()):
+            conflicts.append("city")
+
+        query_values = {
+            "input": str(evidence.get("inputQuery") or "").strip(),
+            "url": str(evidence.get("urlQuery") or "").strip(),
+        }
+        query_sources = [
+            source
+            for source, observed in query_values.items()
+            if observed and observed == expected_query
+        ]
+        if any(observed and observed != expected_query for observed in query_values.values()):
+            conflicts.append("query")
+
+        route_verified = _same_official_city_route(
+            str(evidence.get("url") or ""),
+            expected_route,
+        )
+        if not route_verified:
+            conflicts.append("route")
+        observed_url = str(evidence.get("url") or "")
+        route_changed = bool(
+            previous_url
+            and observed_url
+            and _normalized_url(previous_url) != _normalized_url(observed_url)
+        )
+        try:
+            card_count = max(0, int(evidence.get("jobCardCount") or 0))
+        except (TypeError, ValueError):
+            card_count = 0
+        no_results = evidence.get("noResults") is True
+        result_surface = evidence.get("resultSurface") is True and (
+            card_count > 0 or no_results
+        )
+        verified = bool(
+            route_verified
+            and route_changed
+            and city_values["meta"] == expected_city
+            and city_values["title"] == expected_city
+            and query_values["input"] == expected_query
+            and query_values["url"] == expected_query
+            and result_surface
+            and not conflicts
+        )
+        return {
+            "verified": verified,
+            "route_verified": route_verified,
+            "route_changed": route_changed,
+            "city": expected_city,
+            "code": "",
+            "city_sources": city_sources,
+            "query_sources": query_sources,
             "result_state": "jobs" if card_count > 0 else ("no_results" if no_results else "unknown"),
             "conflicts": sorted(set(conflicts)),
         }
@@ -171,3 +255,33 @@ class LiepinCityResolver:
             encoding="utf-8",
         )
         temporary.replace(self.cache_path)
+
+
+def _same_official_city_route(current_url: str, expected_route: str) -> bool:
+    try:
+        current = urlsplit(current_url)
+        expected = urlsplit(expected_route)
+    except ValueError:
+        return False
+    if (
+        current.scheme != "https"
+        or expected.scheme != "https"
+        or current.hostname not in {"liepin.com", "www.liepin.com"}
+        or expected.hostname not in {"liepin.com", "www.liepin.com"}
+    ):
+        return False
+    expected_path = expected.path.rstrip("/")
+    current_path = current.path.rstrip("/")
+    expected_search_path = expected_path + "/zhaopin"
+    return bool(
+        expected_path.startswith("/city-")
+        and current_path == expected_search_path
+    )
+
+
+def _normalized_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    return parsed._replace(fragment="").geturl()
