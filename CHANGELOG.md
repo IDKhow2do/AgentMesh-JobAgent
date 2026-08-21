@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.29] - 2026-08-22
+
+### Fixed
+
+- Resolve unbundled Liepin cities from official city links already present on a trusted result page, with a bounded official search-results fallback when the managed session is currently on the candidate homepage and the legacy city-directory URL redirects there.
+- Continue on an official readable city-slug search route when no numeric code is exposed. Require a real route transition plus matching page metadata/title, visible search input/URL query and real result or explicit no-result evidence before candidate extraction.
+- Keep every signed page on the verified readable route. Reject city-homepage recommendations and stale cross-city controls, and cache a later numeric city code only after the original numeric evidence contract independently verifies it.
+- Return redacted route-verification and directory-redirect diagnostics without treating a candidate-home redirect as logout or exposing account/session data.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, active round, Liepin login receipt, preserved SearchPlan request, profile and audits remain unchanged. Resume with `jobagent liepin discover`; the same preserved request is reused and the prior browser collection remains uncharged. No state migration, new round, login reset or profile replacement is required.
+
 ## [0.5.28] - 2026-08-21
 
 ### Fixed

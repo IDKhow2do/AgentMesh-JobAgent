@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching and recruiter greetings.
-version: 0.5.28
+version: 0.5.29
 ---
 
 # Job Agent
@@ -19,7 +19,7 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - On `event=delivery_preview` with `error=interaction_required`, show every row in `delivery_preview.items`, then render the returned confirmation card. Never choose for the user. Map `confirm_all`, `exclude_jobs` or `cancel_delivery` through the exact interaction ID.
 - For `exclude_jobs`, collect displayed job numbers and pass each as `--exclude-index`. Show the regenerated complete preview and stop for final confirmation again. Run send only after `event=delivery_authorized`, using the exact command containing both `--preview-id` and `--authorization-id`.
 - On a verified Zhilian query and city route, reject cross-city fallback cards and treat that query as empty; preserve valid candidates already collected by earlier signed queries.
-- Never guess or hardcode a Liepin city code. The CLI discovers unbundled cities from Liepin's official city directory and accepts them only after the readable city, original keyword and result surface agree. On a city-resolution error, preserve the current round, browser profile and request; follow the exact top-level recovery without starting another Discover or clearing state.
+- Never guess or hardcode a Liepin city code. The CLI first discovers unbundled cities from official links on the current result page, then uses an official search-results surface before the city-directory fallback. A readable city route is accepted only after the route changes and the page metadata/title, visible search input/URL query, and real result or explicit no-result state agree. City-home recommendations are not search results; a later numeric code is cached only after independent cross-verification. On a city-resolution error, preserve the current round, browser profile and request; follow the exact top-level recovery without starting another Discover or clearing state.
 - If Zhilian review reports that a preserved signed decision has a generic title or missing company/salary, run its exact `jobagent zhilian apply review` recovery. The CLI reads only the signed job detail URLs, repairs trusted fields, safely excludes only a candidate that remains unreviewable, and requests a replacement signature for the same Discover with zero additional credits. It regenerates the remaining complete preview and still waits for the user's confirmation. Never start another round or Discover for this repair.
 - On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - On 51Job `delivery_verification_indeterminate` with `retryable=true` and `request_preserved=true`, run the exact `next_suggested` with the same preview and authorization. Pending clicked jobs are reconciled from current-site evidence and are never clicked again; the remaining authorized jobs continue. Do not repeat Discover, clear state, rebuild the round or infer logout from the legacy history domain.
@@ -99,7 +99,7 @@ jobagent liepin apply send --input <review_file> --preview-id <preview_id> --aut
 jobagent liepin audit
 ```
 
-Liepin city metadata is client-managed and live-verified. Do not replace it with a remembered numeric code or reuse the city shown on an older tab; the CLI rejects cross-city evidence and caches only independently verified results.
+Liepin city metadata is client-managed and live-verified. Do not replace it with a remembered numeric code or reuse the city shown on an older tab; the CLI rejects cross-city evidence, keeps pagination on the verified readable route and caches a later numeric code only after independent cross-verification.
 
 ## 智联招聘
 

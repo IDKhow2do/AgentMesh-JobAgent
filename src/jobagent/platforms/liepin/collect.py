@@ -48,7 +48,11 @@ def build_liepin_search_url(
     )
 
 
-def build_liepin_city_route_search_url(route: str, query: str) -> str:
+def build_liepin_city_route_search_url(
+    route: str,
+    query: str,
+    page: int = 1,
+) -> str:
     """Build a search URL from an official city-directory route."""
     safe_route = _safe_liepin_city_route(route)
     if not safe_route:
@@ -57,7 +61,7 @@ def build_liepin_city_route_search_url(route: str, query: str) -> str:
     path = parsed.path.rstrip("/") + "/zhaopin/"
     query_string = urlencode(
         {
-            "currentPage": 0,
+            "currentPage": max(0, int(page) - 1),
             "pageSize": 40,
             "key": query,
             "scene": "input",
@@ -65,6 +69,24 @@ def build_liepin_city_route_search_url(route: str, query: str) -> str:
         }
     )
     return urlunsplit(("https", "www.liepin.com", path, query_string, ""))
+
+
+def _build_liepin_resolved_search_url(
+    *,
+    query: str,
+    city: str,
+    page: int,
+    city_code: str,
+    city_route: str,
+) -> str:
+    if city_route and not city_code:
+        return build_liepin_city_route_search_url(city_route, query, page=page)
+    return build_liepin_search_url(
+        query,
+        city,
+        page=page,
+        city_code=city_code,
+    )
 
 
 @dataclass
@@ -152,6 +174,7 @@ class LiepinReadOnlyCollector:
             self.city_resolver.lookup(city) if city else (None, "none")
         )
         city_code = str(candidate_code or "")
+        city_route = ""
         city_resolution: dict[str, Any] = {
             "ok": True,
             "city": city,
@@ -161,13 +184,16 @@ class LiepinReadOnlyCollector:
         dynamic_resolution_attempted = False
         if city and not city_code:
             dynamic_resolution_attempted = True
-            city_resolution = self._resolve_city_code(
+            city_resolution = self._resolve_city(
                 city,
                 query=query,
                 wait_seconds=wait_seconds,
             )
             city_code = str(city_resolution.get("code") or "")
-            if not city_code:
+            city_route = _safe_liepin_city_route(
+                str(city_resolution.get("route") or "")
+            )
+            if not city_code and not city_route:
                 return LiepinCollectResult(
                     query=query,
                     city=city,
@@ -182,19 +208,21 @@ class LiepinReadOnlyCollector:
                         or "liepin_city_code_not_found"
                     ),
                 )
-        first_url = build_liepin_search_url(
-            query,
-            city,
+        first_url = _build_liepin_resolved_search_url(
+            query=query,
+            city=city,
             page=start_page,
             city_code=city_code,
+            city_route=city_route,
         )
 
         for index, current_page in enumerate(range(start_page, start_page + page_count)):
-            url = build_liepin_search_url(
-                query,
-                city,
+            url = _build_liepin_resolved_search_url(
+                query=query,
+                city=city,
                 page=current_page,
                 city_code=city_code,
+                city_route=city_route,
             )
             open_result = self.driver.open_url_in_new_tab(url, wait_seconds=wait_seconds)
             if not open_result.get("ok"):
@@ -242,11 +270,13 @@ class LiepinReadOnlyCollector:
                 )
 
             if city:
-                verification = self.city_resolver.verify_evidence(
-                    _snapshot_city_evidence(snapshot),
+                verification = self._verify_snapshot_city(
+                    snapshot,
                     city=city,
                     query=query,
-                    expected_code=city_code,
+                    city_code=city_code,
+                    city_route=city_route,
+                    city_resolution=city_resolution,
                 )
                 if (
                     not verification["verified"]
@@ -255,19 +285,24 @@ class LiepinReadOnlyCollector:
                 ):
                     self.city_resolver.forget(city, code=city_code)
                     dynamic_resolution_attempted = True
-                    city_resolution = self._resolve_city_code(
+                    city_resolution = self._resolve_city(
                         city,
                         query=query,
                         wait_seconds=wait_seconds,
                     )
                     replacement_code = str(city_resolution.get("code") or "")
-                    if replacement_code:
+                    replacement_route = _safe_liepin_city_route(
+                        str(city_resolution.get("route") or "")
+                    )
+                    if replacement_code or replacement_route:
                         city_code = replacement_code
-                        url = build_liepin_search_url(
-                            query,
-                            city,
+                        city_route = replacement_route
+                        url = _build_liepin_resolved_search_url(
+                            query=query,
+                            city=city,
                             page=current_page,
                             city_code=city_code,
+                            city_route=city_route,
                         )
                         open_result = self.driver.open_url_in_new_tab(
                             url,
@@ -283,11 +318,13 @@ class LiepinReadOnlyCollector:
                             snapshot["requestedUrl"] = url
                             failure = _snapshot_failure(snapshot)
                             if not failure:
-                                verification = self.city_resolver.verify_evidence(
-                                    _snapshot_city_evidence(snapshot),
+                                verification = self._verify_snapshot_city(
+                                    snapshot,
                                     city=city,
                                     query=query,
-                                    expected_code=city_code,
+                                    city_code=city_code,
+                                    city_route=city_route,
+                                    city_resolution=city_resolution,
                                 )
                 snapshot["cityResolution"] = city_resolution
                 snapshot["cityVerification"] = verification
@@ -304,7 +341,21 @@ class LiepinReadOnlyCollector:
                         ok=False,
                         error="liepin_city_evidence_unverified",
                     )
-                self.city_resolver.remember(city, city_code, verification)
+                if city_code:
+                    self.city_resolver.remember(city, city_code, verification)
+                elif city_route:
+                    numeric_verification = self.city_resolver.verify_evidence(
+                        _snapshot_city_evidence(snapshot),
+                        city=city,
+                        query=query,
+                    )
+                    observed_code = str(numeric_verification.get("code") or "")
+                    if numeric_verification["verified"] and observed_code:
+                        self.city_resolver.remember(
+                            city,
+                            observed_code,
+                            numeric_verification,
+                        )
             snapshots.append(snapshot)
 
             cards = snapshot.get("cards", []) if isinstance(snapshot, dict) else []
@@ -336,14 +387,40 @@ class LiepinReadOnlyCollector:
             pages=page_count,
         )
 
-    def _resolve_city_code(
+    def _verify_snapshot_city(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        city: str,
+        query: str,
+        city_code: str,
+        city_route: str,
+        city_resolution: dict[str, Any],
+    ) -> dict[str, Any]:
+        evidence = _snapshot_city_evidence(snapshot)
+        if city_route and not city_code:
+            return self.city_resolver.verify_route_evidence(
+                evidence,
+                city=city,
+                query=query,
+                expected_route=city_route,
+                previous_url=str(city_resolution.get("previous_url") or ""),
+            )
+        return self.city_resolver.verify_evidence(
+            evidence,
+            city=city,
+            query=query,
+            expected_code=city_code,
+        )
+
+    def _resolve_city(
         self,
         city: str,
         *,
         query: str,
         wait_seconds: int,
     ) -> dict[str, Any]:
-        """Discover a city through Liepin's own directory and verify its result page."""
+        """Discover and verify a city code or official readable city route."""
         current_evidence = self._extract_city_search_evidence()
         current = self.city_resolver.verify_evidence(
             current_evidence,
@@ -359,6 +436,53 @@ class LiepinReadOnlyCollector:
                 "verification": current,
             }
 
+        current_route = self._extract_city_route(city)
+        current_route_url = _safe_liepin_city_route(
+            str(current_route.get("route") or "")
+        )
+        current_url = str(current_evidence.get("url") or "")
+        if (
+            current_route.get("ok")
+            and current_route_url
+            and not _is_liepin_city_search_route(current_url, current_route_url)
+        ):
+            return self._verify_city_route(
+                city,
+                query=query,
+                route_url=current_route_url,
+                wait_seconds=wait_seconds,
+                source="current_platform_city_links",
+                route_evidence=current_route,
+                previous_url=current_url,
+            )
+
+        search_directory_url = build_liepin_search_url(query)
+        search_open = self.driver.open_url_in_new_tab(
+            search_directory_url,
+            wait_seconds=wait_seconds,
+        )
+        if search_open.get("ok"):
+            search_route = self._extract_city_route(city)
+            search_route_url = _safe_liepin_city_route(
+                str(search_route.get("route") or "")
+            )
+            search_source_evidence = self._extract_city_search_evidence()
+            search_source_url = str(
+                search_source_evidence.get("url")
+                or search_open.get("url")
+                or search_directory_url
+            )
+            if search_route.get("ok") and search_route_url:
+                return self._verify_city_route(
+                    city,
+                    query=query,
+                    route_url=search_route_url,
+                    wait_seconds=wait_seconds,
+                    source="platform_search_city_links",
+                    route_evidence=search_route,
+                    previous_url=search_source_url,
+                )
+
         open_result = self.driver.open_url_in_new_tab(
             LIEPIN_CITY_LIST_URL,
             wait_seconds=wait_seconds,
@@ -373,6 +497,12 @@ class LiepinReadOnlyCollector:
                 "error": str(open_result.get("error") or "open_url_failed"),
             }
         route = self._extract_city_route(city)
+        directory_evidence = self._extract_city_search_evidence()
+        directory_url = str(
+            directory_evidence.get("url")
+            or open_result.get("url")
+            or LIEPIN_CITY_LIST_URL
+        )
         route_url = _safe_liepin_city_route(str(route.get("route") or ""))
         if not route.get("ok") or not route_url:
             return {
@@ -380,43 +510,82 @@ class LiepinReadOnlyCollector:
                 "city": city,
                 "code": "",
                 "source": "platform_city_directory",
-                "url": str(open_result.get("url") or LIEPIN_CITY_LIST_URL),
+                "url": directory_url,
                 "error": "liepin_city_code_not_found",
                 "candidate_count": int(route.get("candidateCount") or 0),
+                "discovery_outcome": _city_directory_outcome(open_result, route),
             }
+        return self._verify_city_route(
+            city,
+            query=query,
+            route_url=route_url,
+            wait_seconds=wait_seconds,
+            source="platform_city_directory",
+            route_evidence=route,
+            previous_url=directory_url,
+        )
+
+    def _verify_city_route(
+        self,
+        city: str,
+        *,
+        query: str,
+        route_url: str,
+        wait_seconds: int,
+        source: str,
+        route_evidence: dict[str, Any],
+        previous_url: str,
+    ) -> dict[str, Any]:
+        """Open one official city route and accept only cross-verified evidence."""
         city_search_url = build_liepin_city_route_search_url(route_url, query)
         route_open = self.driver.open_url_in_new_tab(
             city_search_url,
             wait_seconds=wait_seconds,
         )
         if not route_open.get("ok"):
-            return {
+            payload = {
                 "ok": False,
                 "city": city,
                 "code": "",
-                "source": "platform_city_directory",
+                "source": source,
                 "url": str(route_open.get("url") or city_search_url),
                 "error": str(route_open.get("error") or "open_url_failed"),
+                "candidate_count": int(route_evidence.get("candidateCount") or 0),
             }
+            if route_evidence.get("discovery_actions"):
+                payload["discovery_actions"] = list(
+                    route_evidence.get("discovery_actions") or []
+                )
+            return payload
         evidence = self._extract_city_search_evidence()
-        verification = self.city_resolver.verify_evidence(
+        evidence.setdefault(
+            "url",
+            str(route_open.get("url") or city_search_url),
+        )
+        verification = self.city_resolver.verify_route_evidence(
             evidence,
             city=city,
             query=query,
+            expected_route=route_url,
+            previous_url=previous_url,
         )
-        return {
+        payload = {
             "ok": bool(verification["verified"]),
             "city": city,
-            "code": (
-                str(verification.get("code") or "")
-                if verification["verified"]
-                else ""
-            ),
-            "source": "platform_city_directory",
+            "code": "",
+            "route": route_url if verification["verified"] else "",
+            "source": source,
+            "previous_url": previous_url,
             "url": str(route_open.get("url") or city_search_url),
             "verification": verification,
+            "candidate_count": int(route_evidence.get("candidateCount") or 0),
             "error": "" if verification["verified"] else "liepin_city_evidence_unverified",
         }
+        if route_evidence.get("discovery_actions"):
+            payload["discovery_actions"] = list(
+                route_evidence.get("discovery_actions") or []
+            )
+        return payload
 
     def _extract_city_route(self, city: str) -> dict[str, Any]:
         normalized_city = normalize_city_name(city)
@@ -437,12 +606,22 @@ class LiepinReadOnlyCollector:
           let route = '';
           try {{ route = matched ? new URL(matched.getAttribute('href'), location.origin).href : ''; }}
           catch (error) {{ route = ''; }}
+          let pageKind = 'other';
+          try {{
+            const current = new URL(location.href);
+            if (current.hostname === 'c.liepin.com') pageKind = 'candidate_home';
+            else if (current.hostname === 'safe.liepin.com') pageKind = 'verification';
+            else if (current.pathname.indexOf('/citylist') === 0) pageKind = 'city_directory';
+            else if (current.pathname.indexOf('/zhaopin') >= 0) pageKind = 'search_result';
+            else if (/^\/city-[a-z0-9-]+\/?$/i.test(current.pathname)) pageKind = 'city_landing';
+          }} catch (error) {{ pageKind = 'unknown'; }}
           return JSON.stringify({{
             ok: Boolean(route),
             mode: mode,
             city: normalize(expected),
             route: route,
-            candidateCount: candidates.length
+            candidateCount: candidates.length,
+            pageKind: pageKind
           }});
         }})()
         """
@@ -473,7 +652,19 @@ class LiepinReadOnlyCollector:
           const mode = 'liepin_city_search_evidence';
           const normalize = value => String(value || '').trim().replace(/市$/, '');
           const dq = document.querySelector('input[name="dq"]');
-          const key = document.querySelector('input[name="key"]');
+          const visible = el => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && Number(style.opacity || 1) > 0
+              && rect.width > 0
+              && rect.height > 0;
+          };
+          const key = Array.from(document.querySelectorAll(
+            'input[name="key"], input[placeholder*="搜索职位"], input[placeholder*="搜职位"]'
+          )).find(visible) || null;
           const meta = document.querySelector('meta[name="location"]');
           const metaContent = meta ? String(meta.getAttribute('content') || '') : '';
           const metaMatch = metaContent.match(/(?:^|;)\s*city=([^;]+)/);
@@ -492,6 +683,7 @@ class LiepinReadOnlyCollector:
           return JSON.stringify({
             ok: true,
             mode,
+            url: location.href || '',
             controlCity: dq ? normalize(dq.getAttribute('data-name')) : '',
             controlCode: dq ? String(dq.value || dq.getAttribute('value') || '').trim() : '',
             metaCity: metaMatch ? normalize(metaMatch[1]) : '',
@@ -654,7 +846,11 @@ def _snapshot_failure(snapshot: dict[str, Any]) -> str:
 
 def _snapshot_city_evidence(snapshot: dict[str, Any]) -> dict[str, Any]:
     evidence = snapshot.get("cityEvidence")
-    return evidence if isinstance(evidence, dict) else {}
+    if not isinstance(evidence, dict):
+        return {}
+    payload = dict(evidence)
+    payload.setdefault("url", str(snapshot.get("url") or ""))
+    return payload
 
 
 def _redacted_city_diagnostic(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -663,16 +859,45 @@ def _redacted_city_diagnostic(snapshot: dict[str, Any]) -> dict[str, Any]:
         return {}
     verification = resolution.get("verification")
     verification = verification if isinstance(verification, dict) else {}
-    return {
+    diagnostic = {
         "city": str(resolution.get("city") or ""),
         "source": str(resolution.get("source") or ""),
         "code_resolved": bool(resolution.get("code")),
+        "route_verified": verification.get("route_verified") is True,
+        "route_changed": verification.get("route_changed") is True,
         "verified": verification.get("verified") is True,
         "city_sources": list(verification.get("city_sources") or []),
         "query_sources": list(verification.get("query_sources") or []),
         "result_state": str(verification.get("result_state") or "unknown"),
         "conflicts": list(verification.get("conflicts") or []),
     }
+    discovery_outcome = str(resolution.get("discovery_outcome") or "")
+    if discovery_outcome:
+        diagnostic["discovery_outcome"] = discovery_outcome
+    return diagnostic
+
+
+def _city_directory_outcome(
+    open_result: dict[str, Any],
+    route_evidence: dict[str, Any],
+) -> str:
+    """Classify a failed official city-directory visit without exposing its URL."""
+    page_kind = str(route_evidence.get("pageKind") or "")
+    if page_kind == "candidate_home":
+        return "candidate_home_redirect"
+    if page_kind == "verification":
+        return "verification_required"
+    if page_kind == "city_directory":
+        return "city_link_not_found"
+    try:
+        parsed = urlsplit(str(open_result.get("url") or ""))
+    except ValueError:
+        return "unknown_page"
+    if parsed.hostname == "c.liepin.com":
+        return "candidate_home_redirect"
+    if parsed.hostname == "safe.liepin.com":
+        return "verification_required"
+    return "unexpected_official_page" if parsed.hostname else "unknown_page"
 
 
 def _safe_liepin_city_route(value: str) -> str:
@@ -689,6 +914,23 @@ def _safe_liepin_city_route(value: str) -> str:
     if not slug or not all(char.isalnum() or char == "-" for char in slug):
         return ""
     return f"https://www.liepin.com/city-{slug}/"
+
+
+def _is_liepin_city_search_route(value: str, route: str) -> bool:
+    safe_route = _safe_liepin_city_route(route)
+    if not safe_route:
+        return False
+    try:
+        candidate = urlsplit(value)
+        expected = urlsplit(safe_route)
+    except ValueError:
+        return False
+    expected_path = expected.path.rstrip("/") + "/zhaopin"
+    return bool(
+        candidate.scheme == "https"
+        and candidate.hostname in {"liepin.com", "www.liepin.com"}
+        and candidate.path.rstrip("/") == expected_path
+    )
 
 
 def _replace_focused_text(cdp: Any, text: str) -> None:

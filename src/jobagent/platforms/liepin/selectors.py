@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-LIEPIN_SELECTOR_VERSION = "2026-08-21.1"
+LIEPIN_SELECTOR_VERSION = "2026-08-22.1"
 
 LIEPIN_CARD_SELECTORS: tuple[str, ...] = (
     "[data-job-id]",
@@ -33,7 +33,19 @@ def build_liepin_snapshot_script(limit: int = 20) -> str:
         '.job-card-pc-container, .job-card, .sojob-item-main, a[href*="/job/"]'
       ).length;
       const dq = document.querySelector('input[name="dq"]');
-      const keyInput = document.querySelector('input[name="key"]');
+      function visible(el) {{
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity || 1) > 0
+          && rect.width > 0
+          && rect.height > 0;
+      }}
+      const keyInput = Array.from(document.querySelectorAll(
+        'input[name="key"], input[placeholder*="搜索职位"], input[placeholder*="搜职位"]'
+      )).find(visible) || null;
       const locationMeta = document.querySelector('meta[name="location"]');
       const locationContent = locationMeta ? String(locationMeta.getAttribute('content') || '') : '';
       const metaCityMatch = locationContent.match(/(?:^|;)\\s*city=([^;]+)/);
@@ -156,6 +168,7 @@ def build_liepin_snapshot_script(limit: int = 20) -> str:
         cardCount: cards.length,
         rejected,
         cityEvidence: {{
+          url: href,
           controlCity: dq ? String(dq.getAttribute('data-name') || '').trim().replace(/市$/, '') : '',
           controlCode: dq ? String(dq.value || dq.getAttribute('value') || '').trim() : '',
           metaCity: metaCityMatch ? String(metaCityMatch[1] || '').trim().replace(/市$/, '') : '',
