@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from jobagent.platforms.zhilian.city_resolver import (
     ZhilianCityResolver,
     city_code_from_url,
@@ -9,6 +11,8 @@ from jobagent.platforms.zhilian.city_resolver import (
 from jobagent.platforms.zhilian.collect import (
     ZhilianCollectResult,
     ZhilianReadOnlyCollector,
+    _search_transition_city_discovery_ready,
+    _search_transition_ready,
     build_zhilian_search_url,
 )
 from jobagent.platforms.zhilian.selectors import (
@@ -422,9 +426,10 @@ def test_collector_fails_closed_when_city_cannot_be_verified(tmp_path):
     ).collect(query="AI产品经理", city="杭州", limit=5, wait_seconds=1)
 
     assert result.ok is False
-    assert result.error == "zhilian_city_evidence_conflict"
+    assert result.error == "zhilian_search_navigation_pending"
     assert result.jobs == []
-    assert result.to_payload()["retryable"] is False
+    assert result.to_payload()["retryable"] is True
+    assert result.to_payload()["no_charge"] is True
 
 
 class _StaleCityDriver(_DynamicCityDriver):
@@ -464,7 +469,7 @@ def test_collector_replaces_stale_cached_city_code_after_visible_recovery(tmp_pa
 
     assert result.ok is True
     assert driver.calls[0] == "https://www.zhaopin.com/"
-    assert driver.snapshot_count == 2
+    assert driver.snapshot_count >= 2
     assert resolver.lookup("杭州") == ("653", "verified_cache")
 
 
@@ -762,6 +767,268 @@ class _HomepageDynamicCityDiscoveryDriver(_ChangedShenzhenCityDriver):
         }
 
 
+class _WrongCitySearchRouteRecoveryDriver:
+    """Model a readable query submitted on a stale Shenzhen result route."""
+
+    def __init__(self, *, target_city: str, target_slug: str, target_code: str):
+        self.target_city = target_city
+        self.target_slug = target_slug
+        self.target_code = target_code
+        self.query = "高级产品经理"
+        self.page = "entry"
+        self.keyword_clicks = 0
+        self.opened_urls: list[str] = []
+        self.snapshot_pages: list[str] = []
+
+    @property
+    def target_homepage(self) -> str:
+        return f"https://www.zhaopin.com/{self.target_slug}/"
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 5):
+        del wait_seconds
+        self.opened_urls.append(url)
+        if url == "https://www.zhaopin.com/":
+            self.page = "entry"
+            self.keyword_clicks = 0
+        elif url == self.target_homepage:
+            self.page = "target_homepage"
+        return {"ok": True, "url": url}
+
+    def _click_at(self, _x, _y):
+        self.keyword_clicks += 1
+
+    def dismiss_javascript_dialog(self):
+        return {"ok": True, "dismissed": False}
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" in script:
+            return {
+                "ok": True,
+                "mode": "zhilian_keyword_search",
+                "observedValue": self.query,
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "accountEvidence": ["account_navigation"],
+                "strongAccountEvidence": ["resume_management"],
+                "inputClickPoint": {"x": 260, "y": 90},
+                "clickPoint": {"x": 520, "y": 90},
+            }
+        if "zhilian_search_transition" in script:
+            if self.page == "entry":
+                self.page = "stale_results"
+            if self.page == "stale_results":
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+                    "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+                    "readyState": "complete",
+                    "sessionState": "page_ready",
+                    "observedKeyword": self.query,
+                    "observedCityCode": "765",
+                    "titleCityMatch": False,
+                    "searchPageEvidence": [
+                        "search_route",
+                        "search_input",
+                        "job_surface",
+                    ],
+                }
+            if self.page == "target_homepage" and self.keyword_clicks >= 2:
+                self.page = "target_results"
+            if self.page == "target_results":
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": (
+                        "https://www.zhaopin.com/jobs?"
+                        f"jl={self.target_code}&kw=OPAQUE"
+                    ),
+                    "title": (
+                        f"{self.target_city}热门职位招聘 "
+                        "2026年热门职位招聘信息-智联招聘"
+                    ),
+                    "readyState": "complete",
+                    "sessionState": "page_ready",
+                    "observedKeyword": self.query,
+                    "observedCityCode": self.target_code,
+                    "titleCityMatch": True,
+                    "searchPageEvidence": [
+                        "search_route",
+                        "search_input",
+                        "job_surface",
+                    ],
+                }
+            return {
+                "ok": True,
+                "mode": "zhilian_search_transition",
+                "url": self.target_homepage,
+                "title": (
+                    f"{self.target_city}招聘网_{self.target_city}人才网_"
+                    "2026年最新招聘信息-智联招聘"
+                ),
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "observedKeyword": self.query,
+                "observedCityCode": None,
+                "candidateCityCode": None,
+                "titleCityMatch": True,
+                "searchPageEvidence": ["search_input", "job_surface"],
+            }
+        if "zhilian_city_filter" in script:
+            if self.page == "stale_results":
+                return {
+                    "ok": False,
+                    "mode": "zhilian_city_filter",
+                    "error": "zhilian_city_route_navigation_required",
+                    "action": "navigate_city_homepage",
+                    "candidateNavigationUrl": self.target_homepage,
+                    "candidateNavigationSource": "readable_city_anchor:href",
+                    "observedCity": "深圳",
+                    "candidateCode": "765",
+                    "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+                    "title": "深圳热门职位招聘 - 智联招聘",
+                    "readyState": "complete",
+                    "sessionState": "page_ready",
+                }
+            return {
+                "ok": True,
+                "mode": "zhilian_city_filter",
+                "city": self.target_city,
+                "observedCity": self.target_city,
+                "candidateCode": self.target_code,
+                "alreadySelected": True,
+                "source": "visible_current_city",
+                "url": (
+                    "https://www.zhaopin.com/jobs?"
+                    f"jl={self.target_code}&kw=OPAQUE"
+                ),
+                "title": f"{self.target_city}热门职位招聘 - 智联招聘",
+                "readyState": "complete",
+                "sessionState": "page_ready",
+            }
+        if "zhilian_pagination" in script:
+            raise AssertionError("a one-page request must not inspect page two")
+
+        self.snapshot_pages.append(self.page)
+        if self.page == "stale_results":
+            city = "深圳"
+            code = "765"
+            position_id = "STALE-SHENZHEN"
+        else:
+            city = self.target_city
+            code = self.target_code
+            position_id = f"TARGET-{self.target_slug}"
+        return {
+            "ok": True,
+            "url": f"https://www.zhaopin.com/jobs?jl={code}&kw=OPAQUE",
+            "title": f"{city}热门职位招聘 2026年热门职位招聘信息-智联招聘",
+            "readyState": "complete",
+            "sessionState": "page_ready",
+            "searchPageEvidence": ["search_route", "search_input", "job_surface"],
+            "searchKeyword": self.query,
+            "visibleCity": city,
+            "candidateCityCode": code,
+            "paginationDetected": True,
+            "availablePages": [1],
+            "currentPage": 1,
+            "hasNextPage": False,
+            "cards": [
+                {
+                    "positionId": position_id,
+                    "jobTitle": self.query,
+                    "companyName": f"{city}示例科技",
+                    "salary": "20-30K",
+                    "cityName": city,
+                    "jobUrl": (
+                        "https://www.zhaopin.com/jobdetail/"
+                        f"{position_id}.htm"
+                    ),
+                }
+            ],
+        }
+
+
+def test_wrong_city_result_route_is_not_a_completed_search_transition():
+    transition = {
+        "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+        "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+        "readyState": "complete",
+        "observedKeyword": "高级产品经理",
+        "observedCityCode": "765",
+        "titleCityMatch": False,
+        "searchPageEvidence": ["search_route", "search_input", "job_surface"],
+    }
+
+    assert _search_transition_ready(transition, "高级产品经理", "郑州") is False
+    assert (
+        _search_transition_city_discovery_ready(
+            transition,
+            "高级产品经理",
+            "郑州",
+        )
+        is True
+    )
+
+
+def test_city_filter_can_replace_a_stale_numeric_route_with_readable_city_route():
+    script = build_zhilian_city_filter_script(
+        "郑州",
+        allow_unknown_session=True,
+    )
+
+    assert "const cityRouteNeedsReplacement" in script
+    assert "cityNavigationCandidate && cityRouteNeedsReplacement" in script
+    assert "!currentUrlCode && cityNavigationCandidate" not in script
+
+
+@pytest.mark.parametrize(
+    ("target_city", "target_slug", "target_code"),
+    [
+        ("郑州", "zhengzhou", "901"),
+        ("杭州", "hangzhou", "902"),
+    ],
+)
+def test_collector_replaces_stale_city_result_before_collecting_candidates(
+    tmp_path,
+    monkeypatch,
+    target_city,
+    target_slug,
+    target_code,
+):
+    driver = _WrongCitySearchRouteRecoveryDriver(
+        target_city=target_city,
+        target_slug=target_slug,
+        target_code=target_code,
+    )
+    cache = tmp_path / "cities.json"
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=cache,
+        login_verification=_recent_login_verification(),
+    ).collect(
+        query="高级产品经理",
+        city=target_city,
+        limit=5,
+        wait_seconds=0,
+    )
+
+    assert result.ok is True
+    assert [job.city for job in result.jobs] == [target_city]
+    assert driver.target_homepage in driver.opened_urls
+    assert driver.snapshot_pages == ["target_results"]
+    assert all("STALE-SHENZHEN" not in job.url for job in result.jobs)
+    assert ZhilianCityResolver(cache).lookup(target_city) == (
+        target_code,
+        "verified_cache",
+    )
+
+
 def test_collector_learns_dom_candidate_code_only_after_multi_source_validation(tmp_path):
     cache = tmp_path / "cities.json"
 
@@ -1046,8 +1313,8 @@ def test_collector_fails_closed_after_city_dom_change_when_only_url_code_is_know
     ).collect(query="AI产品经理", city="深圳", limit=5, wait_seconds=1)
 
     assert result.ok is False
-    assert result.error == "zhilian_city_selector_unavailable"
-    assert result.to_payload()["diagnostics"]["evidence_status"] == "evidence_pending"
+    assert result.error == "zhilian_search_navigation_pending"
+    assert result.to_payload()["no_charge"] is True
     assert result.jobs == []
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-22.0"
+ZHILIAN_SELECTOR_VERSION = "2026-08-22.1"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -1281,7 +1281,27 @@ def build_zhilian_city_filter_script(
       const currentCityCandidate = candidateCode(currentCityControl);
       const cityNavigationCandidate = targetCityNavigationCandidate();
       const currentUrlCode = cityCodeFromCandidateUrl(href);
-      if (!currentUrlCode && cityNavigationCandidate) {{
+      const normalizedTargetCity = clean(targetCity).replace(/市$/, '');
+      const normalizedCurrentCity = clean(currentCity).replace(/市$/, '');
+      const currentCityMatchesTarget = !!normalizedTargetCity
+        && normalizedCurrentCity === normalizedTargetCity;
+      const titleCityMatchesTarget = !!normalizedTargetCity
+        && clean(title).includes(normalizedTargetCity);
+      function sameCityNavigationLocation(candidateUrl, currentUrl) {{
+        try {{
+          const candidate = new URL(String(candidateUrl || ''), currentUrl);
+          const current = new URL(String(currentUrl || ''));
+          const candidatePath = candidate.pathname.replace(/\\/+$/, '') || '/';
+          const currentPath = current.pathname.replace(/\\/+$/, '') || '/';
+          return candidate.origin === current.origin && candidatePath === currentPath;
+        }} catch (_error) {{
+          return false;
+        }}
+      }}
+      const cityRouteNeedsReplacement = !currentCityMatchesTarget
+        && !titleCityMatchesTarget
+        && !sameCityNavigationLocation(cityNavigationCandidate && cityNavigationCandidate.url, href);
+      if (cityNavigationCandidate && cityRouteNeedsReplacement) {{
         return JSON.stringify({{
           ok: false,
           mode,
@@ -1290,6 +1310,7 @@ def build_zhilian_city_filter_script(
           city: targetCity,
           observedCity: currentCity,
           candidateCode: currentCityCandidate,
+          currentUrlCode,
           candidateNavigationUrl: cityNavigationCandidate.url,
           candidateNavigationSource: cityNavigationCandidate.source,
           url: href,

@@ -2583,6 +2583,8 @@ def _search_transition_ready(
     ).casefold()
     if observed and observed != expected:
         return False
+    if city and not _search_transition_city_matches(result, city):
+        return False
     evidence = {
         str(item)
         for item in (result.get("searchPageEvidence") or [])
@@ -2608,26 +2610,35 @@ def _search_transition_city_discovery_ready(
     ready_state = str(result.get("readyState") or "")
     if ready_state and ready_state != "complete":
         return False
-    if _is_zhilian_search_route(str(result.get("url") or "")):
-        return False
     expected = " ".join(keyword.split()).casefold()
     observed = " ".join(
         str(result.get("observedKeyword") or result.get("searchKeyword") or "").split()
     ).casefold()
     if not expected or observed != expected:
         return False
-    normalized_city = normalize_city_name(city)
-    title = normalize_city_name(str(result.get("title") or ""))
-    if not (result.get("titleCityMatch") or (normalized_city and normalized_city in title)):
-        return False
     evidence = {
         str(item)
         for item in (result.get("searchPageEvidence") or [])
         if item
     }
-    return "search_input" in evidence and bool(
+    has_search_surface = "search_input" in evidence and bool(
         evidence & {"job_surface", "job_action", "no_results"}
     )
+    if _is_zhilian_search_route(str(result.get("url") or "")):
+        return (
+            "search_route" in evidence
+            and has_search_surface
+            and not _search_transition_city_matches(result, city)
+        )
+    return has_search_surface and _search_transition_city_matches(result, city)
+
+
+def _search_transition_city_matches(result: dict[str, Any], city: str) -> bool:
+    normalized_city = normalize_city_name(city)
+    if not normalized_city:
+        return True
+    title = normalize_city_name(str(result.get("title") or ""))
+    return bool(result.get("titleCityMatch") or normalized_city in title)
 
 
 def _search_transition_failure(

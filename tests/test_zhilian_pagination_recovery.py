@@ -1710,7 +1710,7 @@ def test_snapshot_script_emits_real_no_result_and_pagination_evidence():
     assert "allowUnknownSession = true" in city_script
     assert "readable_city_anchor:" in city_script
     assert "navigate_city_homepage" in city_script
-    assert ZHILIAN_SELECTOR_VERSION == "2026-08-22.0"
+    assert ZHILIAN_SELECTOR_VERSION == "2026-08-22.1"
 
 
 @pytest.mark.parametrize(
