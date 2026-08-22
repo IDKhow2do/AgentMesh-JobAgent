@@ -307,6 +307,19 @@ class LiepinApplySender:
             attempt.error = "login_required"
             attempt.steps = steps
             return attempt
+        detail_verification = _verify_liepin_signed_job_detail(
+            requested_url=url,
+            observed_url=str(
+                inspect_before.get("href")
+                or open_result.get("url")
+                or ""
+            ),
+        )
+        steps.append({"step": "verify_signed_job_detail", **detail_verification})
+        if not detail_verification["ok"]:
+            attempt.error = str(detail_verification["error"])
+            attempt.steps = steps
+            return attempt
         if inspect_before.get("requires_user_action"):
             attempt.error = str(inspect_before.get("user_action") or "user_action_required")
             attempt.steps = steps
@@ -620,6 +633,52 @@ def _normalize_liepin_url(url: str) -> str:
     if parsed.scheme and parsed.netloc:
         return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
     return value.rstrip("/")
+
+
+def _verify_liepin_signed_job_detail(
+    *,
+    requested_url: str,
+    observed_url: str,
+) -> dict[str, Any]:
+    expected = _canonical_liepin_job_detail_url(requested_url)
+    observed = _canonical_liepin_job_detail_url(observed_url)
+    if not expected:
+        return {
+            "ok": False,
+            "error": "signed_job_url_invalid",
+            "expected_route": "invalid",
+            "observed_route": "job_detail" if observed else "other",
+        }
+    if observed != expected:
+        return {
+            "ok": False,
+            "error": "signed_job_detail_not_verified",
+            "expected_route": "job_detail",
+            "observed_route": "job_detail" if observed else "other",
+        }
+    return {
+        "ok": True,
+        "error": "",
+        "expected_route": "job_detail",
+        "observed_route": "job_detail",
+    }
+
+
+def _canonical_liepin_job_detail_url(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"liepin.com", "www.liepin.com"}
+    ):
+        return ""
+    path = parsed.path.rstrip("/")
+    job_slug = path.removeprefix("/job/") if path.startswith("/job/") else ""
+    if not job_slug or "/" in job_slug or not job_slug.endswith(".shtml"):
+        return ""
+    return f"https://www.liepin.com/job/{job_slug}"
 
 
 def _normalized_message(value: object) -> str:
