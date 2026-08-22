@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.32] - 2026-08-22
+
+### Fixed
+
+- Require both the original readable query and the requested readable city before a Zhilian search transition can enter candidate collection. A result route that still belongs to a previously selected city is no longer treated as ready.
+- Discover an exact official readable target-city route even when the stale result URL already contains another numeric city code. The client verifies the target-city bootstrap page, resubmits the original readable query, and verifies the resulting city and query before collecting jobs.
+- Keep dynamic numeric city caching behind the existing multi-source evidence contract. Missing or conflicting target-city evidence remains fail-closed, returns no stale-city candidates, preserves the request and adds no charge.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed platform audits and preserved Zhilian Discover request remain unchanged. Resume the same `jobagent zhilian discover` command after the managed update; no new round, login reset, recollection or additional charge is required.
+
 ## [0.5.31] - 2026-08-22
 
 ### Fixed
