@@ -1282,14 +1282,17 @@ def build_zhilian_city_filter_script(
     city: str,
     *,
     allow_unknown_session: bool = False,
+    allow_navigation_fallback: bool = True,
 ) -> str:
     safe_city = json.dumps(city, ensure_ascii=False)
     safe_allow_unknown = json.dumps(bool(allow_unknown_session))
+    safe_allow_navigation = json.dumps(bool(allow_navigation_fallback))
     return f"""
     (function(){{
       const mode = 'zhilian_city_filter';
       const targetCity = {safe_city};
       const allowUnknownSession = {safe_allow_unknown};
+      const allowNavigationFallback = {safe_allow_navigation};
       {_ZHILIAN_SESSION_PROBE_JS}
       const session = zhilianSessionProbe();
       const href = session.url;
@@ -1486,7 +1489,7 @@ def build_zhilian_city_filter_script(
         && !sameCityNavigationLocation(cityNavigationCandidate.url, href);
       const usableCityNavigationCandidate = cityNavigationCandidate
         && cityNavigationChangesLocation;
-      if (usableCityNavigationCandidate && cityEvidenceMismatchesTarget) {{
+      if (allowNavigationFallback && usableCityNavigationCandidate && cityEvidenceMismatchesTarget) {{
         return JSON.stringify({{
           ok: false,
           mode,
@@ -1503,7 +1506,8 @@ def build_zhilian_city_filter_script(
           title
         }});
       }}
-      if (!usableCityNavigationCandidate
+      if (allowNavigationFallback
+          && !usableCityNavigationCandidate
           && cityEvidenceMismatchesTarget
           && cityDirectoryCandidate) {{
         return JSON.stringify({{

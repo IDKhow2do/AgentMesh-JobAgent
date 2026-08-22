@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.34] - 2026-08-23
+
+### Fixed
+
+- Recover Zhilian searches when an authenticated session redirects an independently discovered target-city route back to the generic homepage. The client now uses a bounded visible-city-control path, then resubmits the original readable query and requires matching city, query and result-page evidence before collecting candidates.
+- Disable city-directory and route fallbacks while the authenticated-homepage recovery is selecting the target city, preventing the client from looping back to the stale city or directory before the visible selection can settle.
+- Keep stale-city and login protections fail-closed: an older numeric city route cannot prove the newly requested city, and any strong login form or challenge still stops before collection.
+- Extend the isolated Linux/Xvfb release gate with the production Collector path for two target cities. The gate proves stale-city rejection, official city discovery, authenticated-homepage redirect recovery, visible city selection, readable-query continuity, target-city-only candidates and no second-page probe without an account, user data or recruiting action.
+
+### Compatibility
+
+- Existing API Keys, account binding, profile, managed Chrome profile, login session, active round, completed audits and the preserved uncharged Zhilian Discover request remain unchanged. Managed clients resume the same `jobagent zhilian discover` command after upgrade; no new round, relogin, recollection or additional charge is required.
+
 ## [0.5.33] - 2026-08-23
 
 ### Fixed
