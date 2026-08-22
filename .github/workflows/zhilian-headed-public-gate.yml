@@ -37,10 +37,12 @@ jobs:
           DISPLAY: ":99"
           ZHILIAN_GATE_REPORT: "${{ runner.temp }}/zhilian-headed-gate.json"
           ZHILIAN_GATE_TARGET_CITIES: "郑州,杭州"
+          HOME: "${{ runner.temp }}/jobagent-headed-home"
         run: |
           set -euo pipefail
           command -v Xvfb
           command -v google-chrome
+          mkdir -p "${HOME}"
 
           profile="$(mktemp -d "${RUNNER_TEMP}/zhilian-headed-profile.XXXXXX")"
           cleanup() {

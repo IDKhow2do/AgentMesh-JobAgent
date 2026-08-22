@@ -234,6 +234,8 @@ jobagent zhilian audit
 
 智联城市页可能只有可读 slug 而没有数值 city code。CLI 会先独立验证官方城市路由，再从该页提交原始可读 query；城市首页的推荐岗位不属于搜索结果。只有搜索路由已改变，并再次验证可读 query 与城市后，岗位才能进入候选。若结果页随后暴露数值 city code，CLI 会交叉验证后缓存；Agent 不得自行补码或跳过验证。
 
+同一受管 Chrome 中可能同时保留智联首页与旧城市结果页。Agent 不要自行选择或关闭页签，也不要把旧城市结果当作本轮证据。CLI 会在可见城市动作前后比较不可逆 target 状态指纹，只接管唯一发生变化的官方智联 target，并再次验证目标城市、原始可读查询与真实结果状态；若多个 target 同时变化或证据不足，会保留同一请求并安全停止，不会重复收费。
+
 智联搜索动作按按钮、输入框 Enter、表单提交的一次性有界顺序执行，动作发出本身不代表成功。CLI 必须验证输入最终可读值，以及 URL、history、文档导航或结果状态的真实变化。若返回 `zhilian_search_input_not_committed`、`zhilian_search_submit_control_not_activated` 或 `zhilian_search_transition_not_observed`，向用户展示脱敏后的 `diagnostics.action_receipt`，不要重复 Discover，立即执行顶层只读诊断命令。`zhilian_search_navigation_pending` 只表示已经观察到搜索状态开始变化但未完成，沿用原 `request_id` 和零重复收费恢复；它拥有独立的有界恢复终态，不能改写成城市证据耗尽。
 
 ### 前程无忧 / 51Job

@@ -1314,6 +1314,71 @@ class _AuthenticatedTargetRouteRedirectsToRootDriver:
         }
 
 
+class _AuthenticatedRootMultiTargetDriver(_AuthenticatedTargetRouteRedirectsToRootDriver):
+    """Model a managed profile where city selection updates another existing tab."""
+
+    def __init__(self, *, target_city: str, target_slug: str, target_code: str):
+        super().__init__(
+            target_city=target_city,
+            target_slug=target_slug,
+            target_code=target_code,
+        )
+        self.target_captures = 0
+        self.target_adoptions = 0
+        self.pending_target_transition = False
+
+    def capture_platform_target_state(self, platform: str):
+        assert platform == "zhilian"
+        self.target_captures += 1
+        return {
+            "platform": platform,
+            "target_ids": ["root-current", "stale-search"],
+            "current_target_id": "root-current",
+            "target_fingerprints": {
+                "root-current": "root-before",
+                "stale-search": "shenzhen-before",
+            },
+        }
+
+    def adopt_platform_target_transition(
+        self,
+        before,
+        *,
+        platform: str,
+        wait_seconds: float = 2,
+        allow_changed_platform_page: bool = False,
+    ):
+        del before, wait_seconds
+        assert platform == "zhilian"
+        assert allow_changed_platform_page is True
+        if not self.pending_target_transition:
+            return {
+                "ok": False,
+                "outcome": "no_platform_target_transition_observed",
+                "new_target_count": 0,
+                "previous_target_closed": False,
+            }
+        self.target_adoptions += 1
+        self.pending_target_transition = False
+        self.page = "target_homepage"
+        return {
+            "ok": True,
+            "outcome": "changed_existing_target_adopted",
+            "new_target_count": 0,
+            "previous_target_closed": False,
+        }
+
+    def _click_at(self, _x, _y):
+        if self.page == "redirected_root":
+            self.page = "city_options"
+            self.interactive_city_actions.append("expand_location")
+        elif self.page == "city_options":
+            self.pending_target_transition = True
+            self.interactive_city_actions.append("select_city")
+        elif self.page == "target_homepage":
+            self.page = "target_results"
+
+
 def test_wrong_city_result_route_is_not_a_completed_search_transition():
     transition = {
         "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
@@ -1456,6 +1521,49 @@ def test_collector_recovers_authenticated_city_route_redirect_through_visible_co
     assert result.ok is True
     assert [job.city for job in result.jobs] == [target_city]
     assert driver.interactive_city_actions == ["expand_location", "select_city"]
+    assert driver.snapshot_pages == ["target_results"]
+
+
+@pytest.mark.parametrize(
+    ("target_city", "target_slug", "target_code"),
+    [
+        ("郑州", "zhengzhou", "901"),
+        ("杭州", "hangzhou", "902"),
+    ],
+)
+def test_collector_adopts_changed_existing_target_after_authenticated_city_selection(
+    tmp_path,
+    monkeypatch,
+    target_city,
+    target_slug,
+    target_code,
+):
+    driver = _AuthenticatedRootMultiTargetDriver(
+        target_city=target_city,
+        target_slug=target_slug,
+        target_code=target_code,
+    )
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_recent_login_verification(),
+    ).collect(
+        query="高级产品经理",
+        city=target_city,
+        limit=5,
+        wait_seconds=0,
+    )
+
+    assert result.ok is True
+    assert [job.city for job in result.jobs] == [target_city]
+    assert driver.target_captures == 1
+    assert driver.target_adoptions == 1
     assert driver.snapshot_pages == ["target_results"]
 
 

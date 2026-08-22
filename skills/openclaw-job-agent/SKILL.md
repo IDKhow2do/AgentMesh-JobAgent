@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: Use AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job.
-version: 0.5.34
+version: 0.5.35
 metadata:
   openclaw:
     emoji: "💼"
@@ -55,6 +55,7 @@ Drive the official Job Agent CLI while keeping the user in control of credential
 - Profiles, rounds, decisions and audits are account-bound. On `local_state_owner_required`, ask the user to confirm ownership and run `jobagent account bind --confirm-legacy`. On `local_state_account_mismatch`, ask the user to confirm switching accounts and run `jobagent account switch --new-state`. Never edit account-state files manually.
 - Diagnose browser slowness or conflicting login evidence with `jobagent browser diagnose --platform <platform>` before asking for another login. Treat `login.state=unknown` or `conflicting` as inconclusive.
 - On Zhilian, a recent login check bound to the current round and managed Chrome may bridge a search-results page that omits the account header. Strong login forms still stop the flow. An independently verified readable city route may proceed without a numeric city code, but city-homepage recommendations are never search results; the readable query and city must be verified again after the search route changes. Treat `zhilian_job_cards_not_found` as a retryable selector diagnostic with no charge, not as proof that the user logged out. For `zhilian_search_input_not_committed`, `zhilian_search_submit_control_not_activated`, or `zhilian_search_transition_not_observed`, show the redacted `diagnostics.action_receipt`, do not repeat Discover, and run the returned read-only browser diagnostic.
+- A managed Zhilian profile may contain the current homepage and an older result tab. Do not select a tab manually or reuse the old city. The CLI compares opaque target-state fingerprints, adopts only one uniquely changed official target after the visible city action, and still requires the readable city, original query and result state to agree. Ambiguous target changes stop safely with the same request and no extra charge.
 - Forward CLI progress stages and heartbeats. Use compact `jobagent round audit` by default; expand only failures or explicitly requested details.
 
 ## Install and Profile
