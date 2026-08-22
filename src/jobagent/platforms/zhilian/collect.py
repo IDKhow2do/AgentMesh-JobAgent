@@ -23,6 +23,7 @@ from .detail import (
 )
 from .parser import is_reviewable_zhilian_job, parse_zhilian_job, zhilian_job_id
 from .selectors import (
+    build_zhilian_city_directory_script,
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
     build_zhilian_pagination_script,
@@ -37,6 +38,7 @@ from .session_evidence import classify_zhilian_session_evidence
 # itself starts from the public entry page and uses visible form controls.
 _ZHILIAN_CITY_CODES = BUNDLED_CITY_CODES
 ZHILIAN_SEARCH_ENTRY_URL = "https://www.zhaopin.com/"
+ZHILIAN_CITY_DIRECTORY_URL = "https://www.zhaopin.com/citymap"
 ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS = 75
 ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS = 75
 ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS = 8
@@ -785,14 +787,6 @@ class ZhilianReadOnlyCollector:
             )
             if search_action_receipt:
                 last["searchActionReceipt"] = search_action_receipt
-            if _strong_login_evidence(last):
-                return {
-                    **last,
-                    "ok": False,
-                    "error": "zhilian_login_required",
-                    "settleAttempts": attempts,
-                    "settleTimeoutSeconds": timeout,
-                }
             if _search_transition_ready(last, keyword, city):
                 result = {
                     **last,
@@ -955,6 +949,14 @@ class ZhilianReadOnlyCollector:
                             "settleAttempts": attempts,
                             "settleTimeoutSeconds": timeout,
                         }
+            if _strong_login_evidence(last):
+                return {
+                    **last,
+                    "ok": False,
+                    "error": "zhilian_login_required",
+                    "settleAttempts": attempts,
+                    "settleTimeoutSeconds": timeout,
+                }
             if _search_transition_keyword_conflict(last, keyword):
                 return {
                     **last,
@@ -1005,6 +1007,94 @@ class ZhilianReadOnlyCollector:
             parse_error="zhilian_js_parse_failed",
         )
         action = str(result.get("action") or "")
+        if action == "navigate_city_directory":
+            directory_url = _safe_zhilian_city_directory_url(
+                result.get("candidateDirectoryUrl")
+            )
+            if not directory_url:
+                return {
+                    **result,
+                    "ok": False,
+                    "error": "zhilian_city_directory_navigation_unverified",
+                    "navigationRejected": True,
+                }
+            signature = (action, directory_url)
+            if signature in attempted_actions:
+                return {**result, "actionRepeated": True}
+            attempted_actions.add(signature)
+            directory_open = self.driver.open_url_in_new_tab(
+                directory_url,
+                wait_seconds=wait_seconds,
+            )
+            if not directory_open.get("ok"):
+                return {
+                    **result,
+                    "ok": False,
+                    "error": str(
+                        directory_open.get("error")
+                        or "zhilian_city_directory_navigation_failed"
+                    ),
+                    "directoryNavigationUrl": directory_url,
+                    "directoryNavigationResult": directory_open,
+                }
+            directory_result = self._await_city_directory_candidate(
+                city,
+                wait_seconds=wait_seconds,
+            )
+            target_url = _safe_zhilian_city_homepage_url(
+                directory_result.get("candidateNavigationUrl")
+            )
+            if not directory_result.get("ok") or not target_url:
+                return {
+                    **result,
+                    "ok": False,
+                    "error": str(
+                        directory_result.get("error")
+                        or "zhilian_city_directory_target_not_found"
+                    ),
+                    "directoryNavigationUrl": directory_url,
+                    "directoryNavigationResult": directory_result,
+                }
+            target_signature = ("navigate_city_homepage", target_url)
+            if target_signature in attempted_actions:
+                return {
+                    **result,
+                    "ok": False,
+                    "error": "zhilian_city_navigation_repeated",
+                    "actionRepeated": True,
+                    "directoryNavigationResult": directory_result,
+                }
+            attempted_actions.add(target_signature)
+            target_open = self.driver.open_url_in_new_tab(
+                target_url,
+                wait_seconds=wait_seconds,
+            )
+            return {
+                **result,
+                "ok": bool(target_open.get("ok")),
+                "navigated": bool(target_open.get("ok")),
+                "navigationUrl": target_url,
+                "navigationSource": "official_city_directory",
+                "directoryNavigationUrl": directory_url,
+                "directoryNavigationResult": directory_result,
+                "navigationResult": target_open,
+                "loginRequired": False,
+                "sessionState": "navigation_started",
+                "sessionReason": "destination_requires_fresh_probe",
+                "loginEvidence": [],
+                "weakLoginEvidence": [],
+                "strongLoginEvidence": [],
+                "accountEvidence": [],
+                "strongAccountEvidence": [],
+                "error": (
+                    ""
+                    if target_open.get("ok")
+                    else str(
+                        target_open.get("error")
+                        or "zhilian_city_navigation_failed"
+                    )
+                ),
+            }
         if action == "navigate_city_homepage":
             navigation_url = _safe_zhilian_city_navigation_url(
                 result.get("candidateNavigationUrl")
@@ -1030,6 +1120,14 @@ class ZhilianReadOnlyCollector:
                 "navigated": bool(open_result.get("ok")),
                 "navigationUrl": navigation_url,
                 "navigationResult": open_result,
+                "loginRequired": False,
+                "sessionState": "navigation_started",
+                "sessionReason": "destination_requires_fresh_probe",
+                "loginEvidence": [],
+                "weakLoginEvidence": [],
+                "strongLoginEvidence": [],
+                "accountEvidence": [],
+                "strongAccountEvidence": [],
                 "error": (
                     "" if open_result.get("ok")
                     else str(open_result.get("error") or "zhilian_city_navigation_failed")
@@ -1053,6 +1151,54 @@ class ZhilianReadOnlyCollector:
             return result
         self.driver._click_at(click_point.get("x"), click_point.get("y"))
         return {**result, "nativeClicked": True}
+
+    def _await_city_directory_candidate(
+        self,
+        city: str,
+        *,
+        wait_seconds: int,
+    ) -> dict[str, Any]:
+        timeout = max(
+            float(wait_seconds),
+            float(ZHILIAN_PAGE_SETTLE_TIMEOUT_SECONDS),
+        )
+        deadline = time.monotonic() + timeout
+        script = build_zhilian_city_directory_script(city)
+        attempts = 0
+        last: dict[str, Any] = {}
+        while True:
+            attempts += 1
+            last = _unwrap_js_result_with_error(
+                self.driver._exec_js(script),
+                parse_error="zhilian_js_parse_failed",
+            )
+            candidate_url = _safe_zhilian_city_homepage_url(
+                last.get("candidateNavigationUrl")
+            )
+            if (
+                last.get("ok")
+                and last.get("action") == "navigate_city_homepage"
+                and candidate_url
+            ):
+                return {
+                    **last,
+                    "candidateNavigationUrl": candidate_url,
+                    "directoryAttempts": attempts,
+                    "directoryTimeoutSeconds": timeout,
+                }
+            if time.monotonic() >= deadline:
+                return {
+                    **last,
+                    "ok": False,
+                    "error": str(
+                        last.get("error")
+                        or "zhilian_city_directory_target_not_found"
+                    ),
+                    "retryable": True,
+                    "directoryAttempts": attempts,
+                    "directoryTimeoutSeconds": timeout,
+                }
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
 
     def _await_city_bootstrap_destination(
         self,
@@ -2434,6 +2580,55 @@ def _safe_zhilian_city_navigation_url(value: Any) -> str | None:
     return parsed.geturl()
 
 
+def _safe_zhilian_city_directory_url(value: Any) -> str | None:
+    safe = _safe_zhilian_city_navigation_url(value)
+    if not safe:
+        return None
+    parsed = urlparse(safe)
+    if parsed.query or parsed.fragment:
+        return None
+    if parsed.path.rstrip("/") != "/citymap":
+        return None
+    return ZHILIAN_CITY_DIRECTORY_URL
+
+
+def _safe_zhilian_city_homepage_url(value: Any) -> str | None:
+    safe = _safe_zhilian_city_navigation_url(value)
+    if not safe:
+        return None
+    parsed = urlparse(safe)
+    if parsed.query or parsed.fragment:
+        return None
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    reserved = {
+        "citymap",
+        "jobs",
+        "sou",
+        "jobdetail",
+        "companydetail",
+        "passport",
+        "login",
+        "user",
+        "resume",
+    }
+    if len(segments) != 1 or segments[0].casefold() in reserved:
+        return None
+    return safe
+
+
+def _weak_navigation_login_only(result: dict[str, Any]) -> bool:
+    if _strong_login_evidence(result):
+        return False
+    if str(result.get("sessionReason") or "") != "weak_login_without_account_evidence":
+        return False
+    evidence = {
+        str(item or "").strip().casefold()
+        for item in (result.get("loginEvidence") or [])
+        if str(item or "").strip()
+    }
+    return bool(evidence) and evidence <= {"visible_login_control"}
+
+
 def _build_verified_city_route_receipt(
     result: dict[str, Any],
     city: str,
@@ -2551,7 +2746,10 @@ def _city_bootstrap_destination_verified(
         if observed_path != expected_path and not _is_zhilian_search_route(observed_url):
             return False
     state = str(result.get("sessionState") or "")
-    if state == "login_required":
+    if state == "login_required" and not (
+        _valid_login_verification(login_verification)
+        and _weak_navigation_login_only(result)
+    ):
         return False
     if state == "unknown" and not _valid_login_verification(login_verification):
         return False
@@ -2605,7 +2803,7 @@ def _search_transition_city_discovery_ready(
     keyword: str,
     city: str,
 ) -> bool:
-    if not city or _strong_login_evidence(result):
+    if not city:
         return False
     ready_state = str(result.get("readyState") or "")
     if ready_state and ready_state != "complete":

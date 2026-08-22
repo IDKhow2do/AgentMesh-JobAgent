@@ -20,6 +20,7 @@ from .detail import (
 from .parser import collect_zhilian_fixture, parse_zhilian_job, zhilian_job_id
 from .selectors import (
     ZHILIAN_SELECTOR_VERSION,
+    build_zhilian_city_directory_script,
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
     build_zhilian_search_control_activation_script,
@@ -47,6 +48,7 @@ __all__ = [
     "ZhilianSessionGuide",
     "ZhilianSessionStatus",
     "build_zhilian_detail_snapshot_script",
+    "build_zhilian_city_directory_script",
     "build_zhilian_city_filter_script",
     "build_zhilian_keyword_search_script",
     "build_zhilian_search_control_activation_script",
