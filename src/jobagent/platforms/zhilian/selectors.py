@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-22.1"
+ZHILIAN_SELECTOR_VERSION = "2026-08-22.2"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -417,6 +417,112 @@ def build_zhilian_session_probe_script() -> str:
     """
 
 
+def build_zhilian_city_directory_script(city: str) -> str:
+    safe_city = json.dumps(city, ensure_ascii=False)
+    return f"""
+    (function(){{
+      const mode = 'zhilian_city_directory';
+      const targetCity = {safe_city};
+      const href = location.href || '';
+      const title = document.title || '';
+      const readyState = document.readyState || 'unknown';
+      function clean(value){{
+        return String(value || '').replace(/\\s+/g, ' ').trim();
+      }}
+      function officialCityHomepage(value){{
+        try {{
+          const parsed = new URL(String(value || ''), href);
+          const segments = parsed.pathname.split('/').filter(Boolean);
+          const reserved = new Set([
+            'citymap', 'jobs', 'sou', 'jobdetail', 'companydetail',
+            'passport', 'login', 'user', 'resume'
+          ]);
+          if (parsed.protocol !== 'https:'
+              || parsed.hostname !== 'www.zhaopin.com'
+              || parsed.port
+              || parsed.username
+              || parsed.password
+              || parsed.search
+              || parsed.hash
+              || segments.length !== 1
+              || reserved.has(String(segments[0] || '').toLowerCase())) {{
+            return null;
+          }}
+          return parsed.href;
+        }} catch (_error) {{
+          return null;
+        }}
+      }}
+      let directoryPage = false;
+      try {{
+        const current = new URL(href);
+        directoryPage = current.protocol === 'https:'
+          && current.hostname === 'www.zhaopin.com'
+          && /^\\/citymap\\/?$/.test(current.pathname)
+          && !current.search
+          && !current.hash;
+      }} catch (_error) {{
+        directoryPage = false;
+      }}
+      if (!directoryPage) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_city_directory_unverified',
+          directoryPage,
+          readyState,
+          title
+        }});
+      }}
+      if (!['interactive', 'complete'].includes(readyState)) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_city_directory_loading',
+          directoryPage,
+          readyState,
+          title
+        }});
+      }}
+      const normalizedTarget = clean(targetCity).replace(/市$/, '');
+      const candidates = Array.from(document.querySelectorAll('a[href]'))
+        .map((el) => {{
+          const text = clean(el.innerText || el.textContent || '').replace(/市$/, '');
+          const navigationUrl = officialCityHomepage(el.getAttribute('href') || el.href || '');
+          const rect = el.getBoundingClientRect();
+          const score = (text === normalizedTarget ? 10 : 0)
+            + (rect.top >= 0 && rect.top < 1200 ? 2 : 0);
+          return {{text, navigationUrl, score}};
+        }})
+        .filter((item) => item.text === normalizedTarget && item.navigationUrl)
+        .sort((a, b) => b.score - a.score);
+      if (!candidates.length) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_city_directory_target_not_found',
+          directoryPage,
+          readyState,
+          title,
+          city: targetCity
+        }});
+      }}
+      return JSON.stringify({{
+        ok: true,
+        mode,
+        action: 'navigate_city_homepage',
+        controlRole: 'city_directory_anchor',
+        city: targetCity,
+        candidateNavigationUrl: candidates[0].navigationUrl,
+        candidateNavigationSource: 'official_city_directory',
+        directoryPage,
+        readyState,
+        title
+      }});
+    }})()
+    """
+
+
 def build_zhilian_keyword_search_script(
     keyword: str,
     *,
@@ -502,7 +608,9 @@ def build_zhilian_keyword_search_script(
           return {{ready: false, kind: 'invalid_destination'}};
         }}
       }}
-      if (session.loginRequired) {{
+      const weakNavigationOnly = session.sessionReason === 'weak_login_without_account_evidence'
+        && !(session.strongLoginEvidence || []).length;
+      if (session.loginRequired && !(allowUnknownSession && weakNavigationOnly)) {{
         return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', ...session}});
       }}
       if (session.sessionState === 'loading'
@@ -1190,7 +1298,44 @@ def build_zhilian_city_filter_script(
       if (!targetCity) {{
         return JSON.stringify({{ok: true, mode, skipped: true}});
       }}
-      if (session.loginRequired) {{
+      const normalizedTargetCity = String(targetCity || '').replace(/市$/, '');
+      let publicDirectoryUrl = null;
+      let officialSearchRoute = false;
+      try {{
+        const current = new URL(href);
+        const hostname = String(current.hostname || '').toLowerCase();
+        const officialHost = hostname === 'zhaopin.com'
+          || hostname.endsWith('.zhaopin.com');
+        officialSearchRoute = officialHost
+          && (/^\\/jobs\\/?$/.test(current.pathname) || /^\\/sou(?:\\/|$)/.test(current.pathname));
+        if (current.protocol === 'https:'
+            && officialHost
+            && !current.port
+            && !current.username
+            && !current.password) {{
+          publicDirectoryUrl = 'https://www.zhaopin.com/citymap';
+        }}
+      }} catch (_error) {{}}
+      const staleCityResult = officialSearchRoute
+        && normalizedTargetCity
+        && !String(title || '').includes(normalizedTargetCity);
+      if (session.loginRequired && staleCityResult && publicDirectoryUrl) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_city_directory_navigation_required',
+          action: 'navigate_city_directory',
+          controlRole: 'official_city_directory',
+          city: targetCity,
+          candidateDirectoryUrl: publicDirectoryUrl,
+          sessionBlocked: true,
+          url: href,
+          title
+        }});
+      }}
+      const weakNavigationOnly = session.sessionReason === 'weak_login_without_account_evidence'
+        && !(session.strongLoginEvidence || []).length;
+      if (session.loginRequired && !(allowUnknownSession && weakNavigationOnly)) {{
         return JSON.stringify({{ok: false, mode, error: 'zhilian_login_required', ...session}});
       }}
       if (session.sessionState === 'loading'
@@ -1280,13 +1425,50 @@ def build_zhilian_city_filter_script(
       const currentCity = currentCityControl ? directText(currentCityControl) : '';
       const currentCityCandidate = candidateCode(currentCityControl);
       const cityNavigationCandidate = targetCityNavigationCandidate();
+      function cityDirectoryNavigationCandidate() {{
+        const candidates = Array.from(document.querySelectorAll('a[href]'))
+          .map((el) => {{
+            try {{
+              const parsed = new URL(el.getAttribute('href') || el.href || '', href);
+              const text = clean(el.innerText || el.textContent || '');
+              const valid = parsed.protocol === 'https:'
+                && parsed.hostname === 'www.zhaopin.com'
+                && /^\\/citymap\\/?$/.test(parsed.pathname)
+                && !parsed.search
+                && !parsed.hash;
+              const score = (/^(切换|切换城市|城市切换)$/.test(text) ? 8 : 0)
+                + (visible(el) ? 2 : 0);
+              return {{url: valid ? parsed.href : null, score}};
+            }} catch (_error) {{
+              return {{url: null, score: 0}};
+            }}
+          }})
+          .filter((item) => item.url)
+          .sort((a, b) => b.score - a.score);
+        if (candidates.length) return candidates[0].url;
+        try {{
+          const current = new URL(href);
+          const hostname = String(current.hostname || '').toLowerCase();
+          const officialHost = hostname === 'zhaopin.com'
+            || hostname.endsWith('.zhaopin.com');
+          if (current.protocol === 'https:'
+              && officialHost
+              && !current.port
+              && !current.username
+              && !current.password) {{
+            return 'https://www.zhaopin.com/citymap';
+          }}
+        }} catch (_error) {{}}
+        return null;
+      }}
+      const cityDirectoryCandidate = cityDirectoryNavigationCandidate();
       const currentUrlCode = cityCodeFromCandidateUrl(href);
-      const normalizedTargetCity = clean(targetCity).replace(/市$/, '');
+      const cleanTargetCity = clean(targetCity).replace(/市$/, '');
       const normalizedCurrentCity = clean(currentCity).replace(/市$/, '');
-      const currentCityMatchesTarget = !!normalizedTargetCity
-        && normalizedCurrentCity === normalizedTargetCity;
-      const titleCityMatchesTarget = !!normalizedTargetCity
-        && clean(title).includes(normalizedTargetCity);
+      const currentCityMatchesTarget = !!cleanTargetCity
+        && normalizedCurrentCity === cleanTargetCity;
+      const titleCityMatchesTarget = !!cleanTargetCity
+        && clean(title).includes(cleanTargetCity);
       function sameCityNavigationLocation(candidateUrl, currentUrl) {{
         try {{
           const candidate = new URL(String(candidateUrl || ''), currentUrl);
@@ -1298,21 +1480,42 @@ def build_zhilian_city_filter_script(
           return false;
         }}
       }}
-      const cityRouteNeedsReplacement = !currentCityMatchesTarget
-        && !titleCityMatchesTarget
-        && !sameCityNavigationLocation(cityNavigationCandidate && cityNavigationCandidate.url, href);
-      if (cityNavigationCandidate && cityRouteNeedsReplacement) {{
+      const cityEvidenceMismatchesTarget = !currentCityMatchesTarget
+        && !titleCityMatchesTarget;
+      const cityNavigationChangesLocation = !!cityNavigationCandidate
+        && !sameCityNavigationLocation(cityNavigationCandidate.url, href);
+      const usableCityNavigationCandidate = cityNavigationCandidate
+        && cityNavigationChangesLocation;
+      if (usableCityNavigationCandidate && cityEvidenceMismatchesTarget) {{
         return JSON.stringify({{
           ok: false,
           mode,
           error: 'zhilian_city_route_navigation_required',
           action: 'navigate_city_homepage',
+          controlRole: 'target_city_anchor',
           city: targetCity,
           observedCity: currentCity,
           candidateCode: currentCityCandidate,
           currentUrlCode,
           candidateNavigationUrl: cityNavigationCandidate.url,
           candidateNavigationSource: cityNavigationCandidate.source,
+          url: href,
+          title
+        }});
+      }}
+      if (!usableCityNavigationCandidate
+          && cityEvidenceMismatchesTarget
+          && cityDirectoryCandidate) {{
+        return JSON.stringify({{
+          ok: false,
+          mode,
+          error: 'zhilian_city_directory_navigation_required',
+          action: 'navigate_city_directory',
+          controlRole: 'official_city_directory',
+          city: targetCity,
+          observedCity: currentCity,
+          currentUrlCode,
+          candidateDirectoryUrl: cityDirectoryCandidate,
           url: href,
           title
         }});
@@ -1367,8 +1570,11 @@ def build_zhilian_city_filter_script(
         && clean(root.innerText || root.textContent || '').includes(targetCity)
         && cityCount(clean(root.innerText || root.textContent || '')) >= 4;
       if (!rootHasCityOptions && !explicitTargetOptions.length) {{
-        const header = findLocationHeader() || currentCityControl;
-        if (header) {{
+        const expander = currentCityControl || findLocationHeader();
+        const controlRole = currentCityControl
+          ? 'current_city'
+          : (expander ? 'location_header' : 'none');
+        if (expander) {{
           expanded = true;
         }}
         return JSON.stringify({{
@@ -1376,8 +1582,9 @@ def build_zhilian_city_filter_script(
           mode,
           error: 'zhilian_city_options_collapsed',
           action: 'expand_location',
+          controlRole,
           expanded,
-          clickPoint: header ? clickPoint(header) : null,
+          clickPoint: expander ? clickPoint(expander) : null,
           city: targetCity,
           url: href,
           title
@@ -1428,6 +1635,7 @@ def build_zhilian_city_filter_script(
         candidateCode: option.candidateCode,
         applied: true,
         action: 'select_city',
+        controlRole: 'target_city_option',
         clickPoint: clickPoint(option.el),
         urlBefore: href,
         title

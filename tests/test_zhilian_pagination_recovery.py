@@ -14,6 +14,8 @@ from jobagent.platforms.zhilian.collect import (
     _city_bootstrap_destination_verified,
     _query_page_exhausted,
     _safe_search_action_receipt,
+    _safe_zhilian_city_directory_url,
+    _safe_zhilian_city_homepage_url,
     _safe_zhilian_city_navigation_url,
     parse_zhilian_snapshot_jobs,
     zhilian_candidate_collection_completed,
@@ -1710,7 +1712,7 @@ def test_snapshot_script_emits_real_no_result_and_pagination_evidence():
     assert "allowUnknownSession = true" in city_script
     assert "readable_city_anchor:" in city_script
     assert "navigate_city_homepage" in city_script
-    assert ZHILIAN_SELECTOR_VERSION == "2026-08-22.1"
+    assert ZHILIAN_SELECTOR_VERSION == "2026-08-22.2"
 
 
 @pytest.mark.parametrize(
@@ -1727,6 +1729,35 @@ def test_snapshot_script_emits_real_no_result_and_pagination_evidence():
 )
 def test_city_bootstrap_navigation_accepts_only_safe_official_routes(value, expected):
     assert (_safe_zhilian_city_navigation_url(value) is not None) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://www.zhaopin.com/citymap", True),
+        ("https://www.zhaopin.com/citymap/", True),
+        ("https://www.zhaopin.com/citymap?next=evil", False),
+        ("https://www.zhaopin.com/zhengzhou/", False),
+        ("https://evil.example/citymap", False),
+    ],
+)
+def test_city_directory_navigation_accepts_only_the_official_directory(value, expected):
+    assert (_safe_zhilian_city_directory_url(value) is not None) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://www.zhaopin.com/zhengzhou/", True),
+        ("https://www.zhaopin.com/hangzhou/", True),
+        ("https://www.zhaopin.com/jobs?jl=765", False),
+        ("https://www.zhaopin.com/citymap", False),
+        ("https://www.zhaopin.com/zhengzhou/?next=evil", False),
+        ("https://evil.example/zhengzhou/", False),
+    ],
+)
+def test_city_homepage_navigation_accepts_only_one_official_readable_route(value, expected):
+    assert (_safe_zhilian_city_homepage_url(value) is not None) is expected
 
 
 def test_city_bootstrap_destination_requires_independent_readable_evidence():
@@ -1758,6 +1789,34 @@ def test_city_bootstrap_destination_requires_independent_readable_evidence():
         {**destination, "strongLoginEvidence": ["visible_credential_form"]},
         "深圳",
         _login_verification(),
+    ) is False
+
+
+def test_city_bootstrap_allows_only_weak_login_navigation_with_recent_receipt():
+    destination = {
+        "url": "https://www.zhaopin.com/zhengzhou/",
+        "title": "郑州招聘网_郑州人才网_2026年郑州最新招聘信息-智联招聘",
+        "titleCityMatch": True,
+        "readyState": "complete",
+        "sessionState": "login_required",
+        "sessionReason": "weak_login_without_account_evidence",
+        "loginEvidence": ["visible_login_control"],
+        "weakLoginEvidence": ["visible_login_control"],
+        "strongLoginEvidence": [],
+        "searchPageEvidence": ["search_input", "job_surface"],
+    }
+
+    assert _city_bootstrap_destination_verified(
+        destination,
+        "郑州",
+        _login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
+    ) is True
+    assert _city_bootstrap_destination_verified(
+        {**destination, "strongLoginEvidence": ["visible_credential_form"]},
+        "郑州",
+        _login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
     ) is False
 
 

@@ -1,0 +1,101 @@
+name: Zhilian headed public-page gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/zhilian-headed-public-gate.yml"
+      - "scripts/ci/zhilian_headed_public_gate.py"
+      - "src/jobagent/drivers/boss/cdp_driver.py"
+      - "src/jobagent/infra/platform_tabs.py"
+      - "src/jobagent/platforms/zhilian/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zhilian-headed-public-gate
+  cancel-in-progress: true
+
+jobs:
+  public-page-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install candidate
+        run: python -m pip install -e .
+
+      - name: Run isolated headed Chrome under Xvfb
+        env:
+          DISPLAY: ":99"
+          ZHILIAN_GATE_REPORT: "${{ runner.temp }}/zhilian-headed-gate.json"
+          ZHILIAN_GATE_TARGET_CITIES: "郑州,杭州"
+        run: |
+          set -euo pipefail
+          command -v Xvfb
+          command -v google-chrome
+
+          profile="$(mktemp -d "${RUNNER_TEMP}/zhilian-headed-profile.XXXXXX")"
+          cleanup() {
+            set +e
+            if [[ -n "${chrome_pid:-}" ]]; then
+              kill "${chrome_pid}" 2>/dev/null
+              wait "${chrome_pid}" 2>/dev/null
+            fi
+            if [[ -n "${xvfb_pid:-}" ]]; then
+              kill "${xvfb_pid}" 2>/dev/null
+              wait "${xvfb_pid}" 2>/dev/null
+            fi
+            rm -rf "${profile}" 2>/dev/null || true
+            return 0
+          }
+          trap cleanup EXIT
+
+          Xvfb "${DISPLAY}" -screen 0 1440x1000x24 >"${RUNNER_TEMP}/xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          display_socket="/tmp/.X11-unix/X${DISPLAY#:}"
+          for _ in $(seq 1 40); do
+            if [[ -S "${display_socket}" ]]; then
+              break
+            fi
+            kill -0 "${xvfb_pid}"
+            sleep 0.25
+          done
+          [[ -S "${display_socket}" ]]
+
+          google-chrome \
+            --remote-debugging-port=19222 \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-allow-origins=* \
+            --user-data-dir="${profile}" \
+            --password-store=basic \
+            --no-first-run \
+            --no-default-browser-check \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --window-size=1440,1000 \
+            https://www.zhaopin.com/shenzhen/ \
+            >"${RUNNER_TEMP}/chrome.log" 2>&1 &
+          chrome_pid=$!
+
+          python scripts/ci/zhilian_headed_public_gate.py | tee "${RUNNER_TEMP}/zhilian-headed-gate.stdout"
+
+      - name: Upload redacted gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhilian-headed-public-gate
+          path: |
+            ${{ runner.temp }}/zhilian-headed-gate.json
+            ${{ runner.temp }}/zhilian-headed-gate.stdout
+            ${{ runner.temp }}/chrome.log
+            ${{ runner.temp }}/xvfb.log
+          if-no-files-found: warn
+          retention-days: 7

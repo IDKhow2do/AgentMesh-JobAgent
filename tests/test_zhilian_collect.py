@@ -16,6 +16,7 @@ from jobagent.platforms.zhilian.collect import (
     build_zhilian_search_url,
 )
 from jobagent.platforms.zhilian.selectors import (
+    build_zhilian_city_directory_script,
     build_zhilian_city_filter_script,
     build_zhilian_keyword_search_script,
     build_zhilian_search_control_activation_script,
@@ -159,14 +160,133 @@ def test_next_page_failure_is_not_reported_as_keyword_rejection():
     assert payload["next_suggested"] == "jobagent browser diagnose --platform zhilian"
 
 
-def test_city_filter_checks_visible_selected_city_before_expanding():
+def test_city_filter_expands_current_city_control_before_static_location_header():
     script = build_zhilian_city_filter_script("深圳")
     selected_city_branch = script.index("source: 'visible_current_city'")
-    expand_city_branch = script.index("findLocationHeader() || currentCityControl")
+    expand_city_branch = script.index("currentCityControl || findLocationHeader()")
 
     assert selected_city_branch < expand_city_branch
+    assert "const controlRole = currentCityControl" in script
+    assert "? 'current_city'" in script
+    assert "(expander ? 'location_header' : 'none')" in script
     assert "currentCity === targetCity" in script
     assert "alreadySelected: true" in script
+
+
+def test_stale_city_filter_uses_official_directory_before_interactive_controls():
+    script = build_zhilian_city_filter_script("郑州")
+
+    directory_branch = script.index("action: 'navigate_city_directory'")
+    interactive_branch = script.index("action: 'expand_location'")
+
+    assert directory_branch < interactive_branch
+    assert "https://www.zhaopin.com/citymap" in script
+    assert "hostname.endsWith('.zhaopin.com')" in script
+    assert "return 'https://www.zhaopin.com/citymap'" in script
+    assert "candidateDirectoryUrl" in script
+    assert "jl=765" not in script
+
+
+def test_login_obscured_stale_result_can_only_navigate_to_public_city_directory():
+    script = build_zhilian_city_filter_script("郑州")
+
+    public_directory_branch = script.index("sessionBlocked: true")
+    login_failure_branch = script.index("error: 'zhilian_login_required'")
+
+    assert public_directory_branch < login_failure_branch
+    assert "const staleCityResult = officialSearchRoute" in script
+    assert "candidateDirectoryUrl: publicDirectoryUrl" in script
+    assert "action: 'select_city'" in script[login_failure_branch:]
+
+
+def test_city_directory_discovers_an_exact_readable_official_homepage():
+    script = build_zhilian_city_directory_script("郑州市")
+
+    assert "mode = 'zhilian_city_directory'" in script
+    assert "normalizedTarget" in script
+    assert "text === normalizedTarget" in script
+    assert "hostname !== 'www.zhaopin.com'" in script
+    assert "action: 'navigate_city_homepage'" in script
+    assert "candidateNavigationUrl" in script
+    assert "jl=" not in script
+
+
+def test_recent_login_receipt_only_overrides_a_weak_public_navigation_control():
+    keyword_script = build_zhilian_keyword_search_script(
+        "高级产品经理",
+        allow_unknown_session=True,
+    )
+    city_script = build_zhilian_city_filter_script(
+        "郑州",
+        allow_unknown_session=True,
+    )
+
+    for script in (keyword_script, city_script):
+        assert "weakNavigationOnly" in script
+        assert "allowUnknownSession && weakNavigationOnly" in script
+        assert "strongLoginEvidence" in script
+
+
+class _CityDirectoryRecoveryDriver:
+    def __init__(self, city: str, city_slug: str):
+        self.city = city
+        self.city_homepage = f"https://www.zhaopin.com/{city_slug}/"
+        self.opened_urls: list[str] = []
+
+    def _exec_js(self, script: str):
+        if "const mode = 'zhilian_city_filter'" in script:
+            return {
+                "ok": False,
+                "action": "navigate_city_directory",
+                "error": "zhilian_city_directory_navigation_required",
+                "candidateDirectoryUrl": "https://www.zhaopin.com/citymap",
+                "loginRequired": True,
+                "sessionState": "login_required",
+                "strongLoginEvidence": ["visible_login_challenge"],
+            }
+        if "const mode = 'zhilian_city_directory'" in script:
+            return {
+                "ok": True,
+                "action": "navigate_city_homepage",
+                "candidateNavigationUrl": self.city_homepage,
+                "candidateNavigationSource": "official_city_directory",
+                "readyState": "complete",
+            }
+        raise AssertionError("unexpected script")
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 5):
+        self.opened_urls.append(url)
+        return {"ok": True, "url": url, "title": ""}
+
+
+@pytest.mark.parametrize(
+    ("city", "city_slug"),
+    [("郑州", "zhengzhou"), ("杭州", "hangzhou")],
+)
+def test_city_discovery_navigates_through_official_directory(city, city_slug):
+    driver = _CityDirectoryRecoveryDriver(city, city_slug)
+    collector = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_recent_login_verification(),
+    )
+
+    result = collector._advance_city_discovery(
+        city,
+        attempted_actions=set(),
+        wait_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["navigated"] is True
+    assert result["navigationSource"] == "official_city_directory"
+    assert result["loginRequired"] is False
+    assert result["sessionState"] == "navigation_started"
+    assert result["strongLoginEvidence"] == []
+    assert result["navigationUrl"] == f"https://www.zhaopin.com/{city_slug}/"
+    assert driver.opened_urls == [
+        "https://www.zhaopin.com/citymap",
+        f"https://www.zhaopin.com/{city_slug}/",
+    ]
 
 
 def test_city_filter_discovers_candidate_codes_from_current_dom_metadata():
@@ -970,14 +1090,36 @@ def test_wrong_city_result_route_is_not_a_completed_search_transition():
     )
 
 
+def test_login_obscured_wrong_city_result_can_enter_read_only_city_recovery():
+    transition = {
+        "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+        "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+        "readyState": "complete",
+        "observedKeyword": "高级产品经理",
+        "observedCityCode": "765",
+        "titleCityMatch": False,
+        "searchPageEvidence": ["search_route", "search_input", "job_surface"],
+        "loginRequired": True,
+        "strongLoginEvidence": ["visible_login_challenge"],
+    }
+
+    assert _search_transition_city_discovery_ready(
+        transition,
+        "高级产品经理",
+        "郑州",
+    ) is True
+
+
 def test_city_filter_can_replace_a_stale_numeric_route_with_readable_city_route():
     script = build_zhilian_city_filter_script(
         "郑州",
         allow_unknown_session=True,
     )
 
-    assert "const cityRouteNeedsReplacement" in script
-    assert "cityNavigationCandidate && cityRouteNeedsReplacement" in script
+    assert "const cityEvidenceMismatchesTarget" in script
+    assert "const cityNavigationChangesLocation = !!cityNavigationCandidate" in script
+    assert "usableCityNavigationCandidate && cityEvidenceMismatchesTarget" in script
+    assert "!usableCityNavigationCandidate" in script
     assert "!currentUrlCode && cityNavigationCandidate" not in script
 
 
