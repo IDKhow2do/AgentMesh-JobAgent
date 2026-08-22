@@ -118,6 +118,41 @@ class CDPBossDriver(BossActionDriver):
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    def _target_info_map(self) -> dict[str, dict[str, Any]]:
+        """Return CDP target metadata when the connected Chrome exposes it."""
+
+        if getattr(self, "_target_info_supported", None) is False:
+            return {}
+        try:
+            result = self.cdp.send("Target.getTargets", timeout=2)
+        except Exception:
+            self._target_info_supported = False
+            return {}
+        infos = result.get("targetInfos") if isinstance(result, dict) else None
+        if not isinstance(infos, list):
+            self._target_info_supported = False
+            return {}
+        self._target_info_supported = True
+        return {
+            str(info.get("targetId") or ""): info
+            for info in infos
+            if isinstance(info, dict) and info.get("targetId")
+        }
+
+    @staticmethod
+    def _target_opener_id(
+        target: dict[str, Any],
+        target_infos: dict[str, dict[str, Any]],
+    ) -> str:
+        target_id = str(target.get("id") or target.get("targetId") or "")
+        info = target_infos.get(target_id, {})
+        return str(
+            target.get("openerId")
+            or target.get("opener_id")
+            or info.get("openerId")
+            or ""
+        )
+
     @classmethod
     def _trusted_changed_platform_target(
         cls,
@@ -152,23 +187,22 @@ class CDPBossDriver(BossActionDriver):
         self._ensure_connected(platform=platform)
         targets = list_targets(self.manager.port)
         current_target_id = str(getattr(self, "current_target_id", "") or "")
-        if not current_target_id:
-            current_ws_url = str(getattr(self.cdp, "ws_url", "") or "")
-            current_target = next(
-                (
-                    target
-                    for target in targets
-                    if current_ws_url
-                    and str(target.get("webSocketDebuggerUrl") or "")
-                    == current_ws_url
-                ),
-                None,
+        current_ws_url = str(getattr(self.cdp, "ws_url", "") or "")
+        current_target = next(
+            (
+                target
+                for target in targets
+                if current_ws_url
+                and str(target.get("webSocketDebuggerUrl") or "")
+                == current_ws_url
+            ),
+            None,
+        )
+        if current_target:
+            current_target_id = str(
+                current_target.get("id") or current_target.get("targetId") or ""
             )
-            if current_target:
-                current_target_id = str(
-                    current_target.get("id") or current_target.get("targetId") or ""
-                )
-                self.current_target_id = current_target_id
+            self.current_target_id = current_target_id
         target_ids = [
             str(target.get("id") or target.get("targetId") or "")
             for target in targets
@@ -223,14 +257,28 @@ class CDPBossDriver(BossActionDriver):
             ).items()
             if target_id and fingerprint
         }
-        timeout = min(max(float(wait_seconds), 2.0), 5.0)
+        timeout = min(max(float(wait_seconds), 2.0), 30.0)
         deadline = time.monotonic() + timeout
+        max_provisional_count = 0
+        last_ambiguous_count = 0
         while True:
             targets = list_targets(self.manager.port)
+            page_targets = [target for target in targets if target.get("type") == "page"]
+            target_infos = self._target_info_map()
+            provisional_targets = [
+                target
+                for target in page_targets
+                if str(target.get("id") or target.get("targetId") or "")
+                not in before_ids
+            ]
+            max_provisional_count = max(
+                max_provisional_count,
+                len(provisional_targets),
+            )
             current = next(
                 (
                     target
-                    for target in targets
+                    for target in page_targets
                     if str(target.get("id") or target.get("targetId") or "")
                     == previous_target_id
                 ),
@@ -252,25 +300,10 @@ class CDPBossDriver(BossActionDriver):
                     and self._trusted_changed_platform_target(current, platform)
                 )
             )
-            if current_trusted:
-                adopt_platform_tab_target(
-                    platform=platform,
-                    port=self.manager.port,
-                    target=current,
-                    track_round=getattr(self, "track_round", True),
-                )
-                self.current_platform = platform
-                self.current_target_id = previous_target_id
-                return {
-                    "ok": True,
-                    "outcome": "current_target_reused",
-                    "new_target_count": 0,
-                    "previous_target_closed": False,
-                }
 
-            candidates = [
+            changed_candidates = [
                 target
-                for target in targets
+                for target in page_targets
                 if (
                     (
                         str(target.get("id") or target.get("targetId") or "")
@@ -291,12 +324,72 @@ class CDPBossDriver(BossActionDriver):
                     else self._trusted_changed_platform_target(target, platform)
                 )
             ]
-            if len(candidates) == 1:
-                selected = candidates[0]
+            action_candidates = [
+                target
+                for target in changed_candidates
+                if previous_target_id
+                and self._target_opener_id(target, target_infos)
+                == previous_target_id
+            ]
+            action_provisional = [
+                target
+                for target in provisional_targets
+                if previous_target_id
+                and self._target_opener_id(target, target_infos)
+                == previous_target_id
+            ]
+
+            selected: dict[str, Any] | None = None
+            outcome = ""
+            if len(action_candidates) == 1 and len(action_provisional) <= 1:
+                selected = action_candidates[0]
+                outcome = "action_linked_target_adopted"
+            elif len(action_candidates) > 1 or len(action_provisional) > 1:
+                last_ambiguous_count = max(
+                    len(action_candidates),
+                    len(action_provisional),
+                )
+            elif action_provisional:
+                # The action-created page may remain about:blank while Chrome
+                # establishes the official navigation. Keep observing it, but
+                # never connect until it reaches a trusted platform URL.
+                last_ambiguous_count = len(action_provisional)
+            elif current_trusted:
+                selected = current
+                outcome = "current_target_reused"
+            else:
+                new_candidates = [
+                    target
+                    for target in changed_candidates
+                    if str(target.get("id") or target.get("targetId") or "")
+                    not in before_ids
+                ]
+                existing_candidates = [
+                    target
+                    for target in changed_candidates
+                    if str(target.get("id") or target.get("targetId") or "")
+                    in before_ids
+                ]
+                if len(new_candidates) == 1:
+                    selected = new_candidates[0]
+                    outcome = "new_target_adopted"
+                elif len(new_candidates) > 1:
+                    last_ambiguous_count = len(new_candidates)
+                elif provisional_targets:
+                    last_ambiguous_count = len(provisional_targets)
+                elif len(existing_candidates) == 1:
+                    selected = existing_candidates[0]
+                    outcome = "changed_existing_target_adopted"
+                elif len(existing_candidates) > 1:
+                    last_ambiguous_count = len(existing_candidates)
+
+            if selected:
                 selected_id = str(
                     selected.get("id") or selected.get("targetId") or ""
                 )
-                self.cdp.connect(str(selected["webSocketDebuggerUrl"]))
+                selected_is_new = selected_id not in before_ids
+                if outcome != "current_target_reused":
+                    self.cdp.connect(str(selected["webSocketDebuggerUrl"]))
                 adopt_platform_tab_target(
                     platform=platform,
                     port=self.manager.port,
@@ -306,7 +399,6 @@ class CDPBossDriver(BossActionDriver):
                 self.current_platform = platform
                 self.current_target_id = selected_id
                 previous_closed = False
-                selected_is_new = selected_id not in before_ids
                 if (
                     selected_is_new
                     and previous_target_id
@@ -317,27 +409,45 @@ class CDPBossDriver(BossActionDriver):
                         previous_closed = True
                     except Exception:
                         previous_closed = False
-                return {
+                result = {
                     "ok": True,
-                    "outcome": (
-                        "new_target_adopted"
-                        if selected_is_new
-                        else "changed_existing_target_adopted"
-                    ),
+                    "outcome": outcome,
                     "new_target_count": 1 if selected_is_new else 0,
                     "previous_target_closed": previous_closed,
                 }
-            if len(candidates) > 1:
-                return {
-                    "ok": False,
-                    "outcome": "ambiguous_search_targets",
-                    "new_target_count": len(candidates),
-                    "previous_target_closed": False,
-                }
+                if outcome == "action_linked_target_adopted":
+                    result.update(
+                        {
+                            "matching_target_count": len(
+                                [
+                                    target
+                                    for target in page_targets
+                                    if platform_for_url(
+                                        str(target.get("url") or "")
+                                    )
+                                    == platform
+                                ]
+                            ),
+                            "action_candidate_count": 1,
+                            "provisional_target_count": max_provisional_count,
+                        }
+                    )
+                return result
             if time.monotonic() >= deadline:
+                if last_ambiguous_count > 1:
+                    return {
+                        "ok": False,
+                        "outcome": "ambiguous_search_targets",
+                        "new_target_count": last_ambiguous_count,
+                        "previous_target_closed": False,
+                    }
                 return {
                     "ok": False,
-                    "outcome": "no_search_target_observed",
+                    "outcome": (
+                        "action_target_not_ready"
+                        if max_provisional_count
+                        else "no_search_target_observed"
+                    ),
                     "new_target_count": 0,
                     "previous_target_closed": False,
                 }

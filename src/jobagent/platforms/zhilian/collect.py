@@ -1228,7 +1228,7 @@ class ZhilianReadOnlyCollector:
                 target_transition = adopt_target(
                     target_before,
                     platform="zhilian",
-                    wait_seconds=min(max(float(wait_seconds), 0.0), 5.0),
+                    wait_seconds=min(max(float(wait_seconds), 0.0), 30.0),
                     allow_changed_platform_page=True,
                 )
             except Exception as exc:
@@ -1722,7 +1722,7 @@ class ZhilianReadOnlyCollector:
                                 target_transition = adopt_target(
                                     target_before,
                                     platform="zhilian",
-                                    wait_seconds=min(max(float(wait_seconds), 0.0), 5.0),
+                                    wait_seconds=min(max(float(wait_seconds), 0.0), 30.0),
                                 )
                         except Exception as exc:
                             activation_error = type(exc).__name__

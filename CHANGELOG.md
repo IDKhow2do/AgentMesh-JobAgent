@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.36] - 2026-08-23
+
+### Fixed
+
+- Recover Zhilian city and search transitions when a managed Chrome profile contains many historical platform tabs. The client aligns the action origin with the actual CDP connection and prefers the one official target opened by that action instead of relying on a globally unique changed tab.
+- Keep action-created targets under bounded observation while they move through a transient blank or loading state. The target is adopted only after it reaches a trusted official page; multiple action-linked targets, non-official pages and incomplete evidence remain blocked.
+- Extend the isolated Linux/Xvfb release gate to at least 16 historical Zhilian targets, one real action child and one unrelated changing target. The gate covers two target cities and verifies readable city, original query and result state without an account, user data or recruiting action.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed audits and the preserved uncharged Zhilian Discover request remain unchanged. Managed clients resume the same `jobagent zhilian discover` command after upgrade; no new round, relogin, profile cleanup, recollection or additional charge is required.
+
 ## [0.5.35] - 2026-08-23
 
 ### Fixed
