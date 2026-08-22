@@ -12,7 +12,10 @@ from jobagent.drivers.boss import create_driver
 from .collect import build_zhilian_search_url, normalize_zhilian_keyword
 from .constants import ZHILIAN_BROWSER_JS_USER_PROMPT, ZHILIAN_LOGIN_URL, ZHILIAN_LOGIN_USER_PROMPT
 from .selectors import build_zhilian_session_probe_script
-from .session_evidence import classify_zhilian_session_evidence
+from .session_evidence import (
+    classify_zhilian_session_evidence,
+    normalize_zhilian_session_evidence,
+)
 
 
 ZHILIAN_SESSION_SETTLE_TIMEOUT_SECONDS = 45
@@ -192,18 +195,20 @@ def _status_from_probe(
 
 
 def _probe_evidence(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_zhilian_session_evidence(data)
     return {
         "readyState": data.get("readyState", ""),
         "navigationElapsedMs": data.get("navigationElapsedMs"),
         "sessionEvidenceVersion": data.get("sessionEvidenceVersion", 0),
-        "sessionState": _session_state(data),
-        "sessionReason": data.get("sessionReason", ""),
+        "sessionState": normalized["state"],
+        "sessionReason": normalized["reason"],
         "loginEvidence": list(data.get("loginEvidence") or []),
-        "weakLoginEvidence": list(data.get("weakLoginEvidence") or []),
-        "strongLoginEvidence": list(data.get("strongLoginEvidence") or []),
-        "accountEvidence": list(data.get("accountEvidence") or []),
-        "strongAccountEvidence": list(data.get("strongAccountEvidence") or []),
-        "contentEvidence": list(data.get("contentEvidence") or []),
-        "evidenceDecision": data.get("evidenceDecision") or {},
+        "weakLoginEvidence": normalized["weak_login"],
+        "strongLoginEvidence": normalized["strong_login"],
+        "accountEvidence": normalized["account"],
+        "strongAccountEvidence": normalized["strong_account"],
+        "accountSignals": normalized["account_signals"],
+        "contentEvidence": normalized["content"],
+        "evidenceDecision": normalized["decision"],
         "bodySnippet": data.get("bodySnippet", ""),
     }
