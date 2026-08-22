@@ -6,6 +6,7 @@ import pytest
 
 from jobagent.application.delivery import (
     UserInterventionRequired,
+    _apply_send,
     _raise_for_apply_user_intervention,
 )
 from jobagent.domain.models import SendAttempt
@@ -21,6 +22,134 @@ from jobagent.platforms.liepin.apply import (
     _poll_liepin_state,
 )
 from jobagent.platforms.liepin.audit import LiepinAuditLog
+from jobagent.platforms.liepin.constants import LIEPIN_LOGIN_USER_PROMPT
+
+
+def test_liepin_apply_send_passes_signed_details_without_city_search_preflight(
+    monkeypatch,
+):
+    signed_jobs = [
+        {
+            "name": "高级产品经理",
+            "area": "郑州·金水区",
+            "url": "https://www.liepin.com/job/zhengzhou-signed.shtml",
+            "cloud_greeting": "您好，我对这个岗位很感兴趣。",
+        },
+        {
+            "name": "AI产品经理",
+            "area": "杭州·余杭区",
+            "url": "https://www.liepin.com/job/hangzhou-signed.shtml",
+            "cloud_greeting": "您好，我的经历与该岗位高度匹配。",
+        },
+    ]
+    observed: dict[str, list[str]] = {}
+
+    class ForbiddenCitySearchPreflight:
+        def check(self, *, query: str, city: str):
+            raise AssertionError(
+                f"Liepin send must not search {query!r} in {city!r} before signed details"
+            )
+
+    class CapturingSender:
+        def send_batch(self, jobs, **_kwargs):
+            observed["urls"] = [str(job.get("url") or "") for job in jobs]
+            return [
+                SendAttempt(
+                    job_url=str(job.get("url") or ""),
+                    message=str(job.get("cloud_greeting") or ""),
+                    delivered=True,
+                )
+                for job in jobs
+            ]
+
+    monkeypatch.setattr(
+        "jobagent.platforms.liepin.session.LiepinSessionGuide",
+        ForbiddenCitySearchPreflight,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.liepin.apply.LiepinApplySender",
+        CapturingSender,
+    )
+
+    attempts = _apply_send(
+        "liepin",
+        signed_jobs,
+        dry_run=False,
+        stop_on_failure=True,
+    )
+
+    assert all(attempt.delivered for attempt in attempts)
+    assert observed["urls"] == [job["url"] for job in signed_jobs]
+
+
+def test_liepin_signed_detail_login_signal_keeps_exact_login_prompt():
+    attempt = SendAttempt(
+        job_url="https://www.liepin.com/job/signed.shtml",
+        message="您好",
+        delivered=False,
+        error="login_required",
+        steps=[
+            {
+                "step": "inspect_before_apply",
+                "ok": True,
+                "loginRequired": True,
+            }
+        ],
+    )
+
+    with pytest.raises(UserInterventionRequired) as caught:
+        _raise_for_apply_user_intervention("liepin", [attempt])
+
+    assert caught.value.code == "login_required"
+    assert caught.value.prompt == LIEPIN_LOGIN_USER_PROMPT
+
+
+def test_liepin_send_rejects_stale_city_search_page_before_any_action(tmp_path):
+    class StaleShenzhenPageDriver:
+        def __init__(self):
+            self.opened: list[str] = []
+            self.action_scripts = 0
+
+        def open_url_in_new_tab(self, url: str, wait_seconds: int = 5):
+            self.opened.append(url)
+            return {"ok": True, "url": url}
+
+        def _exec_js(self, script: str):
+            if "const labels = ['继续聊'" in script:
+                self.action_scripts += 1
+                return {"ok": False, "error": "chat_entry_not_found"}
+            return {
+                "ok": True,
+                "href": (
+                    "https://www.liepin.com/zhaopin/"
+                    "?city=050090&dq=050090&key=高级产品经理"
+                ),
+                "title": "深圳招聘",
+                "loginRequired": False,
+                "chatOpen": False,
+                "requires_user_action": False,
+            }
+
+    driver = StaleShenzhenPageDriver()
+    signed_url = "https://www.liepin.com/job/zhengzhou-signed.shtml"
+    attempt = LiepinApplySender(
+        driver=driver,
+        audit_log=LiepinAuditLog(path=tmp_path / "audit.json"),
+    ).send_batch(
+        [
+            {
+                "name": "高级产品经理",
+                "area": "郑州·金水区",
+                "url": signed_url,
+                "cloud_greeting": "您好，我对这个岗位很感兴趣。",
+            }
+        ]
+    )[0]
+
+    assert driver.opened == [signed_url]
+    assert attempt.delivered is False
+    assert attempt.error == "signed_job_detail_not_verified"
+    assert driver.action_scripts == 0
 
 
 def test_liepin_default_chat_is_not_resume_or_personalized_delivery():

@@ -210,6 +210,8 @@ jobagent liepin audit
 
 Do not guess, hardcode or manually substitute a Liepin city code. For an unbundled city, the CLI first reads official city links from the current trusted result page, then uses a bounded official search-results fallback when the managed session is on the candidate homepage, and only then attempts the city directory. A readable city slug can continue without a numeric code only after the page enters `/city-<slug>/zhaopin/`, the route changes from the source page, page metadata/title match the target city, the visible input and URL preserve the original readable keyword, and the page exposes real results or an explicit no-result state. City-homepage recommendations never count. Pagination stays on the verified route, and a later numeric code is cached only after independent cross-verification. A stale page or control from another city is rejected. If evidence cannot be verified, keep the current round, profile and login session, report the machine-readable error, and follow the exact top-level `next_suggested`; the preserved Discover request is not charged again.
 
+After the user authorizes a Liepin delivery preview, send from each reviewed signed job-detail URL directly. Do not reconstruct a city search or require a numeric city code, even when the current tab still shows another city. Before any platform action, require the observed page to match the exact signed detail route. Only an observed login wall may trigger the login handoff. Any pre-action failure keeps the same preview, authorization, round and audit with zero additional credits; do not Discover, review or confirm again.
+
 ### 智联招聘
 
 ```bash

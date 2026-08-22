@@ -236,6 +236,10 @@ def _boss_send(
 
 
 def _check_apply_login(platform: str, job: dict[str, Any]) -> None:
+    if platform == "liepin":
+        # Liepin route-only cities may not expose a numeric search code. The
+        # signed detail page is the authoritative read-only login preflight.
+        return
     query = str(job.get("title") or job.get("name") or "产品经理")
     area = str(job.get("area") or "")
     city = area.split("·", 1)[0] if area else ""
@@ -312,6 +316,18 @@ def _raise_for_apply_user_intervention(platform: str, attempts: list[Any]) -> No
                     "platform": platform,
                     "job_url": attempt.job_url,
                     "step": step.get("step"),
+                },
+            )
+        if platform == "liepin" and attempt.error == "login_required":
+            from jobagent.platforms.liepin.constants import LIEPIN_LOGIN_USER_PROMPT
+
+            raise UserInterventionRequired(
+                "login_required",
+                LIEPIN_LOGIN_USER_PROMPT,
+                details={
+                    "platform": platform,
+                    "job_url": attempt.job_url,
+                    "step": "inspect_signed_job_detail",
                 },
             )
 
@@ -463,6 +479,21 @@ def send_reviewed(
         and len(attempts) == len(jobs)
         and len(jobs) == len(all_jobs)
     )
+    failed_errors = [
+        str(attempt.error)
+        for attempt in attempts
+        if not attempt.delivered
+        and attempt.error
+        and attempt.error not in _SKIPPED_SEND_ERRORS
+        and attempt.error not in _INDETERMINATE_SEND_ERRORS
+        and attempt.error not in _TERMINAL_UNRESOLVED_SEND_ERRORS
+    ]
+    primary_error = failed_errors[0] if failed_errors else ""
+    delivery_state_preserved = bool(
+        (not complete_batch or unresolved > 0)
+        and preview_id
+        and authorization_id
+    )
     next_suggested = (
         f"jobagent {platform} audit"
         if complete_batch
@@ -540,7 +571,11 @@ def send_reviewed(
         "dry_run": dry_run,
         "attempts": [attempt.to_dict() for attempt in attempts],
         "next_suggested": next_suggested,
-        "error": "delivery_verification_indeterminate" if indeterminate > 0 else "",
+        "error": (
+            "delivery_verification_indeterminate"
+            if indeterminate > 0
+            else primary_error
+        ),
         "retryable": indeterminate > 0,
         "requires_user_action": False,
         "message": (
@@ -554,12 +589,10 @@ def send_reviewed(
                 else ""
             )
         ),
-        "delivery_state_preserved": indeterminate > 0 or unresolved > 0,
-        "request_preserved": indeterminate > 0 or unresolved > 0,
-        "preview_preserved": bool((indeterminate > 0 or unresolved > 0) and preview_id),
-        "authorization_preserved": bool(
-            (indeterminate > 0 or unresolved > 0) and authorization_id
-        ),
+        "delivery_state_preserved": delivery_state_preserved,
+        "request_preserved": delivery_state_preserved,
+        "preview_preserved": bool(delivery_state_preserved and preview_id),
+        "authorization_preserved": bool(delivery_state_preserved and authorization_id),
         "no_charge": True,
         "billing": {"additional_credits": 0},
         "additional_credits": 0,

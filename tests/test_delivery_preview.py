@@ -498,6 +498,89 @@ def test_51job_indeterminate_delivery_preserves_authorization_and_exact_resume(
     assert cleared == []
 
 
+def test_liepin_detail_verification_failure_preserves_signed_send_state(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+
+    from jobagent.application import delivery
+    from jobagent.domain.models import SendAttempt
+    from jobagent.infra import interaction_state
+
+    reviewed = {
+        "discover_id": "dis-liepin-preserved",
+        "send_candidates": [
+            {
+                "name": "高级产品经理",
+                "area": "郑州·金水区",
+                "url": "https://www.liepin.com/job/signed-detail.shtml",
+                "cloud_greeting": "您好，我对这个岗位很感兴趣。",
+            }
+        ],
+        "source_path": "/tmp/liepin-preserved.review.json",
+    }
+    statuses = []
+    cleared = []
+    monkeypatch.setattr(delivery, "_load_reviewed", lambda *_args, **_kwargs: reviewed)
+    monkeypatch.setattr(
+        delivery,
+        "_apply_send",
+        lambda *_args, **_kwargs: [
+            SendAttempt(
+                job_url=reviewed["send_candidates"][0]["url"],
+                message=reviewed["send_candidates"][0]["cloud_greeting"],
+                delivered=False,
+                error="signed_job_detail_not_verified",
+            )
+        ],
+    )
+    monkeypatch.setattr(delivery, "progress_heartbeat", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "active_command", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "PlatformSessionLock", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(delivery, "emit_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(delivery, "print_first_delivery_star_prompt_once", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        delivery.rounds,
+        "set_platform_status",
+        lambda platform, status, **kwargs: statuses.append((platform, status, kwargs)),
+    )
+    monkeypatch.setattr(
+        delivery.rounds,
+        "round_status",
+        lambda: {"round_id": "round-preserved", "current_platform": "liepin"},
+    )
+    monkeypatch.setattr(
+        interaction_state,
+        "load_pending_interaction",
+        lambda: {
+            "stage": "delivery_authorized",
+            "context": {"platform": "liepin", "authorization_id": "auth-preserved"},
+        },
+    )
+    monkeypatch.setattr(interaction_state, "clear_pending_interaction", lambda: cleared.append(True))
+
+    result = delivery.send_reviewed(
+        "liepin",
+        input_path=reviewed["source_path"],
+        preview_id="preview-preserved",
+        authorization_id="auth-preserved",
+        limit=100,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "signed_job_detail_not_verified"
+    assert result["requires_user_action"] is False
+    assert result["request_preserved"] is True
+    assert result["preview_preserved"] is True
+    assert result["authorization_preserved"] is True
+    assert result["no_charge"] is True
+    assert result["billing"] == {"additional_credits": 0}
+    assert "--preview-id preview-preserved" in result["next_suggested"]
+    assert "--authorization-id auth-preserved" in result["next_suggested"]
+    assert statuses[0][1] == "reviewed"
+    assert cleared == []
+
+
 def test_51job_terminal_unresolved_completes_send_with_cumulative_evidence(
     monkeypatch,
 ):

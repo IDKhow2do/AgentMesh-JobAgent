@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.30] - 2026-08-22
+
+### Fixed
+
+- Send authorized Liepin jobs directly from each reviewed signed job-detail URL instead of rebuilding a city search from the first job. Route-only cities such as Zhengzhou or Hangzhou no longer require a numeric city code, and an older tab showing another city cannot influence the authorized batch.
+- Verify that the browser reached the exact signed Liepin detail route before any resume or greeting action. Preserve the existing login handoff only for an observed login wall; a city or detail navigation failure now remains an accurate machine-readable delivery error.
+- Preserve the original delivery preview, authorization, round and audit on pre-action failures. The recovery path adds zero credits and does not repeat Discover, review or user confirmation.
+
+### Compatibility
+
+- Existing API Keys, account binding, profile, managed Chrome profile, Liepin login state, active round, signed decision, review file, delivery preview, authorization and audit remain unchanged. Managed clients resume the original authorized send command after upgrade; no state migration or new charge is required.
+
 ## [0.5.29] - 2026-08-22
 
 ### Fixed

@@ -1,7 +1,7 @@
 ---
 name: job-agent
 description: AgentMesh Job Agent for resume-driven job discovery, signed review, user-confirmed delivery and audit on Boss直聘, 猎聘, 智联招聘 and 51Job. Use for 找工作, 投简历, 简历分析, job matching and recruiter greetings.
-version: 0.5.29
+version: 0.5.30
 ---
 
 # Job Agent
@@ -20,6 +20,7 @@ Operate Job Agent as an Agent-native CLI. The user controls API Key setup, platf
 - For `exclude_jobs`, collect displayed job numbers and pass each as `--exclude-index`. Show the regenerated complete preview and stop for final confirmation again. Run send only after `event=delivery_authorized`, using the exact command containing both `--preview-id` and `--authorization-id`.
 - On a verified Zhilian query and city route, reject cross-city fallback cards and treat that query as empty; preserve valid candidates already collected by earlier signed queries.
 - Never guess or hardcode a Liepin city code. The CLI first discovers unbundled cities from official links on the current result page, then uses an official search-results surface before the city-directory fallback. A readable city route is accepted only after the route changes and the page metadata/title, visible search input/URL query, and real result or explicit no-result state agree. City-home recommendations are not search results; a later numeric code is cached only after independent cross-verification. On a city-resolution error, preserve the current round, browser profile and request; follow the exact top-level recovery without starting another Discover or clearing state.
+- During an authorized Liepin send, use each reviewed signed job-detail URL directly. Never rebuild a city search or require a numeric city code before delivery. Verify that the browser reached the exact signed detail route before any click; only an observed login wall may produce a login prompt. Preserve the same preview and authorization on any pre-action failure, with zero additional credits.
 - If Zhilian review reports that a preserved signed decision has a generic title or missing company/salary, run its exact `jobagent zhilian apply review` recovery. The CLI reads only the signed job detail URLs, repairs trusted fields, safely excludes only a candidate that remains unreviewable, and requests a replacement signature for the same Discover with zero additional credits. It regenerates the remaining complete preview and still waits for the user's confirmation. Never start another round or Discover for this repair.
 - On `delivery_preview_required` or `delivery_confirmation_required`, run only the returned safe review command, display the regenerated preview and obtain fresh confirmation. Preserve existing promotions; do not recollect or recharge.
 - On 51Job `delivery_verification_indeterminate` with `retryable=true` and `request_preserved=true`, run the exact `next_suggested` with the same preview and authorization. Pending clicked jobs are reconciled from current-site evidence and are never clicked again; the remaining authorized jobs continue. Do not repeat Discover, clear state, rebuild the round or infer logout from the legacy history domain.
