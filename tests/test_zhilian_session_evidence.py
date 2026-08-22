@@ -43,6 +43,49 @@ def test_strong_account_evidence_overrides_a_persistent_weak_login_control():
     assert _snapshot_failure(payload) == ""
 
 
+def test_normalized_account_signals_override_a_persistent_weak_login_control():
+    payload = _probe(
+        loginRequired=True,
+        weakLoginEvidence=["visible_login_control"],
+        accountEvidence=[],
+        strongAccountEvidence=["resume_management"],
+        accountSignals={
+            "accountNavigation": True,
+            "profileIdentity": True,
+            "resumeManagement": True,
+            "deliveryActivity": True,
+            "interviewActivity": False,
+        },
+    )
+
+    assert classify_zhilian_session_evidence(payload) == "logged_in"
+    assert _snapshot_failure(payload) == ""
+
+
+def test_normalized_account_signals_do_not_override_a_strong_login_surface():
+    payload = _probe(
+        strongLoginEvidence=["visible_credential_form"],
+        accountSignals={
+            "accountNavigation": True,
+            "resumeManagement": True,
+            "deliveryActivity": True,
+        },
+    )
+
+    assert classify_zhilian_session_evidence(payload) == "unknown"
+    assert _snapshot_failure(payload) == "zhilian_page_state_unknown"
+
+
+def test_one_normalized_account_signal_does_not_bypass_a_login_handoff():
+    payload = _probe(
+        weakLoginEvidence=["visible_login_control"],
+        accountSignals={"resumeManagement": True},
+    )
+
+    assert classify_zhilian_session_evidence(payload) == "login_required"
+    assert _snapshot_failure(payload) == "zhilian_login_required"
+
+
 def test_strong_login_and_strong_account_evidence_remain_unknown():
     payload = _probe(
         strongLoginEvidence=["visible_credential_form"],

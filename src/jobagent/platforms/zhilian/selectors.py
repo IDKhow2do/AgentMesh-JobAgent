@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-ZHILIAN_SELECTOR_VERSION = "2026-08-15.0"
+ZHILIAN_SELECTOR_VERSION = "2026-08-22.0"
 
 _ZHILIAN_SESSION_PROBE_JS = r"""
       function zhilianSessionProbe(){
@@ -46,7 +46,7 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
               || /passport|(?:^|[/._-])login(?:[/._?=-]|$)/i.test(target)) {
             weakLoginEvidence.push('visible_login_control');
           }
-          if (/^(我的|消息|个人中心|简历中心|我的简历|在线简历|求职中心)$/.test(text)
+          if (/(^|[ |·])(我的|消息|个人中心|账户中心|账号中心|简历中心|我的简历|在线简历|求职中心)([ |·]|$)/.test(text)
               || (/[/](?:my|user|personal|account|resume|message)(?:[/._?=-]|$)/i.test(target)
                   && !/passport|login/i.test(target))) {
             accountEvidence.push('account_navigation');
@@ -83,13 +83,20 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
           '[data-account-name]',
           '[aria-label*="个人头像"]',
           '[aria-label*="用户中心"]',
+          '[aria-label*="个人中心"]',
+          '[class*="user-name"]',
+          '[class*="userName"]',
+          '[class*="username"]',
+          '[class*="account-name"]',
+          '[class*="nick-name"]',
+          '[class*="nickName"]',
           '[class*="user-info"] [class*="name"]',
           '[class*="userInfo"] [class*="name"]'
         ].join(',');
         if (Array.from(document.querySelectorAll(identitySelectors)).some((el) => {
           if (!visible(el)) return false;
           const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
-          return !!text && !/登录|注册/.test(text);
+          return !!text && !/登录|注册|用户名|账号|手机号|邮箱|验证码|密码/.test(text);
         })) {
           strongAccountEvidence.push('profile_identity');
         }
@@ -103,6 +110,31 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
         if (hasDeliveryActivity && hasInterviewActivity) {
           strongAccountEvidence.push('application_activity');
         }
+        const hasExpandedDeliveryActivity = hasDeliveryActivity
+          || /投递动态|已投递(?:职位)?|投递(?:数量|次数)?[ ]*[:：]?[ ]*[0-9]+/.test(bodyText);
+        const hasExpandedInterviewActivity = hasInterviewActivity
+          || /面试动态|面试(?:数量|次数)?[ ]*[:：]?[ ]*[0-9]+/.test(bodyText);
+        if (hasExpandedDeliveryActivity) {
+          strongAccountEvidence.push('delivery_activity');
+        }
+        if (hasExpandedInterviewActivity) {
+          strongAccountEvidence.push('interview_activity');
+        }
+        const hasAccountNavigation = accountEvidence.includes('account_navigation')
+          || (/(个人中心|账户中心|账号中心)/.test(bodyText)
+              && (resumeMarkers.length >= 2
+                  || hasExpandedDeliveryActivity
+                  || hasExpandedInterviewActivity));
+        if (hasAccountNavigation) {
+          accountEvidence.push('account_navigation');
+        }
+        const accountSignals = {
+          accountNavigation: hasAccountNavigation,
+          profileIdentity: strongAccountEvidence.includes('profile_identity'),
+          resumeManagement: strongAccountEvidence.includes('resume_management'),
+          deliveryActivity: hasExpandedDeliveryActivity,
+          interviewActivity: hasExpandedInterviewActivity
+        };
         const contentEvidence = [];
         const searchInput = Array.from(document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])'))
           .find(visible);
@@ -145,9 +177,9 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
         const strongLogin = Array.from(new Set(strongLoginEvidence));
         const account = Array.from(new Set(accountEvidence));
         const strongAccount = Array.from(new Set(strongAccountEvidence));
-        const hasAccountNavigation = account.includes('account_navigation');
+        const normalizedHasAccountNavigation = account.includes('account_navigation');
         const hasStrongAccount = strongAccount.length >= 2
-          || (hasAccountNavigation && strongAccount.length >= 1);
+          || (normalizedHasAccountNavigation && strongAccount.length >= 1);
         const hasStrongLogin = strongLogin.length > 0;
         let sessionState = 'unknown';
         let sessionReason = 'insufficient_evidence';
@@ -195,6 +227,7 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
           strongLoginEvidence: strongLogin,
           accountEvidence: account,
           strongAccountEvidence: strongAccount,
+          accountSignals,
           contentEvidence: Array.from(new Set(contentEvidence)),
           searchPageEvidence: Array.from(new Set(searchPageEvidence)),
           jobLinkCount: jobLinks.length,
@@ -205,8 +238,8 @@ _ZHILIAN_SESSION_PROBE_JS = r"""
             reason: sessionReason,
             hasStrongLogin,
             hasStrongAccount,
-            hasAccountNavigation,
-            strongAccountThreshold: hasAccountNavigation ? 1 : 2
+            hasAccountNavigation: normalizedHasAccountNavigation,
+            strongAccountThreshold: normalizedHasAccountNavigation ? 1 : 2
           },
           bodySnippet: bodyText.slice(0, 800)
         };
@@ -1721,6 +1754,7 @@ def build_zhilian_snapshot_script(limit: int = 20) -> str:
         strongLoginEvidence: session.strongLoginEvidence,
         accountEvidence: session.accountEvidence,
         strongAccountEvidence: session.strongAccountEvidence,
+        accountSignals: session.accountSignals,
         contentEvidence: session.contentEvidence,
         searchPageEvidence: session.searchPageEvidence,
         evidenceDecision: session.evidenceDecision,

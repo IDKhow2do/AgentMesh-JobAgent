@@ -1,6 +1,7 @@
 """Focused public contracts for Zhilian session-state recovery."""
 
 import json
+from pathlib import Path
 
 from jobagent.platforms.zhilian.selectors import (
     build_zhilian_city_filter_script,
@@ -8,6 +9,9 @@ from jobagent.platforms.zhilian.selectors import (
     build_zhilian_snapshot_script,
 )
 from jobagent.platforms.zhilian.session import ZhilianSessionGuide
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "zhilian"
 
 
 class _SlowPhasedSessionDriver:
@@ -122,6 +126,35 @@ def test_complete_authenticated_home_ignores_persistent_weak_login_control():
     ]
 
 
+class _AuthenticatedHomeWithNormalizedAccountSignalsDriver:
+    def _exec_js(self, _script: str):
+        payload = json.loads(
+            (FIXTURES / "authenticated_home_mixed_session_evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return {
+            "raw": json.dumps(payload, ensure_ascii=False)
+        }
+
+
+def test_session_guide_reclassifies_normalized_authenticated_account_signals():
+    status = ZhilianSessionGuide(
+        driver=_AuthenticatedHomeWithNormalizedAccountSignalsDriver()
+    ).inspect_current_page(settle_timeout=0)
+
+    assert status.ok is True
+    assert status.logged_in is True
+    assert status.login_required is False
+    assert status.evidence["sessionState"] == "logged_in"
+    assert (
+        status.evidence["sessionReason"]
+        == "strong_account_overrides_weak_login_control"
+    )
+    assert status.evidence["accountSignals"]["deliveryActivity"] is True
+    assert status.evidence["evidenceDecision"]["hasStrongAccount"] is True
+
+
 def test_selectors_expose_page_session_and_city_evidence():
     keyword = build_zhilian_keyword_search_script("产品经理")
     city = build_zhilian_city_filter_script("深圳")
@@ -133,6 +166,9 @@ def test_selectors_expose_page_session_and_city_evidence():
     assert "weakLoginEvidence" in keyword
     assert "strongLoginEvidence" in keyword
     assert "strongAccountEvidence" in keyword
+    assert "accountSignals" in keyword
+    assert "deliveryActivity" in keyword
     assert "strong_account_overrides_weak_login_control" in keyword
     assert "accountEvidence" in city
+    assert "accountSignals: session.accountSignals" in snapshot
     assert "visibleCity" in snapshot

@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "url": "https://www.zhaopin.com/",
+  "title": "目标城市招聘网_智联招聘",
+  "readyState": "complete",
+  "sessionEvidenceVersion": 2,
+  "sessionState": "login_required",
+  "sessionReason": "weak_login_without_account_evidence",
+  "loginRequired": true,
+  "weakLoginEvidence": [
+    "visible_login_control"
+  ],
+  "strongLoginEvidence": [],
+  "accountEvidence": [],
+  "strongAccountEvidence": [
+    "resume_management"
+  ],
+  "accountSignals": {
+    "accountNavigation": true,
+    "profileIdentity": true,
+    "resumeManagement": true,
+    "deliveryActivity": true,
+    "interviewActivity": false
+  },
+  "contentEvidence": [
+    "search_input",
+    "job_results"
+  ]
+}

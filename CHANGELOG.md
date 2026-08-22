@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.31] - 2026-08-22
+
+### Fixed
+
+- Normalize Zhilian account navigation, profile presence, resume management and historical application activity before classifying session state. An authenticated page that retains a generic login/register entry is no longer rejected solely by that weak control.
+- Keep real login routes, visible credential forms and login challenges fail-closed. Conflicting strong login and strong account evidence remains `zhilian_session_state_unknown` instead of being treated as authenticated.
+- Return one consistent normalized `sessionState`, `sessionReason` and evidence decision from login checks and Discover snapshots, without returning account names or page content as new evidence fields.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed Boss/Liepin audits and current Zhilian stage remain unchanged. No migration, repeated Discover or additional charge is required.
+
 ## [0.5.30] - 2026-08-22
 
 ### Fixed
