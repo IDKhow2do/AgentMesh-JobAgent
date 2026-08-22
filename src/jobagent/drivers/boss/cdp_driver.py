@@ -6,6 +6,7 @@ All DOM operations are performed via CDP Runtime.evaluate inside a real Chrome i
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -81,7 +82,10 @@ class CDPBossDriver(BossActionDriver):
 
     @staticmethod
     def _trusted_platform_search_target(target: dict[str, Any], platform: str) -> bool:
-        if target.get("type") != "page" or platform_for_url(str(target.get("url") or "")) != platform:
+        if (
+            target.get("type") != "page"
+            or platform_for_url(str(target.get("url") or "")) != platform
+        ):
             return False
         try:
             parsed = urlsplit(str(target.get("url") or ""))
@@ -101,6 +105,47 @@ class CDPBossDriver(BossActionDriver):
                 or parsed.path in {"/jobs", "/jobs/"}
             )
         return False
+
+    @staticmethod
+    def _target_state_fingerprint(target: dict[str, Any]) -> str:
+        """Return an opaque fingerprint for target transition comparison."""
+
+        raw = "\n".join(
+            (
+                str(target.get("url") or ""),
+                str(target.get("title") or ""),
+            )
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _trusted_changed_platform_target(
+        cls,
+        target: dict[str, Any],
+        platform: str,
+    ) -> bool:
+        """Allow one changed official page to be adopted before DOM verification."""
+
+        if target.get("type") != "page" or platform_for_url(str(target.get("url") or "")) != platform:
+            return False
+        try:
+            parsed = urlsplit(str(target.get("url") or ""))
+        except ValueError:
+            return False
+        if (
+            parsed.scheme != "https"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return False
+        if platform != "zhilian":
+            return cls._trusted_platform_search_target(target, platform)
+        host = (parsed.hostname or "").lower()
+        if host not in {"www.zhaopin.com", "sou.zhaopin.com"}:
+            return False
+        path = parsed.path.lower()
+        return not any(token in path for token in ("login", "passport", "verify"))
 
     def capture_platform_target_state(self, platform: str) -> dict[str, Any]:
         """Capture opaque target identities before an action may open a new tab."""
@@ -130,10 +175,23 @@ class CDPBossDriver(BossActionDriver):
             if target.get("type") == "page"
             and platform_for_url(str(target.get("url") or "")) == platform
         ]
+        platform_targets = [
+            target
+            for target in targets
+            if target.get("type") == "page"
+            and platform_for_url(str(target.get("url") or "")) == platform
+        ]
         return {
             "platform": platform,
             "target_ids": [target_id for target_id in target_ids if target_id],
             "current_target_id": current_target_id,
+            "target_fingerprints": {
+                str(
+                    target.get("id") or target.get("targetId") or ""
+                ): self._target_state_fingerprint(target)
+                for target in platform_targets
+                if str(target.get("id") or target.get("targetId") or "")
+            },
         }
 
     def adopt_platform_target_transition(
@@ -142,8 +200,9 @@ class CDPBossDriver(BossActionDriver):
         *,
         platform: str,
         wait_seconds: float = 2,
+        allow_changed_platform_page: bool = False,
     ) -> dict[str, Any]:
-        """Adopt one newly opened official search target and retire its predecessor."""
+        """Adopt one unambiguous official target transition."""
         if before.get("platform") != platform:
             return {
                 "ok": False,
@@ -157,6 +216,13 @@ class CDPBossDriver(BossActionDriver):
             if target_id
         }
         previous_target_id = str(before.get("current_target_id") or "")
+        before_fingerprints = {
+            str(target_id): str(fingerprint)
+            for target_id, fingerprint in (
+                before.get("target_fingerprints") or {}
+            ).items()
+            if target_id and fingerprint
+        }
         timeout = min(max(float(wait_seconds), 2.0), 5.0)
         deadline = time.monotonic() + timeout
         while True:
@@ -170,7 +236,23 @@ class CDPBossDriver(BossActionDriver):
                 ),
                 None,
             )
-            if current and self._trusted_platform_search_target(current, platform):
+            current_changed = bool(
+                current
+                and previous_target_id
+                and before_fingerprints.get(previous_target_id)
+                and before_fingerprints.get(previous_target_id)
+                != self._target_state_fingerprint(current)
+            )
+            current_trusted = bool(
+                current
+                and (
+                    self._trusted_platform_search_target(current, platform)
+                    if not allow_changed_platform_page
+                    else current_changed
+                    and self._trusted_changed_platform_target(current, platform)
+                )
+            )
+            if current_trusted:
                 adopt_platform_tab_target(
                     platform=platform,
                     port=self.manager.port,
@@ -189,9 +271,25 @@ class CDPBossDriver(BossActionDriver):
             candidates = [
                 target
                 for target in targets
-                if str(target.get("id") or target.get("targetId") or "")
-                not in before_ids
-                and self._trusted_platform_search_target(target, platform)
+                if (
+                    (
+                        str(target.get("id") or target.get("targetId") or "")
+                        not in before_ids
+                    )
+                    or (
+                        str(target.get("id") or target.get("targetId") or "")
+                        in before_fingerprints
+                        and before_fingerprints[
+                            str(target.get("id") or target.get("targetId") or "")
+                        ]
+                        != self._target_state_fingerprint(target)
+                    )
+                )
+                and (
+                    self._trusted_platform_search_target(target, platform)
+                    if not allow_changed_platform_page
+                    else self._trusted_changed_platform_target(target, platform)
+                )
             ]
             if len(candidates) == 1:
                 selected = candidates[0]
@@ -208,7 +306,12 @@ class CDPBossDriver(BossActionDriver):
                 self.current_platform = platform
                 self.current_target_id = selected_id
                 previous_closed = False
-                if previous_target_id and previous_target_id in before_ids:
+                selected_is_new = selected_id not in before_ids
+                if (
+                    selected_is_new
+                    and previous_target_id
+                    and previous_target_id in before_ids
+                ):
                     try:
                         close_platform_target(self.manager.port, previous_target_id)
                         previous_closed = True
@@ -216,8 +319,12 @@ class CDPBossDriver(BossActionDriver):
                         previous_closed = False
                 return {
                     "ok": True,
-                    "outcome": "new_target_adopted",
-                    "new_target_count": 1,
+                    "outcome": (
+                        "new_target_adopted"
+                        if selected_is_new
+                        else "changed_existing_target_adopted"
+                    ),
+                    "new_target_count": 1 if selected_is_new else 0,
                     "previous_target_closed": previous_closed,
                 }
             if len(candidates) > 1:

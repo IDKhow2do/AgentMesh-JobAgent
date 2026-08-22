@@ -1,6 +1,7 @@
 from jobagent.platforms.zhilian.collect import ZhilianCollectResult
 from scripts.ci.zhilian_headed_public_gate import (
     _evaluate_one_page_collection_boundary,
+    _explicit_public_login_wall_observed,
     _safe_collector_gate_payload,
 )
 
@@ -22,6 +23,20 @@ def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():
         "status": "passed_route_only_login_wall",
         "remaining_unverified": "candidate_reviewability",
     }
+
+
+def test_login_wall_that_appears_during_collection_is_classified_explicitly():
+    collected = ZhilianCollectResult(
+        query="产品经理",
+        city="深圳",
+        url="https://www.zhaopin.com/jobs",
+        jobs=[],
+        snapshot={"loginRequired": True},
+        ok=False,
+        error="zhilian_login_required",
+    )
+
+    assert _explicit_public_login_wall_observed(False, collected) is True
 
 
 def test_missing_reviewability_still_fails_without_a_login_wall():

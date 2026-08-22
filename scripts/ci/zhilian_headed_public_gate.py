@@ -15,11 +15,14 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from jobagent.domain.models import Job
 from jobagent.domain.reviewability import delivery_reviewability_issues
+from jobagent.drivers.boss.cdp_client import CDPClient
 from jobagent.drivers.boss.cdp_driver import CDPBossDriver
+from jobagent.infra.platform_tabs import close_platform_target, list_targets
+from jobagent.infra.rounds import ensure_current_round, start_new_round
 from jobagent.platforms.zhilian.city_resolver import ZhilianCityResolver
 from jobagent.platforms.zhilian.collect import (
     ZhilianReadOnlyCollector,
@@ -139,11 +142,13 @@ class AuthenticatedCityRootFixtureDriver:
         target_city: str,
         target_slug: str,
         target_code: str,
+        external_city_target: bool = False,
     ):
         self.driver = driver
         self.target_city = target_city
         self.target_slug = target_slug
         self.target_code = target_code
+        self.external_city_target = external_city_target
         self.pagination_attempts = 0
         self.opened_kinds: list[str] = []
 
@@ -181,6 +186,24 @@ class AuthenticatedCityRootFixtureDriver:
     def _click_at(self, x: Any, y: Any) -> None:
         self.driver._click_at(x, y)
 
+    def capture_platform_target_state(self, platform: str) -> dict[str, Any]:
+        return self.driver.capture_platform_target_state(platform)
+
+    def adopt_platform_target_transition(
+        self,
+        before: dict[str, Any],
+        *,
+        platform: str,
+        wait_seconds: float = 2,
+        allow_changed_platform_page: bool = False,
+    ) -> dict[str, Any]:
+        return self.driver.adopt_platform_target_transition(
+            before,
+            platform=platform,
+            wait_seconds=wait_seconds,
+            allow_changed_platform_page=allow_changed_platform_page,
+        )
+
     def dismiss_javascript_dialog(self) -> dict[str, Any]:
         return {"ok": True, "dismissed": False}
 
@@ -201,6 +224,7 @@ class AuthenticatedCityRootFixtureDriver:
         target_code = json.dumps(self.target_code)
         query = json.dumps(QUERY, ensure_ascii=False)
         initial = json.dumps(initial_kind)
+        external_city_target = json.dumps(self.external_city_target)
         script = f"""
         (function(){{
           const targetCity = {target_city};
@@ -208,6 +232,7 @@ class AuthenticatedCityRootFixtureDriver:
           const targetCode = {target_code};
           const query = {query};
           const initialKind = {initial};
+          const externalCityTarget = {external_city_target};
           const oldCity = '深圳';
           const css = `
             * {{ box-sizing: border-box; }}
@@ -313,10 +338,12 @@ class AuthenticatedCityRootFixtureDriver:
               Array.from(optionsRoot.querySelectorAll('[role="option"]')).forEach((option) => {{
                 option.addEventListener('click', () => {{
                   if (String(option.textContent || '').trim() !== targetCity) return;
-                  current.textContent = targetCity;
-                  current.classList.add('current', 'selected');
-                  option.classList.add('selected');
-                  document.title = `${{targetCity}}招聘网_${{targetCity}}人才网_智联招聘`;
+                  if (!externalCityTarget) {{
+                    current.textContent = targetCity;
+                    current.classList.add('current', 'selected');
+                    option.classList.add('selected');
+                    document.title = `${{targetCity}}招聘网_${{targetCity}}人才网_智联招聘`;
+                  }}
                   window.__jobagentGateEvents.push('target_city_selected');
                 }});
               }});
@@ -339,6 +366,131 @@ class AuthenticatedCityRootFixtureDriver:
         }})()
         """
         return self.driver._exec_js(script)
+
+
+class _TargetFixtureExecutor:
+    """Evaluate a fixture in one disposable CI target without changing the driver."""
+
+    def __init__(self, websocket_url: str):
+        self.cdp = CDPClient()
+        self.cdp.connect(websocket_url)
+
+    def close(self) -> None:
+        self.cdp.disconnect()
+
+    def _exec_js(self, script: str) -> dict[str, Any]:
+        result = self.cdp.evaluate(script)
+        value = result.get("result", {}).get("value")
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {"ok": True, "raw": value}
+            return parsed if isinstance(parsed, dict) else {"ok": True, "raw": value}
+        return {"ok": True, "raw": "" if value is None else str(value)}
+
+
+def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{PORT}/json/new?{quote(url, safe=':/?&=%#')}",
+        method="PUT",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if not isinstance(data, dict) or not data.get("webSocketDebuggerUrl"):
+        raise RuntimeError("disposable CDP target unavailable")
+    return data
+
+
+class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver):
+    """Model a managed profile with a root tab and one stale search tab."""
+
+    def __init__(
+        self,
+        driver: CDPBossDriver,
+        *,
+        target_city: str,
+        target_slug: str,
+        target_code: str,
+        secondary_target: dict[str, Any],
+    ):
+        super().__init__(
+            driver,
+            target_city=target_city,
+            target_slug=target_slug,
+            target_code=target_code,
+            external_city_target=True,
+        )
+        self.secondary_target = secondary_target
+        self.target_adoption: dict[str, Any] = {}
+        self.external_transition_installed = False
+
+    def _install_secondary(self, kind: str) -> dict[str, Any]:
+        executor = _TargetFixtureExecutor(
+            str(self.secondary_target.get("webSocketDebuggerUrl") or "")
+        )
+        try:
+            deadline = time.monotonic() + 90.0
+            page_state: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                page_state = executor._exec_js(
+                    "JSON.stringify({hostname:location.hostname,readyState:document.readyState})"
+                )
+                hostname = str(page_state.get("hostname") or "")
+                if (
+                    hostname == "zhaopin.com"
+                    or hostname.endswith(".zhaopin.com")
+                ) and page_state.get("readyState") == "complete":
+                    break
+                time.sleep(0.1)
+            else:
+                return {
+                    "ok": False,
+                    "error": "fixture_target_not_complete",
+                    "readyState": str(page_state.get("readyState") or ""),
+                }
+            fixture = AuthenticatedCityRootFixtureDriver(
+                executor,
+                target_city=self.target_city,
+                target_slug=self.target_slug,
+                target_code=self.target_code,
+            )
+            return fixture._install(kind)
+        finally:
+            executor.close()
+
+    def install_stale_secondary(self) -> dict[str, Any]:
+        return self._install_secondary("stale_results")
+
+    def _click_at(self, x: Any, y: Any) -> None:
+        super()._click_at(x, y)
+        if self.external_transition_installed:
+            return
+        events = super().fixture_events()
+        if "target_city_selected" not in events:
+            return
+        installed = self._install_secondary("target_results")
+        if not installed.get("ok"):
+            raise RuntimeError("managed target fixture transition failed")
+        self.external_transition_installed = True
+
+    def adopt_platform_target_transition(
+        self,
+        before: dict[str, Any],
+        *,
+        platform: str,
+        wait_seconds: float = 2,
+        allow_changed_platform_page: bool = False,
+    ) -> dict[str, Any]:
+        self.target_adoption = super().adopt_platform_target_transition(
+            before,
+            platform=platform,
+            wait_seconds=wait_seconds,
+            allow_changed_platform_page=allow_changed_platform_page,
+        )
+        return self.target_adoption
 
 
 def _safe_url(value: Any) -> str:
@@ -491,14 +643,7 @@ def _evaluate_one_page_collection_boundary(
     all_parser_candidates_reviewable: bool,
     all_collector_candidates_reviewable: bool,
 ) -> dict[str, Any]:
-    """Classify what the disposable public-page gate can prove.
-
-    An explicit login wall makes candidate reviewability unavailable to a
-    no-account CI runner. It does not invalidate an independently verified
-    result route, city/query continuity, or the live cross-city switch gate.
-    Without that wall, the complete production parser boundary remains
-    mandatory.
-    """
+    """Classify what the disposable public-page gate can prove."""
 
     if explicit_login_wall:
         return {
@@ -520,6 +665,20 @@ def _evaluate_one_page_collection_boundary(
         "status": "continue" if complete else "failed_one_page_collection_boundary",
         "remaining_unverified": "" if complete else "candidate_reviewability",
     }
+
+
+def _explicit_public_login_wall_observed(
+    initial_observation: bool,
+    collected: Any,
+) -> bool:
+    """Include a login wall that appears only during production collection."""
+
+    if initial_observation:
+        return True
+    if str(getattr(collected, "error", "") or "") == "zhilian_login_required":
+        return True
+    snapshot = getattr(collected, "snapshot", None)
+    return bool(isinstance(snapshot, dict) and snapshot.get("loginRequired"))
 
 
 def _safe_collector_gate_payload(
@@ -1112,7 +1271,7 @@ def _run_authenticated_root_production_gate(
                 "valid": True,
                 "source": "recent_login_check",
                 "platform": "zhilian",
-                "round_id": "isolated-authenticated-root-gate",
+                "round_id": ensure_current_round()["round_id"],
                 "browser_session_id": "ci-xvfb-fixture",
                 "age_seconds": 0,
             },
@@ -1185,6 +1344,165 @@ def _run_authenticated_root_production_gate(
                 "failure": "authenticated_root_production_path_not_verified",
                 "attempts": attempts,
             }
+    return {"ok": True, "attempts": attempts}
+
+
+def _run_managed_multi_target_recovery_gate(
+    driver: CDPBossDriver,
+) -> dict[str, Any]:
+    """Exercise persisted login recovery with root and stale search targets."""
+
+    if len(TARGET_CITIES) < 2:
+        return {"ok": False, "failure": "two_target_cities_required"}
+    root_target_id = str(driver.current_target_id or "")
+    root_target = next(
+        (
+            target
+            for target in list_targets(PORT)
+            if str(target.get("id") or target.get("targetId") or "")
+            == root_target_id
+        ),
+        None,
+    )
+    if not root_target or not root_target.get("webSocketDebuggerUrl"):
+        return {"ok": False, "failure": "managed_root_target_unavailable"}
+
+    attempts: list[dict[str, Any]] = []
+    for index, target_city in enumerate(TARGET_CITIES[:2], start=1):
+        secondary: dict[str, Any] = {}
+        try:
+            driver.cdp.connect(str(root_target["webSocketDebuggerUrl"]))
+            driver.current_platform = "zhilian"
+            driver.current_target_id = root_target_id
+            secondary = _create_disposable_cdp_target("https://www.zhaopin.com/")
+            fixture = ManagedMultiTargetCityRootFixtureDriver(
+                driver,
+                target_city=target_city,
+                target_slug=f"managed-gate-city-{index}",
+                target_code=str(940 + index),
+                secondary_target=secondary,
+            )
+            stale_installed = fixture.install_stale_secondary()
+            target_count_before = len(
+                [
+                    target
+                    for target in list_targets(PORT)
+                    if target.get("type") == "page"
+                    and "zhaopin.com" in str(target.get("url") or "")
+                ]
+            )
+            collected = ZhilianReadOnlyCollector(
+                driver=fixture,
+                login_verification={
+                    "valid": True,
+                    "source": "recent_login_check",
+                    "platform": "zhilian",
+                    "round_id": ensure_current_round()["round_id"],
+                    "browser_session_id": "ci-xvfb-managed-profile",
+                    "age_seconds": 30,
+                },
+            ).collect(
+                query=QUERY,
+                city=target_city,
+                limit=5,
+                wait_seconds=0,
+                page=1,
+                pages=1,
+                page_delay=0,
+            )
+            secondary_id = str(
+                secondary.get("id") or secondary.get("targetId") or ""
+            )
+            job_cities = [str(job.city or "") for job in collected.jobs]
+            adoption_outcome = str(fixture.target_adoption.get("outcome") or "")
+            keyword_search = collected.snapshot.get("keywordSearch")
+            keyword_search = (
+                keyword_search if isinstance(keyword_search, dict) else {}
+            )
+            search_transition = keyword_search.get("searchTransition")
+            search_transition = (
+                search_transition if isinstance(search_transition, dict) else {}
+            )
+            city_root_recovery = search_transition.get("cityRootRecovery")
+            city_root_recovery = (
+                city_root_recovery
+                if isinstance(city_root_recovery, dict)
+                else {}
+            )
+            recovery_probe = city_root_recovery or search_transition
+            attempt_ok = bool(
+                stale_installed.get("ok")
+                and target_count_before >= 2
+                and fixture.external_transition_installed
+                and fixture.target_adoption.get("ok")
+                and adoption_outcome == "changed_existing_target_adopted"
+                and driver.current_target_id == secondary_id
+                and collected.ok
+                and collected.jobs
+                and all(city == target_city for city in job_cities)
+                and fixture.pagination_attempts == 0
+            )
+            attempts.append(
+                {
+                    "index": index,
+                    "target_city": target_city,
+                    "ok": attempt_ok,
+                    "error": str(collected.error or "")[:100],
+                    "target_count_before": target_count_before,
+                    "persisted_login_receipt_used": True,
+                    "changed_existing_target_adopted": (
+                        adoption_outcome == "changed_existing_target_adopted"
+                    ),
+                    "recovery_ready_state": str(
+                        recovery_probe.get("readyState") or ""
+                    ),
+                    "recovery_title_city_match": bool(
+                        recovery_probe.get("titleCityMatch")
+                    ),
+                    "recovery_result_route": _is_search_route(
+                        recovery_probe.get("url")
+                    ),
+                    "recovery_query_match": (
+                        " ".join(
+                            str(
+                                recovery_probe.get("observedKeyword") or ""
+                            ).split()
+                        ).casefold()
+                        == " ".join(QUERY.split()).casefold()
+                    ),
+                    "recovery_strong_login_evidence": sorted(
+                        str(item)[:60]
+                        for item in (
+                            recovery_probe.get("strongLoginEvidence") or []
+                        )
+                        if item
+                    ),
+                    "target_city_only": bool(
+                        collected.jobs
+                        and all(city == target_city for city in job_cities)
+                    ),
+                    "old_city_result_rejected": bool(
+                        collected.jobs
+                        and all(city != "深圳" for city in job_cities)
+                    ),
+                    "page_two_attempted": fixture.pagination_attempts > 0,
+                }
+            )
+            if not attempt_ok:
+                return {
+                    "ok": False,
+                    "failure": "managed_multi_target_recovery_not_verified",
+                    "attempts": attempts,
+                }
+        finally:
+            driver.cdp.connect(str(root_target["webSocketDebuggerUrl"]))
+            driver.current_platform = "zhilian"
+            driver.current_target_id = root_target_id
+            secondary_id = str(
+                secondary.get("id") or secondary.get("targetId") or ""
+            )
+            if secondary_id:
+                close_platform_target(PORT, secondary_id)
     return {"ok": True, "attempts": attempts}
 
 
@@ -1576,10 +1894,17 @@ def main() -> int:
     try:
         stage = "attach_chrome"
         manager = AttachedChromeManager()
+        start_new_round(
+            intent={
+                "status": "confirmed",
+                "target_roles": ["isolated-headed-gate"],
+                "source": "ci_no_recruiting_action",
+            }
+        )
         driver = CDPBossDriver(
             manager=manager,
             platform="zhilian",
-            track_round=False,
+            track_round=True,
         )
         deadline = time.monotonic() + TIMEOUT_SECONDS
         reload_deadline = time.monotonic() + ENTRY_RELOAD_SECONDS
@@ -1762,7 +2087,7 @@ def main() -> int:
                     "valid": True,
                     "source": "recent_login_check",
                     "platform": "zhilian",
-                    "round_id": "isolated-public-gate",
+                    "round_id": ensure_current_round()["round_id"],
                     "browser_session_id": "ci-xvfb",
                     "age_seconds": 0,
                 },
@@ -1806,7 +2131,10 @@ def main() -> int:
                 _write_report(report)
                 return 1
             collection_boundary = _evaluate_one_page_collection_boundary(
-                explicit_login_wall=explicit_login_wall,
+                explicit_login_wall=_explicit_public_login_wall_observed(
+                    explicit_login_wall,
+                    collected,
+                ),
                 parsed_candidate_count=len(parsed_jobs),
                 collector_ok=bool(collected.ok),
                 collector_candidate_count=len(collected.jobs),
@@ -1863,6 +2191,13 @@ def main() -> int:
                 report["status"] = "failed_authenticated_root_production_path"
                 _write_report(report)
                 return 1
+            stage = "managed_multi_target_recovery_fixture"
+            managed_target_gate = _run_managed_multi_target_recovery_gate(driver)
+            report["managed_multi_target_recovery_gate"] = managed_target_gate
+            if not managed_target_gate.get("ok"):
+                report["status"] = "failed_managed_multi_target_recovery"
+                _write_report(report)
+                return 1
             report.update(
                 status=(
                     "passed_full"
@@ -1883,6 +2218,13 @@ def main() -> int:
             )
             if not authenticated_root_gate.get("ok"):
                 report["status"] = "failed_authenticated_root_production_path"
+                _write_report(report)
+                return 1
+            stage = "managed_multi_target_recovery_fixture"
+            managed_target_gate = _run_managed_multi_target_recovery_gate(driver)
+            report["managed_multi_target_recovery_gate"] = managed_target_gate
+            if not managed_target_gate.get("ok"):
+                report["status"] = "failed_managed_multi_target_recovery"
                 _write_report(report)
                 return 1
             report.update(

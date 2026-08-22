@@ -1205,8 +1205,69 @@ class ZhilianReadOnlyCollector:
         attempted_actions.add(signature)
         if not hasattr(self.driver, "_click_at"):
             return result
+        target_before: dict[str, Any] = {}
+        capture_targets = getattr(
+            self.driver,
+            "capture_platform_target_state",
+            None,
+        )
+        if action == "select_city" and callable(capture_targets):
+            try:
+                target_before = capture_targets("zhilian")
+            except Exception:
+                target_before = {}
         self.driver._click_at(click_point.get("x"), click_point.get("y"))
-        return {**result, "nativeClicked": True}
+        target_transition: dict[str, Any] = {}
+        adopt_target = getattr(
+            self.driver,
+            "adopt_platform_target_transition",
+            None,
+        )
+        if action == "select_city" and target_before and callable(adopt_target):
+            try:
+                target_transition = adopt_target(
+                    target_before,
+                    platform="zhilian",
+                    wait_seconds=min(max(float(wait_seconds), 0.0), 5.0),
+                    allow_changed_platform_page=True,
+                )
+            except Exception as exc:
+                target_transition = {
+                    "ok": False,
+                    "outcome": "target_transition_probe_failed",
+                    "exceptionType": type(exc).__name__,
+                    "new_target_count": 0,
+                    "previous_target_closed": False,
+                }
+        return {
+            **result,
+            "nativeClicked": True,
+            **(
+                {
+                    "targetTransition": {
+                        "ok": bool(target_transition.get("ok")),
+                        "outcome": str(target_transition.get("outcome") or ""),
+                        "newTargetCount": _safe_int(
+                            target_transition.get("new_target_count")
+                        ),
+                        "previousTargetClosed": bool(
+                            target_transition.get("previous_target_closed")
+                        ),
+                        **(
+                            {
+                                "exceptionType": str(
+                                    target_transition.get("exceptionType") or ""
+                                )
+                            }
+                            if target_transition.get("exceptionType")
+                            else {}
+                        ),
+                    }
+                }
+                if target_transition
+                else {}
+            ),
+        }
 
     def _await_city_directory_candidate(
         self,
