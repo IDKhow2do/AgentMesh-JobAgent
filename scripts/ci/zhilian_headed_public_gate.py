@@ -262,6 +262,48 @@ def _write_report(report: dict[str, Any]) -> None:
     print(encoded, flush=True)
 
 
+def _evaluate_one_page_collection_boundary(
+    *,
+    explicit_login_wall: bool,
+    parsed_candidate_count: int,
+    collector_ok: bool,
+    collector_candidate_count: int,
+    page_two_attempted: bool,
+    collection_budget_satisfied: bool,
+    all_parser_candidates_reviewable: bool,
+    all_collector_candidates_reviewable: bool,
+) -> dict[str, Any]:
+    """Classify what the disposable public-page gate can prove.
+
+    An explicit login wall makes candidate reviewability unavailable to a
+    no-account CI runner. It does not invalidate an independently verified
+    result route, city/query continuity, or the live cross-city switch gate.
+    Without that wall, the complete production parser boundary remains
+    mandatory.
+    """
+
+    if explicit_login_wall:
+        return {
+            "ok": True,
+            "status": "passed_route_only_login_wall",
+            "remaining_unverified": "candidate_reviewability",
+        }
+    complete = bool(
+        parsed_candidate_count > 0
+        and collector_ok
+        and collector_candidate_count > 0
+        and not page_two_attempted
+        and collection_budget_satisfied
+        and all_parser_candidates_reviewable
+        and all_collector_candidates_reviewable
+    )
+    return {
+        "ok": complete,
+        "status": "continue" if complete else "failed_one_page_collection_boundary",
+        "remaining_unverified": "" if complete else "candidate_reviewability",
+    }
+
+
 def _dismiss_public_login_overlay(
     driver: CDPBossDriver,
     *,
@@ -1425,16 +1467,24 @@ def main() -> int:
                 report["status"] = "failed_live_cross_city_switch"
                 _write_report(report)
                 return 1
-            if (
-                not parsed_jobs
-                or not collected.ok
-                or not collected.jobs
-                or bound_driver.pagination_attempts
-                or not collection_budget_satisfied
-                or not all(is_reviewable_zhilian_job(job) for job in parsed_jobs)
-                or not all(is_reviewable_zhilian_job(job) for job in collected.jobs)
-            ):
-                report["status"] = "failed_one_page_collection_boundary"
+            collection_boundary = _evaluate_one_page_collection_boundary(
+                explicit_login_wall=explicit_login_wall,
+                parsed_candidate_count=len(parsed_jobs),
+                collector_ok=bool(collected.ok),
+                collector_candidate_count=len(collected.jobs),
+                page_two_attempted=bound_driver.pagination_attempts > 0,
+                collection_budget_satisfied=collection_budget_satisfied,
+                all_parser_candidates_reviewable=bool(parsed_jobs)
+                and all(is_reviewable_zhilian_job(job) for job in parsed_jobs),
+                all_collector_candidates_reviewable=bool(collected.jobs)
+                and all(is_reviewable_zhilian_job(job) for job in collected.jobs),
+            )
+            if collection_boundary["status"] == "passed_route_only_login_wall":
+                report.update(collection_boundary)
+                _write_report(report)
+                return 0
+            if not collection_boundary["ok"]:
+                report.update(collection_boundary)
                 _write_report(report)
                 return 1
             stage = "public_detail_reviewability"

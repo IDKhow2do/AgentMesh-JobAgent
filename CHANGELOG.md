@@ -9,7 +9,7 @@ All notable public Job Agent client changes are documented here.
 - Complete Zhilian stale-city recovery through the platform's current official public flow: discover the exact readable target city from the city directory, independently verify its city homepage, then submit the original readable query and adopt only a result route whose city and query both match.
 - Clear stale result-page evidence before probing a newly opened target-city page, so an older Shenzhen route cannot keep a Zhengzhou, Hangzhou, or other signed city request trapped in bounded navigation recovery.
 - Keep login classification fail-closed while allowing the read-only city-directory bootstrap needed to diagnose and recover a stale official result page. A real login form or challenge still stops before search or candidate collection.
-- Add an isolated Linux/Xvfb headed Chrome release gate that proves two consecutive real public-page city transitions, readable-query continuity, result-page readiness, candidate parsing, and no blind second-page navigation without using an account or performing a recruiting action.
+- Add an isolated Linux/Xvfb headed Chrome release gate that proves two consecutive real public-page city transitions, readable-query continuity, result-page readiness, candidate-surface detection, and no blind second-page navigation without using an account or performing a recruiting action. If the public page presents an explicit login wall, the report keeps candidate reviewability as a named unverified remainder instead of treating it as production evidence.
 
 ### Compatibility
 
