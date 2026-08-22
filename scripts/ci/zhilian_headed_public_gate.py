@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from jobagent.drivers.boss.cdp_driver import CDPBossDriver
 from jobagent.domain.models import Job
 from jobagent.domain.reviewability import delivery_reviewability_issues
+from jobagent.drivers.boss.cdp_driver import CDPBossDriver
 from jobagent.platforms.zhilian.city_resolver import ZhilianCityResolver
 from jobagent.platforms.zhilian.collect import (
     ZhilianReadOnlyCollector,
@@ -28,12 +28,12 @@ from jobagent.platforms.zhilian.collect import (
     parse_zhilian_snapshot_jobs,
     zhilian_candidate_collection_completed,
 )
-from jobagent.platforms.zhilian.parser import is_reviewable_zhilian_job
 from jobagent.platforms.zhilian.detail import (
     build_zhilian_detail_snapshot_script,
     merge_zhilian_detail_into_job,
     unwrap_zhilian_detail_js_result,
 )
+from jobagent.platforms.zhilian.parser import is_reviewable_zhilian_job
 from jobagent.platforms.zhilian.selectors import (
     build_zhilian_city_filter_script,
     build_zhilian_search_control_activation_script,
@@ -120,6 +120,224 @@ class BoundResultPageDriver:
         if "zhilian_pagination" in script:
             self.pagination_attempts += 1
             return {"ok": False, "error": "unexpected_page_two_probe"}
+        return self.driver._exec_js(script)
+
+
+class AuthenticatedCityRootFixtureDriver:
+    """Exercise the production collector against a headed, same-origin DOM fixture.
+
+    The fixture models the production-only redirect that cannot be reproduced with
+    an anonymous public session: an official target-city route settles on the
+    authenticated root page, where the city must be selected through visible UI.
+    It stays on the disposable CI target and contains no account or recruiting data.
+    """
+
+    def __init__(
+        self,
+        driver: CDPBossDriver,
+        *,
+        target_city: str,
+        target_slug: str,
+        target_code: str,
+    ):
+        self.driver = driver
+        self.target_city = target_city
+        self.target_slug = target_slug
+        self.target_code = target_code
+        self.pagination_attempts = 0
+        self.opened_kinds: list[str] = []
+
+    @property
+    def cdp(self):
+        return self.driver.cdp
+
+    @property
+    def target_homepage(self) -> str:
+        return f"https://www.zhaopin.com/{self.target_slug}/"
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 5) -> dict[str, Any]:
+        del wait_seconds
+        parsed = urlsplit(str(url or ""))
+        path = parsed.path.rstrip("/") or "/"
+        if path == "/":
+            kind = "entry"
+        elif path == "/citymap":
+            kind = "city_directory"
+        elif path == f"/{self.target_slug}":
+            # This is the authenticated-session behavior that v0.5.33 missed.
+            kind = "authenticated_root_redirect"
+        else:
+            return {"ok": False, "error": "fixture_navigation_rejected"}
+        installed = self._install(kind)
+        if installed.get("ok"):
+            self.opened_kinds.append(kind)
+        return {
+            "ok": bool(installed.get("ok")),
+            "url": url,
+            "fixtureKind": kind,
+            "error": str(installed.get("error") or ""),
+        }
+
+    def _click_at(self, x: Any, y: Any) -> None:
+        self.driver._click_at(x, y)
+
+    def dismiss_javascript_dialog(self) -> dict[str, Any]:
+        return {"ok": True, "dismissed": False}
+
+    def _exec_js(self, script: str) -> dict[str, Any]:
+        if "zhilian_pagination" in script:
+            self.pagination_attempts += 1
+        return self.driver._exec_js(script)
+
+    def fixture_events(self) -> list[str]:
+        result = self.driver._exec_js(
+            "JSON.stringify({ok:true,events:Array.from(window.__jobagentGateEvents||[])})"
+        )
+        return [str(item) for item in (result.get("events") or []) if item]
+
+    def _install(self, initial_kind: str) -> dict[str, Any]:
+        target_city = json.dumps(self.target_city, ensure_ascii=False)
+        target_slug = json.dumps(self.target_slug)
+        target_code = json.dumps(self.target_code)
+        query = json.dumps(QUERY, ensure_ascii=False)
+        initial = json.dumps(initial_kind)
+        script = f"""
+        (function(){{
+          const targetCity = {target_city};
+          const targetSlug = {target_slug};
+          const targetCode = {target_code};
+          const query = {query};
+          const initialKind = {initial};
+          const oldCity = '深圳';
+          const css = `
+            * {{ box-sizing: border-box; }}
+            body {{ margin: 0; min-height: 900px; font-family: sans-serif; }}
+            .fixture-shell {{ min-height: 900px; padding: 24px; }}
+            .account-nav {{ display: flex; gap: 18px; height: 34px; }}
+            .account-evidence {{ margin-top: 8px; height: 30px; }}
+            .search-wrapper {{ display: flex; gap: 8px; margin-top: 22px; width: 680px; }}
+            .search-wrapper__input {{ width: 500px; height: 44px; }}
+            .search-wrapper__button {{ display: inline-flex; width: 120px; height: 44px;
+              align-items: center; justify-content: center; border: 1px solid #222; }}
+            .location-panel {{ position: absolute; top: 145px; left: 24px; width: 720px;
+              min-height: 90px; padding: 12px; border: 1px solid #bbb; }}
+            .location-header {{ display: inline-block; width: 70px; height: 34px; }}
+            .city-current {{ display: inline-flex; width: 90px; height: 34px;
+              align-items: center; justify-content: center; border: 1px solid #777; }}
+            .city-options {{ display: none; margin-top: 10px; gap: 8px; }}
+            .city-options.visible {{ display: flex; }}
+            .city-option {{ display: inline-flex; width: 74px; height: 32px;
+              align-items: center; justify-content: center; border: 1px solid #999; }}
+            .job-card {{ position: absolute; top: 380px; left: 24px; width: 760px;
+              min-height: 170px; padding: 18px; border: 1px solid #aaa; }}
+            .job-name, .company-name, .salary, .job-city {{ display: block;
+              min-height: 28px; margin-bottom: 5px; }}
+            .city-directory {{ display: flex; gap: 14px; padding: 40px; }}
+            .city-directory a {{ display: inline-flex; width: 100px; height: 38px;
+              align-items: center; justify-content: center; border: 1px solid #999; }}
+          `;
+          const safeText = (value) => String(value || '')
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          function accountMarkup() {{
+            return `<nav class="account-nav"><a href="/personal">个人中心</a>`
+              + `<a href="/resume">我的简历</a></nav>`
+              + `<div class="account-evidence">在线简历 上传附件 我的投递 0 我的面试 0</div>`;
+          }}
+          function searchMarkup(cityCode) {{
+            return `<div class="search-wrapper">`
+              + `<input class="search-wrapper__input" type="text" placeholder="搜索职位、公司" value="${{safeText(query)}}">`
+              + `<a id="gate-search" class="search-wrapper__button" href="/sou/jl${{cityCode}}/kwABCDE">搜索</a>`
+              + `</div>`;
+          }}
+          function cardMarkup(city, id) {{
+            return `<article class="job-card" data-position-id="${{safeText(id)}}">`
+              + `<h3 class="job-name"><a href="/jobdetail/${{safeText(id)}}.htm">${{safeText(query)}}</a></h3>`
+              + `<a class="company-name" href="/companydetail/gate.htm">${{safeText(city)}}示例科技有限公司</a>`
+              + `<span class="salary">20-30K</span>`
+              + `<span class="job-city">${{safeText(city)}}</span>`
+              + `<span>5年以上 本科</span></article>`;
+          }}
+          function setPage(path, title, markup) {{
+            history.replaceState({{}}, '', path);
+            document.head.innerHTML = `<meta charset="utf-8"><style>${{css}}</style>`;
+            document.title = title;
+            document.body.innerHTML = `<main class="fixture-shell">${{markup}}</main>`;
+          }}
+          function bindSearch(nextKind) {{
+            const control = document.getElementById('gate-search');
+            if (!control) return;
+            control.addEventListener('click', (event) => {{
+              event.preventDefault();
+              render(nextKind);
+            }});
+          }}
+          function render(kind) {{
+            window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+            window.__jobagentGateEvents.push(kind);
+            if (kind === 'entry') {{
+              setPage('/', '智联招聘_求职_找工作',
+                accountMarkup() + searchMarkup('765') + cardMarkup(oldCity, 'OLD-ENTRY'));
+              bindSearch('stale_results');
+              return;
+            }}
+            if (kind === 'stale_results') {{
+              setPage('/jobs?jl=765&kw=OPAQUE',
+                '深圳热门职位招聘 2026年热门职位招聘信息-智联招聘',
+                accountMarkup() + searchMarkup('765') + cardMarkup(oldCity, 'OLD-RESULT'));
+              bindSearch('stale_results');
+              return;
+            }}
+            if (kind === 'city_directory') {{
+              setPage('/citymap', '城市选择_智联招聘',
+                `<div class="city-directory"><a href="/${{safeText(targetSlug)}}/">${{safeText(targetCity)}}</a>`
+                  + `<a href="/another-city/">其他城市</a></div>`);
+              return;
+            }}
+            if (kind === 'authenticated_root_redirect') {{
+              const cities = [oldCity, '北京', '上海', '广州', targetCity]
+                .filter((value, index, values) => values.indexOf(value) === index);
+              const options = cities.map((city) =>
+                `<button type="button" class="city-option" role="option">${{safeText(city)}}</button>`
+              ).join('');
+              const location = `<section class="location-panel"><span class="location-header">地点</span>`
+                + `<button type="button" class="city-current" aria-label="当前城市">${{oldCity}}</button>`
+                + `<div id="gate-city-options" class="city-options">${{options}}</div></section>`;
+              setPage('/', '智联招聘_求职_找工作',
+                accountMarkup() + searchMarkup(targetCode) + location + cardMarkup(oldCity, 'ROOT-REC'));
+              const current = document.querySelector('.city-current');
+              const optionsRoot = document.getElementById('gate-city-options');
+              current.addEventListener('click', () => {{
+                optionsRoot.classList.add('visible');
+                window.__jobagentGateEvents.push('city_options');
+              }});
+              Array.from(optionsRoot.querySelectorAll('[role="option"]')).forEach((option) => {{
+                option.addEventListener('click', () => {{
+                  if (String(option.textContent || '').trim() !== targetCity) return;
+                  current.textContent = targetCity;
+                  current.classList.add('current', 'selected');
+                  option.classList.add('selected');
+                  document.title = `${{targetCity}}招聘网_${{targetCity}}人才网_智联招聘`;
+                  window.__jobagentGateEvents.push('target_city_selected');
+                }});
+              }});
+              bindSearch('target_results');
+              return;
+            }}
+            if (kind === 'target_results') {{
+              setPage(`/jobs?jl=${{targetCode}}&kw=${{encodeURIComponent(query)}}`,
+                `${{targetCity}}热门职位招聘 2026年热门职位招聘信息-智联招聘`,
+                accountMarkup() + searchMarkup(targetCode)
+                  + `<span class="city-current current selected" aria-current="true">${{safeText(targetCity)}}</span>`
+                  + cardMarkup(targetCity, `TARGET-${{targetSlug}}`));
+              bindSearch('target_results');
+            }}
+          }}
+          window.__jobagentGateRender = render;
+          if (initialKind === 'entry') window.__jobagentGateEvents = [];
+          render(initialKind);
+          return JSON.stringify({{ok: true, kind: initialKind, readyState: document.readyState}});
+        }})()
+        """
         return self.driver._exec_js(script)
 
 
@@ -301,6 +519,26 @@ def _evaluate_one_page_collection_boundary(
         "ok": complete,
         "status": "continue" if complete else "failed_one_page_collection_boundary",
         "remaining_unverified": "" if complete else "candidate_reviewability",
+    }
+
+
+def _safe_collector_gate_payload(
+    collected: Any,
+) -> dict[str, Any]:
+    payload = collected.to_payload()
+    diagnostics = payload.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    return {
+        "collector_error": str(collected.error or "")[:100],
+        "collector_retryable": bool(payload.get("retryable")),
+        "collector_requires_user_action": bool(
+            payload.get("requires_user_action")
+        ),
+        "collector_diagnostics": {
+            str(key)[:80]: value
+            for key, value in diagnostics.items()
+            if isinstance(value, (bool, int, float, str, type(None)))
+        },
     }
 
 
@@ -847,6 +1085,104 @@ def _run_live_city_switch_gate(driver: CDPBossDriver) -> dict[str, Any]:
             return {
                 "ok": False,
                 "failure": "target_city_transition_not_verified",
+                "attempts": attempts,
+            }
+    return {"ok": True, "attempts": attempts}
+
+
+def _run_authenticated_root_production_gate(
+    driver: CDPBossDriver,
+) -> dict[str, Any]:
+    """Run the production collector through the authenticated-root recovery path."""
+
+    if len(TARGET_CITIES) < 2:
+        return {"ok": False, "failure": "two_target_cities_required"}
+
+    attempts: list[dict[str, Any]] = []
+    for index, target_city in enumerate(TARGET_CITIES[:2], start=1):
+        fixture = AuthenticatedCityRootFixtureDriver(
+            driver,
+            target_city=target_city,
+            target_slug=f"gate-city-{index}",
+            target_code=str(930 + index),
+        )
+        collected = ZhilianReadOnlyCollector(
+            driver=fixture,
+            login_verification={
+                "valid": True,
+                "source": "recent_login_check",
+                "platform": "zhilian",
+                "round_id": "isolated-authenticated-root-gate",
+                "browser_session_id": "ci-xvfb-fixture",
+                "age_seconds": 0,
+            },
+        ).collect(
+            query=QUERY,
+            city=target_city,
+            limit=5,
+            wait_seconds=0,
+            page=1,
+            pages=1,
+            page_delay=0,
+        )
+        events = fixture.fixture_events()
+        final_transition = fixture._exec_js(
+            build_zhilian_search_transition_script(QUERY, target_city)
+        )
+        final_transition_verified = _search_transition_ready(
+            final_transition,
+            QUERY,
+            target_city,
+        )
+        job_cities = [str(job.city or "") for job in collected.jobs]
+        expected_events = {
+            "entry",
+            "stale_results",
+            "city_directory",
+            "authenticated_root_redirect",
+            "city_options",
+            "target_city_selected",
+            "target_results",
+        }
+        attempt_ok = bool(
+            collected.ok
+            and collected.jobs
+            and final_transition_verified
+            and all(city == target_city for city in job_cities)
+            and expected_events.issubset(set(events))
+            and fixture.pagination_attempts == 0
+            and fixture.opened_kinds
+            == ["entry", "city_directory", "authenticated_root_redirect"]
+        )
+        attempts.append(
+            {
+                "index": index,
+                "target_city": target_city,
+                "ok": attempt_ok,
+                "error": str(collected.error or "")[:100],
+                "candidate_count": len(collected.jobs),
+                "target_city_only": bool(
+                    collected.jobs
+                    and all(city == target_city for city in job_cities)
+                ),
+                "production_collector_used": True,
+                "official_city_directory_used": "city_directory" in events,
+                "authenticated_root_redirect_observed": (
+                    "authenticated_root_redirect" in events
+                ),
+                "visible_city_options_opened": "city_options" in events,
+                "target_city_selected": "target_city_selected" in events,
+                "target_result_verified": "target_results" in events,
+                "target_result_state_verified": final_transition_verified,
+                "target_result_transition": _safe_transition(final_transition),
+                "old_city_result_rejected": "stale_results" in events,
+                "page_two_attempted": fixture.pagination_attempts > 0,
+            }
+        )
+        if not attempt_ok:
+            return {
+                "ok": False,
+                "failure": "authenticated_root_production_path_not_verified",
                 "attempts": attempts,
             }
     return {"ok": True, "attempts": attempts}
@@ -1441,6 +1777,7 @@ def main() -> int:
             termination_reason = str(
                 collected.snapshot.get("terminationReason") or ""
             )
+            collector_gate_payload = _safe_collector_gate_payload(collected)
             collection_budget_satisfied = zhilian_candidate_collection_completed(
                 termination_reason
             )
@@ -1448,6 +1785,7 @@ def main() -> int:
                 requested_pages=1,
                 page_two_attempted=bound_driver.pagination_attempts > 0,
                 collector_ok=bool(collected.ok),
+                **collector_gate_payload,
                 collector_candidate_count=len(collected.jobs),
                 snapshot_parser_candidate_count=len(parsed_jobs),
                 first_page_exhausted=page_exhausted,
@@ -1479,48 +1817,76 @@ def main() -> int:
                 all_collector_candidates_reviewable=bool(collected.jobs)
                 and all(is_reviewable_zhilian_job(job) for job in collected.jobs),
             )
-            if collection_boundary["status"] == "passed_route_only_login_wall":
-                report.update(collection_boundary)
-                _write_report(report)
-                return 0
             if not collection_boundary["ok"]:
                 report.update(collection_boundary)
                 _write_report(report)
                 return 1
-            stage = "public_detail_reviewability"
-            detail_gate = _run_public_detail_reviewability_gate(driver, parsed_jobs)
-            report["public_detail_reviewability_gate"] = detail_gate
-            if not detail_gate.get("ok"):
-                report["status"] = "failed_public_detail_reviewability"
+            if collection_boundary["status"] == "continue":
+                stage = "public_detail_reviewability"
+                detail_gate = _run_public_detail_reviewability_gate(
+                    driver, parsed_jobs
+                )
+                report["public_detail_reviewability_gate"] = detail_gate
+                if not detail_gate.get("ok"):
+                    report["status"] = "failed_public_detail_reviewability"
+                    _write_report(report)
+                    return 1
+                stage = "document_title_fallback_fixture"
+                title_fallback_gate = _run_document_title_fallback_gate(driver)
+                report["document_title_fallback_gate"] = title_fallback_gate
+                if not title_fallback_gate.get("ok"):
+                    report["status"] = "failed_document_title_fallback"
+                    _write_report(report)
+                    return 1
+                stage = "generic_link_reviewability_fixture"
+                reviewability_gate = _run_generic_link_reviewability_gate(driver)
+                report["generic_link_reviewability_gate"] = reviewability_gate
+                if not reviewability_gate.get("ok"):
+                    report["status"] = "failed_reviewability_boundary"
+                    _write_report(report)
+                    return 1
+                stage = "cross_city_fallback_fixture"
+                fallback_gate = _run_cross_city_fallback_gate(driver)
+                report["cross_city_fallback_gate"] = fallback_gate
+                if not fallback_gate.get("ok"):
+                    report["status"] = "failed_cross_city_fallback_boundary"
+                    _write_report(report)
+                    return 1
+            stage = "authenticated_root_production_fixture"
+            authenticated_root_gate = _run_authenticated_root_production_gate(
+                driver
+            )
+            report["authenticated_root_production_gate"] = (
+                authenticated_root_gate
+            )
+            if not authenticated_root_gate.get("ok"):
+                report["status"] = "failed_authenticated_root_production_path"
                 _write_report(report)
                 return 1
-            stage = "document_title_fallback_fixture"
-            title_fallback_gate = _run_document_title_fallback_gate(driver)
-            report["document_title_fallback_gate"] = title_fallback_gate
-            if not title_fallback_gate.get("ok"):
-                report["status"] = "failed_document_title_fallback"
-                _write_report(report)
-                return 1
-            stage = "generic_link_reviewability_fixture"
-            reviewability_gate = _run_generic_link_reviewability_gate(driver)
-            report["generic_link_reviewability_gate"] = reviewability_gate
-            if not reviewability_gate.get("ok"):
-                report["status"] = "failed_reviewability_boundary"
-                _write_report(report)
-                return 1
-            stage = "cross_city_fallback_fixture"
-            fallback_gate = _run_cross_city_fallback_gate(driver)
-            report["cross_city_fallback_gate"] = fallback_gate
-            if not fallback_gate.get("ok"):
-                report["status"] = "failed_cross_city_fallback_boundary"
-                _write_report(report)
-                return 1
-            report["status"] = "passed_full"
+            report.update(
+                status=(
+                    "passed_full"
+                    if collection_boundary["status"] == "continue"
+                    else "passed_route_only_login_wall_with_production_fixture"
+                ),
+                remaining_unverified=collection_boundary["remaining_unverified"],
+            )
             _write_report(report)
             return 0
         if route_complete and explicit_login_wall:
+            stage = "authenticated_root_production_fixture"
+            authenticated_root_gate = _run_authenticated_root_production_gate(
+                driver
+            )
+            report["authenticated_root_production_gate"] = (
+                authenticated_root_gate
+            )
+            if not authenticated_root_gate.get("ok"):
+                report["status"] = "failed_authenticated_root_production_path"
+                _write_report(report)
+                return 1
             report.update(
-                status="passed_route_only_login_wall",
+                status="passed_route_only_login_wall_with_production_fixture",
                 remaining_unverified="job_list_signal",
             )
             _write_report(report)

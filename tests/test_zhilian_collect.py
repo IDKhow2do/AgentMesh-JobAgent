@@ -11,6 +11,7 @@ from jobagent.platforms.zhilian.city_resolver import (
 from jobagent.platforms.zhilian.collect import (
     ZhilianCollectResult,
     ZhilianReadOnlyCollector,
+    _authenticated_city_root_redirect_ready,
     _search_transition_city_discovery_ready,
     _search_transition_ready,
     build_zhilian_search_url,
@@ -1068,6 +1069,251 @@ class _WrongCitySearchRouteRecoveryDriver:
         }
 
 
+class _AuthenticatedTargetRouteRedirectsToRootDriver:
+    """Model the v0.5.33 production path after an authenticated city redirect."""
+
+    def __init__(self, *, target_city: str, target_slug: str, target_code: str):
+        self.target_city = target_city
+        self.target_slug = target_slug
+        self.target_code = target_code
+        self.query = "高级产品经理"
+        self.page = "entry"
+        self.opened_urls: list[str] = []
+        self.interactive_city_actions: list[str] = []
+        self.snapshot_pages: list[str] = []
+
+    @property
+    def target_homepage(self) -> str:
+        return f"https://www.zhaopin.com/{self.target_slug}/"
+
+    def open_url_in_new_tab(self, url: str, wait_seconds: int = 5):
+        del wait_seconds
+        self.opened_urls.append(url)
+        if url == "https://www.zhaopin.com/":
+            self.page = "entry"
+        elif url == "https://www.zhaopin.com/citymap":
+            self.page = "city_directory"
+        elif url == self.target_homepage:
+            # The authenticated production session does not retain the public
+            # readable city route and settles on the generic entry page.
+            self.page = "redirected_root"
+        return {"ok": True, "url": url}
+
+    def _click_at(self, _x, _y):
+        if self.page == "redirected_root":
+            self.page = "city_options"
+            self.interactive_city_actions.append("expand_location")
+        elif self.page == "city_options":
+            self.page = "target_homepage"
+            self.interactive_city_actions.append("select_city")
+        elif self.page == "target_homepage":
+            self.page = "target_results"
+
+    def dismiss_javascript_dialog(self):
+        return {"ok": True, "dismissed": False}
+
+    def _exec_js(self, script: str):
+        if "zhilian_keyword_search" in script:
+            return {
+                "ok": True,
+                "mode": "zhilian_keyword_search",
+                "observedValue": self.query,
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "accountEvidence": ["account_navigation"],
+                "strongAccountEvidence": ["resume_management"],
+                "inputClickPoint": {"x": 260, "y": 90},
+                "clickPoint": {"x": 520, "y": 90},
+            }
+        if "zhilian_search_transition" in script:
+            if self.page == "entry":
+                self.page = "stale_results"
+            if self.page == "stale_results":
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+                    "title": "深圳热门职位招聘 2026年热门职位招聘信息-智联招聘",
+                    "readyState": "complete",
+                    "sessionState": "page_ready",
+                    "observedKeyword": self.query,
+                    "observedCityCode": "765",
+                    "titleCityMatch": False,
+                    "searchPageEvidence": [
+                        "search_route",
+                        "search_input",
+                        "job_surface",
+                    ],
+                }
+            if self.page in {"redirected_root", "city_options"}:
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": "https://www.zhaopin.com/",
+                    "title": "智联招聘_求职_找工作",
+                    "readyState": "complete",
+                    "sessionState": "logged_in",
+                    "accountEvidence": ["account_navigation"],
+                    "strongAccountEvidence": ["resume_management"],
+                    "observedKeyword": self.query,
+                    "observedCityCode": None,
+                    "candidateCityCode": None,
+                    "titleCityMatch": False,
+                    "searchPageEvidence": ["search_input", "job_surface"],
+                }
+            if self.page == "target_results":
+                return {
+                    "ok": True,
+                    "mode": "zhilian_search_transition",
+                    "url": (
+                        "https://www.zhaopin.com/jobs?"
+                        f"jl={self.target_code}&kw=OPAQUE"
+                    ),
+                    "title": (
+                        f"{self.target_city}热门职位招聘 "
+                        "2026年热门职位招聘信息-智联招聘"
+                    ),
+                    "readyState": "complete",
+                    "sessionState": "page_ready",
+                    "observedKeyword": self.query,
+                    "observedCityCode": self.target_code,
+                    "titleCityMatch": True,
+                    "searchPageEvidence": [
+                        "search_route",
+                        "search_input",
+                        "job_surface",
+                    ],
+                }
+            return {
+                "ok": True,
+                "mode": "zhilian_search_transition",
+                "url": "https://www.zhaopin.com/",
+                "title": (
+                    f"{self.target_city}招聘网_{self.target_city}人才网_"
+                    "2026年最新招聘信息-智联招聘"
+                ),
+                "readyState": "complete",
+                "sessionState": "logged_in",
+                "accountEvidence": ["account_navigation"],
+                "strongAccountEvidence": ["resume_management"],
+                "observedKeyword": self.query,
+                "observedCityCode": None,
+                "candidateCityCode": None,
+                "titleCityMatch": True,
+                "searchPageEvidence": ["search_input", "job_surface"],
+            }
+        if "const mode = 'zhilian_city_directory'" in script:
+            return {
+                "ok": True,
+                "mode": "zhilian_city_directory",
+                "action": "navigate_city_homepage",
+                "candidateNavigationUrl": self.target_homepage,
+                "candidateNavigationSource": "official_city_directory",
+                "directoryPage": True,
+                "readyState": "complete",
+            }
+        if "zhilian_city_filter" in script:
+            interactive_only = "const allowNavigationFallback = false" in script
+            if self.page == "stale_results" or not interactive_only:
+                return {
+                    "ok": False,
+                    "mode": "zhilian_city_filter",
+                    "error": "zhilian_city_directory_navigation_required",
+                    "action": "navigate_city_directory",
+                    "candidateDirectoryUrl": "https://www.zhaopin.com/citymap",
+                    "url": (
+                        "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE"
+                        if self.page == "stale_results"
+                        else "https://www.zhaopin.com/"
+                    ),
+                    "title": (
+                        "深圳热门职位招聘 - 智联招聘"
+                        if self.page == "stale_results"
+                        else "智联招聘_求职_找工作"
+                    ),
+                    "readyState": "complete",
+                    "sessionState": "logged_in",
+                }
+            if self.page == "redirected_root":
+                return {
+                    "ok": False,
+                    "mode": "zhilian_city_filter",
+                    "error": "zhilian_city_options_collapsed",
+                    "action": "expand_location",
+                    "controlRole": "current_city",
+                    "clickPoint": {"x": 180, "y": 90},
+                    "url": "https://www.zhaopin.com/",
+                    "title": "智联招聘_求职_找工作",
+                    "readyState": "complete",
+                    "sessionState": "logged_in",
+                }
+            if self.page == "city_options":
+                return {
+                    "ok": True,
+                    "mode": "zhilian_city_filter",
+                    "city": self.target_city,
+                    "observedCity": "深圳",
+                    "applied": True,
+                    "action": "select_city",
+                    "controlRole": "target_city_option",
+                    "clickPoint": {"x": 260, "y": 220},
+                    "urlBefore": "https://www.zhaopin.com/",
+                    "title": "智联招聘_求职_找工作",
+                    "readyState": "complete",
+                    "sessionState": "logged_in",
+                }
+            return {
+                "ok": True,
+                "mode": "zhilian_city_filter",
+                "city": self.target_city,
+                "observedCity": self.target_city,
+                "alreadySelected": True,
+                "source": "visible_current_city",
+                "url": "https://www.zhaopin.com/",
+                "title": f"{self.target_city}招聘网_智联招聘",
+                "readyState": "complete",
+                "sessionState": "logged_in",
+            }
+        if "zhilian_pagination" in script:
+            raise AssertionError("a one-page request must not inspect page two")
+
+        self.snapshot_pages.append(self.page)
+        return {
+            "ok": True,
+            "url": (
+                "https://www.zhaopin.com/jobs?"
+                f"jl={self.target_code}&kw=OPAQUE"
+            ),
+            "title": (
+                f"{self.target_city}热门职位招聘 "
+                "2026年热门职位招聘信息-智联招聘"
+            ),
+            "readyState": "complete",
+            "sessionState": "page_ready",
+            "searchPageEvidence": ["search_route", "search_input", "job_surface"],
+            "searchKeyword": self.query,
+            "visibleCity": self.target_city,
+            "candidateCityCode": self.target_code,
+            "paginationDetected": True,
+            "availablePages": [1],
+            "currentPage": 1,
+            "hasNextPage": False,
+            "cards": [
+                {
+                    "positionId": f"TARGET-{self.target_slug}",
+                    "jobTitle": self.query,
+                    "companyName": f"{self.target_city}示例科技",
+                    "salary": "20-30K",
+                    "cityName": self.target_city,
+                    "jobUrl": (
+                        "https://www.zhaopin.com/jobdetail/"
+                        f"TARGET-{self.target_slug}.htm"
+                    ),
+                }
+            ],
+        }
+
+
 def test_wrong_city_result_route_is_not_a_completed_search_transition():
     transition = {
         "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
@@ -1168,6 +1414,89 @@ def test_collector_replaces_stale_city_result_before_collecting_candidates(
     assert ZhilianCityResolver(cache).lookup(target_city) == (
         target_code,
         "verified_cache",
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_city", "target_slug", "target_code"),
+    [
+        ("郑州", "zhengzhou", "901"),
+        ("杭州", "hangzhou", "902"),
+    ],
+)
+def test_collector_recovers_authenticated_city_route_redirect_through_visible_controls(
+    tmp_path,
+    monkeypatch,
+    target_city,
+    target_slug,
+    target_code,
+):
+    driver = _AuthenticatedTargetRouteRedirectsToRootDriver(
+        target_city=target_city,
+        target_slug=target_slug,
+        target_code=target_code,
+    )
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_recent_login_verification(),
+    ).collect(
+        query="高级产品经理",
+        city=target_city,
+        limit=5,
+        wait_seconds=0,
+    )
+
+    assert result.ok is True
+    assert [job.city for job in result.jobs] == [target_city]
+    assert driver.interactive_city_actions == ["expand_location", "select_city"]
+    assert driver.snapshot_pages == ["target_results"]
+
+
+def test_authenticated_city_root_redirect_requires_bound_session_and_safe_root():
+    root = {
+        "url": "https://www.zhaopin.com/",
+        "title": "智联招聘_求职_找工作",
+        "readyState": "complete",
+        "sessionState": "unknown",
+        "searchPageEvidence": ["search_input", "job_surface"],
+    }
+
+    assert _authenticated_city_root_redirect_ready(
+        root,
+        "郑州",
+        _recent_login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
+    )
+    assert not _authenticated_city_root_redirect_ready(
+        root,
+        "郑州",
+        None,
+        expected_url="https://www.zhaopin.com/zhengzhou/",
+    )
+    assert not _authenticated_city_root_redirect_ready(
+        {**root, "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE"},
+        "郑州",
+        _recent_login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
+    )
+    assert not _authenticated_city_root_redirect_ready(
+        {**root, "strongLoginEvidence": ["visible_credential_form"]},
+        "郑州",
+        _recent_login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
+    )
+    assert not _authenticated_city_root_redirect_ready(
+        {**root, "searchPageEvidence": ["search_input"]},
+        "郑州",
+        _recent_login_verification(),
+        expected_url="https://www.zhaopin.com/zhengzhou/",
     )
 
 

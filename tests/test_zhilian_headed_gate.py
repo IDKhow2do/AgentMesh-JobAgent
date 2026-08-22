@@ -1,5 +1,7 @@
+from jobagent.platforms.zhilian.collect import ZhilianCollectResult
 from scripts.ci.zhilian_headed_public_gate import (
     _evaluate_one_page_collection_boundary,
+    _safe_collector_gate_payload,
 )
 
 
@@ -57,4 +59,31 @@ def test_reviewable_candidates_pass_the_full_collection_boundary():
         "ok": True,
         "status": "continue",
         "remaining_unverified": "",
+    }
+
+
+def test_collector_gate_payload_uses_public_result_contract():
+    collected = ZhilianCollectResult(
+        query="产品经理",
+        city="郑州",
+        url="https://www.zhaopin.com/jobs",
+        jobs=[],
+        snapshot={
+            "readyState": "complete",
+            "candidateCount": 0,
+            "jobSurfaceCount": 2,
+        },
+        ok=False,
+        error="zhilian_job_cards_not_found",
+    )
+
+    assert _safe_collector_gate_payload(collected) == {
+        "collector_error": "zhilian_job_cards_not_found",
+        "collector_retryable": True,
+        "collector_requires_user_action": False,
+        "collector_diagnostics": {
+            "ready_state": "complete",
+            "candidate_count": 0,
+            "job_surface_count": 2,
+        },
     }

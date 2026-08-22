@@ -873,19 +873,73 @@ class ZhilianReadOnlyCollector:
                         )
                         last["cityBootstrap"] = bootstrap
                         if not bootstrap.get("ok"):
-                            return {
-                                **last,
-                                "ok": False,
-                                "error": bootstrap.get("error")
-                                or "zhilian_city_evidence_pending",
-                                "loginRequired": bootstrap.get("loginRequired", False),
-                                "retryable": bootstrap.get("retryable", True),
-                                "settleAttempts": attempts,
-                                "settleTimeoutSeconds": timeout,
-                            }
-                        city_route_verification = bootstrap.get(
-                            "cityRouteVerification"
-                        )
+                            if (
+                                bootstrap.get("error")
+                                == "zhilian_authenticated_city_root_redirect"
+                            ):
+                                root_recovery = (
+                                    self._recover_authenticated_city_root_redirect(
+                                        keyword,
+                                        city=city,
+                                        expected_url=str(
+                                            city_discovery.get("navigationUrl") or ""
+                                        ),
+                                        wait_seconds=wait_seconds,
+                                    )
+                                )
+                                last["cityRootRecovery"] = root_recovery
+                                if not root_recovery.get("ok"):
+                                    return {
+                                        **last,
+                                        "ok": False,
+                                        "error": root_recovery.get("error")
+                                        or "zhilian_city_evidence_pending",
+                                        "loginRequired": root_recovery.get(
+                                            "loginRequired", False
+                                        ),
+                                        "retryable": root_recovery.get(
+                                            "retryable", True
+                                        ),
+                                        "settleAttempts": attempts,
+                                        "settleTimeoutSeconds": timeout,
+                                    }
+                                city_route_verification = root_recovery.get(
+                                    "cityRouteVerification"
+                                )
+                                recovered_probe = root_recovery.get(
+                                    "searchTransitionProbe"
+                                )
+                                if isinstance(
+                                    recovered_probe, dict
+                                ) and _search_transition_ready(
+                                    recovered_probe, keyword, city
+                                ):
+                                    return {
+                                        **recovered_probe,
+                                        "ok": True,
+                                        "cityRouteVerification": (
+                                            city_route_verification
+                                        ),
+                                        "settleAttempts": attempts,
+                                        "settleTimeoutSeconds": timeout,
+                                    }
+                            else:
+                                return {
+                                    **last,
+                                    "ok": False,
+                                    "error": bootstrap.get("error")
+                                    or "zhilian_city_evidence_pending",
+                                    "loginRequired": bootstrap.get(
+                                        "loginRequired", False
+                                    ),
+                                    "retryable": bootstrap.get("retryable", True),
+                                    "settleAttempts": attempts,
+                                    "settleTimeoutSeconds": timeout,
+                                }
+                        else:
+                            city_route_verification = bootstrap.get(
+                                "cityRouteVerification"
+                            )
                         if not _verified_city_route_matches(
                             city_route_verification,
                             city,
@@ -994,6 +1048,7 @@ class ZhilianReadOnlyCollector:
         *,
         attempted_actions: set[tuple[str, str]],
         wait_seconds: int,
+        allow_navigation_fallback: bool = True,
     ) -> dict[str, Any]:
         result = _unwrap_js_result_with_error(
             self.driver._exec_js(
@@ -1002,6 +1057,7 @@ class ZhilianReadOnlyCollector:
                     allow_unknown_session=_valid_login_verification(
                         self.login_verification
                     ),
+                    allow_navigation_fallback=allow_navigation_fallback,
                 )
             ),
             parse_error="zhilian_js_parse_failed",
@@ -1222,6 +1278,20 @@ class ZhilianReadOnlyCollector:
                 self.driver._exec_js(script),
                 parse_error="zhilian_js_parse_failed",
             )
+            if _authenticated_city_root_redirect_ready(
+                last,
+                city,
+                self.login_verification,
+                expected_url=expected_url,
+            ):
+                return {
+                    **last,
+                    "ok": False,
+                    "error": "zhilian_authenticated_city_root_redirect",
+                    "loginRequired": False,
+                    "retryable": True,
+                    "bootstrapAttempts": attempts,
+                }
             if _strong_login_evidence(last):
                 return {
                     **last,
@@ -1258,6 +1328,106 @@ class ZhilianReadOnlyCollector:
                     "bootstrapAttempts": attempts,
                 }
             time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
+
+    def _recover_authenticated_city_root_redirect(
+        self,
+        keyword: str,
+        *,
+        city: str,
+        expected_url: str,
+        wait_seconds: int,
+    ) -> dict[str, Any]:
+        """Recover a verified city route that an authenticated session sent to `/`."""
+
+        timeout = max(
+            float(wait_seconds),
+            float(ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS),
+        )
+        deadline = time.monotonic() + timeout
+        attempted_actions: set[tuple[str, str]] = set()
+        selection_observed = False
+        last_action: dict[str, Any] = {}
+        last_probe: dict[str, Any] = {}
+        script = build_zhilian_search_transition_script(keyword, city)
+        recovery_attempt = 0
+        while True:
+            if recovery_attempt < 6:
+                recovery_attempt += 1
+                last_action = self._advance_city_discovery(
+                    city,
+                    attempted_actions=attempted_actions,
+                    wait_seconds=wait_seconds,
+                    allow_navigation_fallback=False,
+                )
+                if _strong_login_evidence(last_action):
+                    return {
+                        **last_action,
+                        "ok": False,
+                        "error": "zhilian_login_required",
+                        "loginRequired": True,
+                        "recoveryAttempts": recovery_attempt,
+                    }
+                if (
+                    last_action.get("action") == "select_city"
+                    and last_action.get("nativeClicked")
+                ):
+                    selection_observed = True
+                observed_city = normalize_city_name(
+                    str(
+                        last_action.get("observedCity")
+                        or last_action.get("city")
+                        or ""
+                    )
+                )
+                if (
+                    last_action.get("alreadySelected")
+                    and observed_city == normalize_city_name(city)
+                ):
+                    selection_observed = True
+
+            last_probe = _unwrap_js_result_with_error(
+                self.driver._exec_js(script),
+                parse_error="zhilian_js_parse_failed",
+            )
+            if _strong_login_evidence(last_probe):
+                return {
+                    **last_probe,
+                    "ok": False,
+                    "error": "zhilian_login_required",
+                    "loginRequired": True,
+                    "recoveryAttempts": recovery_attempt,
+                }
+            if selection_observed and _city_bootstrap_destination_verified(
+                last_probe,
+                city,
+                self.login_verification,
+            ):
+                receipt = _build_verified_city_control_receipt(
+                    last_probe,
+                    city,
+                    expected_url=expected_url,
+                )
+                if _verified_city_route_matches(receipt, city):
+                    return {
+                        **last_probe,
+                        "ok": True,
+                        "recoveryAttempts": recovery_attempt,
+                        "cityControlAction": last_action,
+                        "cityRouteVerification": receipt,
+                        "searchTransitionProbe": last_probe,
+                    }
+            if recovery_attempt >= 3 and time.monotonic() >= deadline:
+                break
+            time.sleep(ZHILIAN_PAGE_POLL_INTERVAL_SECONDS)
+        return {
+            **last_probe,
+            "ok": False,
+            "error": "zhilian_city_evidence_pending",
+            "loginRequired": False,
+            "retryable": True,
+            "recoveryAttempts": recovery_attempt,
+            "cityControlAction": last_action,
+        }
 
     def _submit_verified_city_keyword(
         self,
@@ -2656,6 +2826,34 @@ def _build_verified_city_route_receipt(
     }
 
 
+def _build_verified_city_control_receipt(
+    result: dict[str, Any],
+    city: str,
+    *,
+    expected_url: str,
+) -> dict[str, Any]:
+    expected = _safe_zhilian_city_homepage_url(expected_url)
+    observed = _safe_zhilian_city_navigation_url(result.get("url"))
+    if not expected or not observed:
+        return {}
+    return {
+        "schemaVersion": 1,
+        "verified": True,
+        "city": normalize_city_name(city),
+        "url": expected,
+        "path": urlparse(expected).path.rstrip("/") or "/",
+        "observedUrl": observed,
+        "source": "visible_city_control_after_official_route",
+        "evidenceSources": [
+            "official_city_navigation",
+            "exact_target_city_control",
+            "matching_city_title",
+            "search_input",
+            "account_bound_session",
+        ],
+    }
+
+
 def _verified_city_route_matches(value: Any, city: str) -> bool:
     if not isinstance(value, dict) or value.get("verified") is not True:
         return False
@@ -2668,6 +2866,35 @@ def _verified_city_route_matches(value: Any, city: str) -> bool:
         return False
     path = urlparse(route_url).path.rstrip("/") or "/"
     return path != "/" and path == str(value.get("path") or "")
+
+
+def _authenticated_city_root_redirect_ready(
+    result: dict[str, Any],
+    city: str,
+    login_verification: dict[str, Any] | None,
+    *,
+    expected_url: str,
+) -> bool:
+    if not normalize_city_name(city) or not _valid_login_verification(login_verification):
+        return False
+    if _strong_login_evidence(result):
+        return False
+    expected = _safe_zhilian_city_homepage_url(expected_url)
+    observed = _safe_zhilian_city_navigation_url(result.get("url"))
+    if not expected or not observed or str(result.get("readyState") or "") != "complete":
+        return False
+    parsed = urlparse(observed)
+    if parsed.path.rstrip("/") or parsed.query or parsed.fragment:
+        return False
+    state = str(result.get("sessionState") or "")
+    if state == "login_required" and not _weak_navigation_login_only(result):
+        return False
+    evidence = {
+        str(item)
+        for item in (result.get("searchPageEvidence") or [])
+        if item
+    }
+    return "search_input" in evidence and "job_surface" in evidence
 
 
 def _city_route_snapshot_resolution(
