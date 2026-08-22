@@ -143,12 +143,14 @@ class AuthenticatedCityRootFixtureDriver:
         target_slug: str,
         target_code: str,
         external_city_target: bool = False,
+        open_action_target: bool = False,
     ):
         self.driver = driver
         self.target_city = target_city
         self.target_slug = target_slug
         self.target_code = target_code
         self.external_city_target = external_city_target
+        self.open_action_target = open_action_target
         self.pagination_attempts = 0
         self.opened_kinds: list[str] = []
 
@@ -225,6 +227,7 @@ class AuthenticatedCityRootFixtureDriver:
         query = json.dumps(QUERY, ensure_ascii=False)
         initial = json.dumps(initial_kind)
         external_city_target = json.dumps(self.external_city_target)
+        open_action_target = json.dumps(self.open_action_target)
         script = f"""
         (function(){{
           const targetCity = {target_city};
@@ -233,6 +236,7 @@ class AuthenticatedCityRootFixtureDriver:
           const query = {query};
           const initialKind = {initial};
           const externalCityTarget = {external_city_target};
+          const openActionTarget = {open_action_target};
           const oldCity = '深圳';
           const css = `
             * {{ box-sizing: border-box; }}
@@ -345,6 +349,12 @@ class AuthenticatedCityRootFixtureDriver:
                     document.title = `${{targetCity}}招聘网_${{targetCity}}人才网_智联招聘`;
                   }}
                   window.__jobagentGateEvents.push('target_city_selected');
+                  if (openActionTarget) {{
+                    const opened = window.open('https://www.zhaopin.com/', '_blank');
+                    window.__jobagentGateEvents.push(
+                      opened ? 'action_target_opened' : 'action_target_blocked'
+                    );
+                  }}
                 }});
               }});
               bindSearch('target_results');
@@ -392,6 +402,14 @@ class _TargetFixtureExecutor:
         return {"ok": True, "raw": "" if value is None else str(value)}
 
 
+class GateFixtureError(RuntimeError):
+    """Carry one fixed, public-safe gate failure code."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/json/new?{quote(url, safe=':/?&=%#')}",
@@ -405,7 +423,7 @@ def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
 
 
 class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver):
-    """Model a managed profile with a root tab and one stale search tab."""
+    """Model a managed profile with many stale tabs and one action child."""
 
     def __init__(
         self,
@@ -414,7 +432,7 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         target_city: str,
         target_slug: str,
         target_code: str,
-        secondary_target: dict[str, Any],
+        historical_targets: list[dict[str, Any]],
     ):
         super().__init__(
             driver,
@@ -422,14 +440,25 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             target_slug=target_slug,
             target_code=target_code,
             external_city_target=True,
+            open_action_target=True,
         )
-        self.secondary_target = secondary_target
+        self.historical_targets = historical_targets
+        self.baseline_target_ids = {
+            str(target.get("id") or target.get("targetId") or "")
+            for target in list_targets(PORT)
+            if target.get("type") == "page"
+        }
+        self.action_target: dict[str, Any] = {}
         self.target_adoption: dict[str, Any] = {}
         self.external_transition_installed = False
 
-    def _install_secondary(self, kind: str) -> dict[str, Any]:
+    def _install_target(
+        self,
+        target: dict[str, Any],
+        kind: str,
+    ) -> dict[str, Any]:
         executor = _TargetFixtureExecutor(
-            str(self.secondary_target.get("webSocketDebuggerUrl") or "")
+            str(target.get("webSocketDebuggerUrl") or "")
         )
         try:
             deadline = time.monotonic() + 90.0
@@ -461,19 +490,48 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         finally:
             executor.close()
 
-    def install_stale_secondary(self) -> dict[str, Any]:
-        return self._install_secondary("stale_results")
+    def install_noise_target(self) -> dict[str, Any]:
+        if not self.historical_targets:
+            return {"ok": False, "error": "historical_target_missing"}
+        return self._install_target(self.historical_targets[0], "stale_results")
+
+    def _wait_for_action_target(self) -> dict[str, Any]:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            candidates = [
+                target
+                for target in list_targets(PORT)
+                if target.get("type") == "page"
+                and str(target.get("id") or target.get("targetId") or "")
+                not in self.baseline_target_ids
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+            if len(candidates) > 1:
+                return {}
+            time.sleep(0.1)
+        return {}
 
     def _click_at(self, x: Any, y: Any) -> None:
         super()._click_at(x, y)
         if self.external_transition_installed:
             return
         events = super().fixture_events()
-        if "target_city_selected" not in events:
+        if (
+            "target_city_selected" not in events
+            or "action_target_opened" not in events
+        ):
             return
-        installed = self._install_secondary("target_results")
+        action_target = self._wait_for_action_target()
+        if not action_target:
+            raise GateFixtureError("managed_action_target_unavailable")
+        installed = self._install_target(action_target, "target_results")
         if not installed.get("ok"):
-            raise RuntimeError("managed target fixture transition failed")
+            raise GateFixtureError("managed_action_target_fixture_failed")
+        noise = self._install_target(self.historical_targets[0], "target_results")
+        if not noise.get("ok"):
+            raise GateFixtureError("managed_noise_target_fixture_failed")
+        self.action_target = action_target
         self.external_transition_installed = True
 
     def adopt_platform_target_transition(
@@ -1350,39 +1408,51 @@ def _run_authenticated_root_production_gate(
 def _run_managed_multi_target_recovery_gate(
     driver: CDPBossDriver,
 ) -> dict[str, Any]:
-    """Exercise persisted login recovery with root and stale search targets."""
+    """Exercise recovery with a production-sized stale target registry."""
 
     if len(TARGET_CITIES) < 2:
         return {"ok": False, "failure": "two_target_cities_required"}
-    root_target_id = str(driver.current_target_id or "")
-    root_target = next(
+    original_target_id = str(driver.current_target_id or "")
+    original_target = next(
         (
             target
             for target in list_targets(PORT)
             if str(target.get("id") or target.get("targetId") or "")
-            == root_target_id
+            == original_target_id
         ),
         None,
     )
-    if not root_target or not root_target.get("webSocketDebuggerUrl"):
+    if not original_target or not original_target.get("webSocketDebuggerUrl"):
         return {"ok": False, "failure": "managed_root_target_unavailable"}
 
     attempts: list[dict[str, Any]] = []
     for index, target_city in enumerate(TARGET_CITIES[:2], start=1):
-        secondary: dict[str, Any] = {}
+        disposable_targets: list[dict[str, Any]] = []
+        action_target: dict[str, Any] = {}
         try:
-            driver.cdp.connect(str(root_target["webSocketDebuggerUrl"]))
+            action_origin = _create_disposable_cdp_target(
+                "https://www.zhaopin.com/"
+            )
+            disposable_targets.append(action_origin)
+            historical_targets = [
+                _create_disposable_cdp_target("https://www.zhaopin.com/")
+                for _ in range(15)
+            ]
+            disposable_targets.extend(historical_targets)
+            action_origin_id = str(
+                action_origin.get("id") or action_origin.get("targetId") or ""
+            )
+            driver.cdp.connect(str(action_origin["webSocketDebuggerUrl"]))
             driver.current_platform = "zhilian"
-            driver.current_target_id = root_target_id
-            secondary = _create_disposable_cdp_target("https://www.zhaopin.com/")
+            driver.current_target_id = action_origin_id
             fixture = ManagedMultiTargetCityRootFixtureDriver(
                 driver,
                 target_city=target_city,
                 target_slug=f"managed-gate-city-{index}",
                 target_code=str(940 + index),
-                secondary_target=secondary,
+                historical_targets=historical_targets,
             )
-            stale_installed = fixture.install_stale_secondary()
+            noise_installed = fixture.install_noise_target()
             target_count_before = len(
                 [
                     target
@@ -1410,9 +1480,12 @@ def _run_managed_multi_target_recovery_gate(
                 pages=1,
                 page_delay=0,
             )
-            secondary_id = str(
-                secondary.get("id") or secondary.get("targetId") or ""
+            action_target = fixture.action_target
+            action_target_id = str(
+                action_target.get("id") or action_target.get("targetId") or ""
             )
+            if action_target:
+                disposable_targets.append(action_target)
             job_cities = [str(job.city or "") for job in collected.jobs]
             adoption_outcome = str(fixture.target_adoption.get("outcome") or "")
             keyword_search = collected.snapshot.get("keywordSearch")
@@ -1431,12 +1504,12 @@ def _run_managed_multi_target_recovery_gate(
             )
             recovery_probe = city_root_recovery or search_transition
             attempt_ok = bool(
-                stale_installed.get("ok")
-                and target_count_before >= 2
+                noise_installed.get("ok")
+                and target_count_before >= 16
                 and fixture.external_transition_installed
                 and fixture.target_adoption.get("ok")
-                and adoption_outcome == "changed_existing_target_adopted"
-                and driver.current_target_id == secondary_id
+                and adoption_outcome == "action_linked_target_adopted"
+                and driver.current_target_id == action_target_id
                 and collected.ok
                 and collected.jobs
                 and all(city == target_city for city in job_cities)
@@ -1449,9 +1522,16 @@ def _run_managed_multi_target_recovery_gate(
                     "ok": attempt_ok,
                     "error": str(collected.error or "")[:100],
                     "target_count_before": target_count_before,
+                    "high_cardinality_target_registry": target_count_before >= 16,
                     "persisted_login_receipt_used": True,
-                    "changed_existing_target_adopted": (
-                        adoption_outcome == "changed_existing_target_adopted"
+                    "action_linked_target_adopted": (
+                        adoption_outcome == "action_linked_target_adopted"
+                    ),
+                    "action_candidate_count": int(
+                        fixture.target_adoption.get("action_candidate_count") or 0
+                    ),
+                    "background_transition_present": bool(
+                        noise_installed.get("ok")
                     ),
                     "recovery_ready_state": str(
                         recovery_probe.get("readyState") or ""
@@ -1495,14 +1575,23 @@ def _run_managed_multi_target_recovery_gate(
                     "attempts": attempts,
                 }
         finally:
-            driver.cdp.connect(str(root_target["webSocketDebuggerUrl"]))
+            driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
             driver.current_platform = "zhilian"
-            driver.current_target_id = root_target_id
-            secondary_id = str(
-                secondary.get("id") or secondary.get("targetId") or ""
-            )
-            if secondary_id:
-                close_platform_target(PORT, secondary_id)
+            driver.current_target_id = original_target_id
+            closed_ids: set[str] = set()
+            for target in disposable_targets:
+                target_id = str(
+                    target.get("id") or target.get("targetId") or ""
+                )
+                if target_id and target_id not in closed_ids:
+                    try:
+                        close_platform_target(PORT, target_id)
+                    except Exception:
+                        # The production adoption path may already have closed
+                        # its action origin. Fixture teardown is intentionally
+                        # idempotent and cannot turn a green product gate red.
+                        pass
+                    closed_ids.add(target_id)
     return {"ok": True, "attempts": attempts}
 
 
@@ -2243,6 +2332,8 @@ def main() -> int:
             error_type=type(exc).__name__,
             failure_stage=stage,
         )
+        if isinstance(exc, GateFixtureError):
+            report["error_code"] = exc.code
         _write_report(report)
         return 1
 
