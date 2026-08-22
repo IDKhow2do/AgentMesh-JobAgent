@@ -82,6 +82,7 @@
 - `0.5.28 -> 0.5.29`：不迁移或清理任何账户业务状态。升级只补齐猎聘可读城市路由：当前可信结果页无城市链接时可有界打开官方通用搜索结果页，数字码缺失时保持在经过路由变化、城市、查询词和结果面交叉验证的 `/city-<slug>/zhaopin/` 路径分页；城市首页推荐不进入候选，后续数字码只有独立验证成功才写入现有 cache schema。API Key、账户绑定、画像、活动 round、近期登录凭证、Chrome profile、同一未收费 SearchPlan request 与 audit 均原地保留，升级后继续精确的 `jobagent liepin discover`。
 - `0.5.29 -> 0.5.30`：不迁移或清理任何账户业务状态。猎聘已授权发送不再从首个岗位城市重建搜索 URL，也不要求可读城市路由必须有数值 code；客户端逐条打开已审核、已签名的岗位详情，并在任何平台动作前核对实际详情路由。真实登录墙仍按原协议请求登录，城市/详情导航失败不再伪装为登录。API Key、账户绑定、画像、活动 round、Chrome profile、登录态、签名 decision、review 文件、delivery preview、authorization 与 audit 全部原地保留；升级后继续原精确 send 命令，不重新 Discover、review、确认或收费。
 - `0.5.30 -> 0.5.31`：不迁移或清理任何账户业务状态。智联登录证据在本地重新归一化个人中心导航、账号存在、简历管理与历史投递/面试活动；常驻通用登录入口继续只算弱证据，真实登录路由、凭据表单和登录验证仍失败关闭，强登录与强账户冲突仍返回 unknown。API Key、账户绑定、画像、活动 round、Boss/猎聘既有 audit、Chrome profile、登录态、签名 decision、preview、authorization 与当前智联阶段全部原地保留；升级后先执行只读 `jobagent zhilian login --check`，不重新登录、Discover 或收费。
+- `0.5.31 -> 0.5.32`：不迁移或清理任何账户业务状态。智联搜索结果必须同时验证原始可读查询与目标城市；停留在旧城市结果页时，客户端从页面公开可读入口动态发现并独立验证目标城市路由，再重新提交原查询。旧数值城市码不能阻止目标城市切换，新的数值码仍只在页面标题、可见城市与岗位卡片等多源证据一致后写入既有缓存。API Key、账户绑定、画像、专用 Chrome profile、登录态、活动 round、既有 audit 与同一未收费 Discover request 全部原地保留；升级后继续精确的 `jobagent zhilian discover`，不新建轮次、不重复登录、不重新计费。
 - 损坏状态：原文件可追溯归档，后续命令不因 JSON 解析错误崩溃。
 - Release archive 校验固定 `tar.umask=002`，忽略系统级 Git 配置、全局 attributes 和 replace refs；发布机与客户机必须对同一 commit 得到相同 SHA256。
 - 旧客户端若返回 `release artifact hash mismatch`，不得关闭校验或删除 `~/.jobagent`。重新运行官方安装器一次以修复受管仓库配置，并保留账户状态、浏览器登录、画像、轮次和审计。
