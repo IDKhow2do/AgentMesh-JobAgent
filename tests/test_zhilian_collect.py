@@ -1347,10 +1347,12 @@ class _AuthenticatedRootMultiTargetDriver(_AuthenticatedTargetRouteRedirectsToRo
         platform: str,
         wait_seconds: float = 2,
         allow_changed_platform_page: bool = False,
+        expected_title_text: str = "",
     ):
         del before, wait_seconds
         assert platform == "zhilian"
         assert allow_changed_platform_page is True
+        assert expected_title_text == self.target_city
         if not self.pending_target_transition:
             return {
                 "ok": False,

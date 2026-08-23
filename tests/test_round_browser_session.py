@@ -1019,6 +1019,175 @@ def test_cdp_driver_prefers_action_linked_target_with_many_historical_targets(
     assert closed == ["target-root"]
 
 
+def test_cdp_driver_reuses_action_origin_when_child_stays_on_generic_root(
+    monkeypatch,
+):
+    before_targets = [
+        {
+            "id": "target-action-origin",
+            "type": "page",
+            "url": "https://www.zhaopin.com/",
+            "title": "智联招聘_求职_找工作",
+            "webSocketDebuggerUrl": "ws://target-action-origin",
+        },
+        {
+            "id": "target-history",
+            "type": "page",
+            "url": "https://www.zhaopin.com/jobs?jl=765&kw=OPAQUE",
+            "title": "深圳热门职位招聘",
+            "webSocketDebuggerUrl": "ws://target-history",
+        },
+    ]
+    after_targets = [
+        {
+            **before_targets[0],
+            "url": "https://www.zhaopin.com/jobs?jl=901&kw=OPAQUE",
+            "title": "郑州热门职位招聘",
+        },
+        before_targets[1],
+        {
+            "id": "target-action-child",
+            "type": "page",
+            "url": "https://www.zhaopin.com/",
+            "title": "智联招聘_求职_找工作",
+            "webSocketDebuggerUrl": "ws://target-action-child",
+        },
+    ]
+    calls = 0
+
+    def fake_list_targets(_port):
+        nonlocal calls
+        calls += 1
+        return before_targets if calls == 1 else after_targets
+
+    adopted: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        fake_list_targets,
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.adopt_platform_tab_target",
+        lambda **kwargs: adopted.append(kwargs["target"]["id"]) or kwargs["target"],
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.close_platform_target",
+        lambda _port, target_id: closed.append(target_id),
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-action-origin"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+    driver.cdp.ws_url = "ws://target-action-origin"
+    driver.cdp.target_infos = []
+
+    before = driver.capture_platform_target_state("zhilian")
+    result = driver.adopt_platform_target_transition(
+        before,
+        platform="zhilian",
+        wait_seconds=0,
+        allow_changed_platform_page=True,
+        expected_title_text="郑州",
+    )
+
+    assert result["ok"] is True
+    assert result["outcome"] == "current_target_reused"
+    assert result["previous_target_closed"] is False
+    assert result["discarded_action_target_count"] == 1
+    assert adopted == ["target-action-origin"]
+    assert closed == ["target-action-child"]
+    assert driver.current_target_id == "target-action-origin"
+    assert driver.cdp.ws_urls == []
+
+
+def test_cdp_driver_discards_unverified_action_child_without_closing_origin(
+    monkeypatch,
+):
+    origin = {
+        "id": "target-action-origin",
+        "type": "page",
+        "url": "https://www.zhaopin.com/",
+        "title": "智联招聘_求职_找工作",
+        "webSocketDebuggerUrl": "ws://target-action-origin",
+    }
+    child = {
+        "id": "target-action-child",
+        "type": "page",
+        "url": "https://www.zhaopin.com/",
+        "title": "智联招聘_求职_找工作",
+        "webSocketDebuggerUrl": "ws://target-action-child",
+    }
+    target_sets = iter([[origin], [origin, child]])
+    monotonic_values = iter([0.0, 3.0])
+    adopted: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        lambda _port: next(target_sets),
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.adopt_platform_tab_target",
+        lambda **kwargs: adopted.append(kwargs["target"]["id"]) or kwargs["target"],
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.close_platform_target",
+        lambda _port, target_id: closed.append(target_id),
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.time.sleep",
+        lambda _seconds: None,
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-action-origin"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+    driver.cdp.ws_url = "ws://target-action-origin"
+    driver.cdp.target_infos = [
+        {
+            "targetId": "target-action-child",
+            "type": "page",
+            "url": "https://www.zhaopin.com/",
+            "title": "智联招聘_求职_找工作",
+            "openerId": "target-action-origin",
+        }
+    ]
+
+    before = driver.capture_platform_target_state("zhilian")
+    result = driver.adopt_platform_target_transition(
+        before,
+        platform="zhilian",
+        wait_seconds=0,
+        allow_changed_platform_page=True,
+        expected_title_text="郑州",
+    )
+
+    assert result == {
+        "ok": False,
+        "outcome": "action_target_navigation_not_observed",
+        "new_target_count": 1,
+        "previous_target_closed": False,
+        "discarded_action_target_count": 1,
+    }
+    assert adopted == []
+    assert closed == ["target-action-child"]
+    assert driver.current_target_id == "target-action-origin"
+    assert driver.cdp.ws_urls == []
+
+
 def test_cdp_driver_waits_for_action_linked_blank_target_to_become_official(
     monkeypatch,
 ):

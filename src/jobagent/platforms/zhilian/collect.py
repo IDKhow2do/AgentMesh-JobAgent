@@ -1228,8 +1228,12 @@ class ZhilianReadOnlyCollector:
                 target_transition = adopt_target(
                     target_before,
                     platform="zhilian",
-                    wait_seconds=min(max(float(wait_seconds), 0.0), 30.0),
+                    wait_seconds=max(
+                        float(wait_seconds),
+                        float(ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS),
+                    ),
                     allow_changed_platform_page=True,
+                    expected_title_text=city,
                 )
             except Exception as exc:
                 target_transition = {
@@ -1252,6 +1256,11 @@ class ZhilianReadOnlyCollector:
                         ),
                         "previousTargetClosed": bool(
                             target_transition.get("previous_target_closed")
+                        ),
+                        "discardedActionTargetCount": _safe_int(
+                            target_transition.get(
+                                "discarded_action_target_count"
+                            )
                         ),
                         **(
                             {
