@@ -814,6 +814,86 @@ def test_cdp_driver_adopts_one_new_official_zhilian_search_target(monkeypatch):
     assert closed == ["target-old"]
 
 
+def test_cdp_driver_adopts_owned_zhilian_root_child_for_bounded_verification(
+    monkeypatch,
+):
+    target_sets = iter(
+        [
+            [
+                {
+                    "id": "target-origin",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/city-example/",
+                    "webSocketDebuggerUrl": "ws://target-origin",
+                }
+            ],
+            [
+                {
+                    "id": "target-origin",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/city-example/",
+                    "webSocketDebuggerUrl": "ws://target-origin",
+                },
+                {
+                    "id": "target-action-child",
+                    "type": "page",
+                    "url": "https://www.zhaopin.com/",
+                    "webSocketDebuggerUrl": "ws://target-action-child",
+                },
+            ],
+        ]
+    )
+    adopted: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.list_targets",
+        lambda _port: next(target_sets),
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.adopt_platform_tab_target",
+        lambda **kwargs: adopted.append(kwargs["target"]["id"])
+        or kwargs["target"],
+    )
+    monkeypatch.setattr(
+        "jobagent.drivers.boss.cdp_driver.close_platform_target",
+        lambda _port, target_id, **_kwargs: _record_closed_target(
+            closed, target_id
+        ),
+    )
+
+    driver = CDPBossDriver.__new__(CDPBossDriver)
+    driver.manager = FakeManager()
+    driver.platform = "zhilian"
+    driver.current_platform = "zhilian"
+    driver.current_target_id = "target-origin"
+    driver.track_round = True
+    driver.cdp = FakeCDP()
+    driver.cdp.connected = True
+    driver.cdp.ws_url = "ws://target-origin"
+    driver.cdp.target_infos = [
+        {
+            "targetId": "target-action-child",
+            "openerId": "target-origin",
+        }
+    ]
+
+    before = driver.capture_platform_target_state("zhilian")
+    result = driver.adopt_platform_target_transition(
+        before,
+        platform="zhilian",
+        wait_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["outcome"] == "action_linked_provisional_target_adopted"
+    assert result["new_target_count"] == 1
+    assert result["previous_target_closed"] is True
+    assert adopted == ["target-action-child"]
+    assert closed == ["target-origin"]
+    assert driver.cdp.ws_urls == ["ws://target-action-child"]
+    assert driver.current_target_id == "target-action-child"
+
+
 def test_cdp_driver_reuses_current_target_after_same_tab_search_navigation(monkeypatch):
     target = {
         "id": "target-current",

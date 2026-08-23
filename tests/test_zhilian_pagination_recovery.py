@@ -588,6 +588,83 @@ class _SlugCityHomepageNoTransitionDriver(
         return result
 
 
+class _GenericSearchControlCreatesTargetDriver(
+    _SlugCityHomepageNoTransitionDriver
+):
+    """Model a non-anchor search control that leaves one action target behind."""
+
+    def __init__(self):
+        super().__init__()
+        self.target_capture_attempts = 0
+        self.target_adoption_attempts = 0
+        self.action_target_present = False
+
+    def capture_platform_target_state(self, platform: str):
+        assert platform == "zhilian"
+        self.target_capture_attempts += 1
+        return {
+            "platform": platform,
+            "target_ids": ["target-origin"],
+            "current_target_id": "target-origin",
+            "target_fingerprints": {"target-origin": "origin-before"},
+        }
+
+    def adopt_platform_target_transition(
+        self,
+        _before,
+        *,
+        platform: str,
+        wait_seconds: float,
+    ):
+        assert platform == "zhilian"
+        assert wait_seconds >= 0
+        self.target_adoption_attempts += 1
+        if self.action_target_present:
+            self.action_target_present = False
+            return {
+                "ok": False,
+                "outcome": "action_target_navigation_not_observed",
+                "new_target_count": 1,
+                "previous_target_closed": False,
+                "discarded_action_target_count": 1,
+                "target_cleanup_verified": True,
+            }
+        return {
+            "ok": False,
+            "outcome": "no_search_target_observed",
+            "new_target_count": 0,
+            "previous_target_closed": False,
+            "discarded_action_target_count": 0,
+            "target_cleanup_verified": True,
+        }
+
+    def _click_at(self, _x, _y):
+        self.action_target_present = True
+
+
+class _GenericSearchControlCleanupUnverifiedDriver(
+    _GenericSearchControlCreatesTargetDriver
+):
+    def adopt_platform_target_transition(
+        self,
+        _before,
+        *,
+        platform: str,
+        wait_seconds: float,
+    ):
+        assert platform == "zhilian"
+        assert wait_seconds >= 0
+        self.target_adoption_attempts += 1
+        return {
+            "ok": False,
+            "outcome": "action_target_cleanup_unverified",
+            "new_target_count": 1,
+            "previous_target_closed": False,
+            "discarded_action_target_count": 0,
+            "target_cleanup_verified": False,
+        }
+
+
 class _SlugCityHomepageInputResetDriver(_SlugCityHomepageNoTransitionDriver):
     def __init__(self):
         super().__init__()
@@ -655,11 +732,13 @@ class _LiveVueSearchAnchorDriver(_SlugCityHomepageNoTransitionDriver):
         self.target_capture_attempts = 0
         self.target_adoption_attempts = 0
         self._exact_pointer_armed = False
+        self._new_target_pending = False
 
     def _click_at(self, _x, _y):
         if self._exact_pointer_armed:
             self.native_pointer_attempts += 1
             self._exact_pointer_armed = False
+            self._new_target_pending = self.transition_method == "new_target"
 
     def capture_platform_target_state(self, platform: str):
         assert platform == "zhilian"
@@ -676,7 +755,8 @@ class _LiveVueSearchAnchorDriver(_SlugCityHomepageNoTransitionDriver):
         assert platform == "zhilian"
         assert wait_seconds >= 0
         self.target_adoption_attempts += 1
-        if self.transition_method == "new_target":
+        if self._new_target_pending:
+            self._new_target_pending = False
             self.page = "search_results"
             return {
                 "ok": True,
@@ -1293,6 +1373,111 @@ def test_verified_city_slug_reports_bounded_search_action_receipt_when_dom_swall
     assert driver.form_submit_attempts == 1
 
 
+def test_non_anchor_search_actions_reconcile_and_cleanup_action_targets(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _GenericSearchControlCreatesTargetDriver()
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is False
+    assert result.error == "zhilian_search_transition_not_observed"
+    assert driver.target_capture_attempts == 4
+    assert driver.target_adoption_attempts == 4
+    assert driver.action_target_present is False
+    receipt = result.to_payload()["diagnostics"]["action_receipt"]
+    attempts = {item["method"]: item for item in receipt["attempts"]}
+    assert attempts["button_click"]["target_outcome"] == (
+        "action_target_navigation_not_observed"
+    )
+    assert attempts["button_click"]["discarded_action_target_count"] == 1
+    assert attempts["button_click"]["target_cleanup_verified"] is True
+
+
+def test_initial_keyword_click_reconciles_action_target_before_city_recovery(
+    tmp_path,
+):
+    driver = _GenericSearchControlCreatesTargetDriver()
+    collector = ZhilianReadOnlyCollector(
+        driver=driver,
+        city_cache_path=tmp_path / "cities.json",
+        login_verification=_login_verification(),
+    )
+
+    result = collector._click_keyword_control("第一查询", wait_seconds=0)
+
+    assert result["ok"] is True
+    assert driver.target_capture_attempts == 1
+    assert driver.target_adoption_attempts == 1
+    assert driver.action_target_present is False
+    assert result["targetTransition"]["outcome"] == (
+        "action_target_navigation_not_observed"
+    )
+    assert result["targetTransition"]["discardedActionTargetCount"] == 1
+    assert result["targetTransition"]["targetCleanupVerified"] is True
+
+
+def test_search_stops_when_exact_action_target_cleanup_cannot_be_verified(
+    monkeypatch,
+    tmp_path,
+):
+    driver = _GenericSearchControlCleanupUnverifiedDriver()
+    monkeypatch.setattr("jobagent.platforms.zhilian.city_resolver.APP_DIR", tmp_path)
+    monkeypatch.setattr("jobagent.platforms.zhilian.collect.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_NAVIGATION_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr(
+        "jobagent.platforms.zhilian.collect.ZHILIAN_SEARCH_ACTION_OBSERVE_SECONDS",
+        0,
+    )
+
+    result = ZhilianReadOnlyCollector(
+        driver=driver,
+        login_verification=_login_verification(),
+    ).collect(
+        query="第一查询",
+        city="目标城",
+        pages=1,
+        wait_seconds=0,
+        page_delay=0,
+    )
+
+    assert result.ok is False
+    assert result.error == "zhilian_search_target_cleanup_unverified"
+    payload = result.to_payload()
+    assert payload["retryable"] is False
+    assert payload["no_charge"] is True
+    assert payload["next_suggested"] == (
+        "jobagent browser diagnose --platform zhilian"
+    )
+    assert driver.target_capture_attempts == 1
+    assert driver.target_adoption_attempts == 1
+    assert driver.native_enter_attempts == 0
+    assert driver.form_submit_attempts == 0
+
+
 @pytest.mark.parametrize(
     ("driver_type", "expected_error"),
     [
@@ -1445,8 +1630,8 @@ def test_live_vue_anchor_adopts_new_cdp_target_before_result_collection(
 
     assert result.ok is True
     assert [job.raw_data["positionId"] for job in result.jobs] == ["JOB-FIRST"]
-    assert driver.target_capture_attempts == 1
-    assert driver.target_adoption_attempts == 1
+    assert driver.target_capture_attempts == 2
+    assert driver.target_adoption_attempts == 2
     assert driver.native_pointer_attempts == 1
     assert driver.dom_click_attempts == 0
     assert driver.official_destination_attempts == 0
