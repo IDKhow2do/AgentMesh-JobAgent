@@ -419,6 +419,22 @@ class CDPBossDriver(BossActionDriver):
             elif current_trusted:
                 selected = current
                 outcome = "current_target_reused"
+            elif (
+                len(action_provisional) == 1
+                and not expected_title_text
+                and platform_for_url(
+                    str(action_provisional[0].get("url") or "")
+                )
+                == platform
+            ):
+                # Search controls can open an owned official child at the
+                # platform root before the SPA commits its result route. Keep
+                # the exact child as the controlled observation surface and
+                # let the collector verify readable city/query/result state.
+                # Without this handoff, slow pages are cleaned or leaked while
+                # the driver remains attached to an unrelated historical tab.
+                selected = action_provisional[0]
+                outcome = "action_linked_provisional_target_adopted"
             elif action_provisional and not expected_title_text:
                 # The action-created page may remain about:blank while Chrome
                 # establishes the official navigation. Keep observing it, but

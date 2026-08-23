@@ -1,9 +1,50 @@
+from jobagent.domain.models import Job
 from jobagent.platforms.zhilian.collect import ZhilianCollectResult
 from scripts.ci.zhilian_headed_public_gate import (
+    _candidates_safe_after_detail_gate,
     _evaluate_one_page_collection_boundary,
     _explicit_public_login_wall_observed,
+    _fixture_document_attachable,
+    _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
+    _safe_reviewability_summary,
 )
+
+
+def test_fixture_can_stop_an_official_committed_document():
+    assert _fixture_document_attachable(
+        {
+            "hostname": "www.zhaopin.com",
+            "readyState": "loading",
+            "documentReady": True,
+        }
+    ) is True
+    assert _fixture_document_attachable(
+        {
+            "hostname": "www.zhaopin.com",
+            "readyState": "interactive",
+            "documentReady": True,
+        }
+    ) is True
+    assert _fixture_document_attachable(
+        {
+            "hostname": "example.com",
+            "readyState": "complete",
+            "documentReady": True,
+        }
+    ) is False
+
+
+def test_fixture_accepts_native_or_user_gesture_search_targets():
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_opened"]
+    ) is True
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_blocked", "search_action_target_gesture_opened"]
+    ) is True
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_blocked", "search_action_target_gesture_blocked"]
+    ) is False
 
 
 def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():
@@ -14,8 +55,8 @@ def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():
         collector_candidate_count=1,
         page_two_attempted=False,
         collection_budget_satisfied=True,
-        all_parser_candidates_reviewable=False,
-        all_collector_candidates_reviewable=False,
+        all_parser_candidates_safe=False,
+        all_collector_candidates_safe=False,
     )
 
     assert outcome == {
@@ -47,8 +88,8 @@ def test_missing_reviewability_still_fails_without_a_login_wall():
         collector_candidate_count=1,
         page_two_attempted=False,
         collection_budget_satisfied=True,
-        all_parser_candidates_reviewable=False,
-        all_collector_candidates_reviewable=False,
+        all_parser_candidates_safe=False,
+        all_collector_candidates_safe=False,
     )
 
     assert outcome == {
@@ -66,8 +107,8 @@ def test_reviewable_candidates_pass_the_full_collection_boundary():
         collector_candidate_count=20,
         page_two_attempted=False,
         collection_budget_satisfied=True,
-        all_parser_candidates_reviewable=True,
-        all_collector_candidates_reviewable=True,
+        all_parser_candidates_safe=True,
+        all_collector_candidates_safe=True,
     )
 
     assert outcome == {
@@ -102,3 +143,68 @@ def test_collector_gate_payload_uses_public_result_contract():
             "job_surface_count": 2,
         },
     }
+
+
+def test_reviewability_summary_is_aggregate_and_redacted():
+    jobs = [
+        Job(
+            name="产品经理",
+            company="示例科技有限公司",
+            salary="20-30K",
+            city="深圳",
+            url="https://www.zhaopin.com/jobdetail/SAFE-1.htm",
+            platform="zhilian",
+            raw_data={"cardSource": "job_anchor"},
+        ),
+        Job(
+            name="运营经理",
+            company="",
+            salary="",
+            city="深圳",
+            url="https://www.zhaopin.com/jobdetail/SAFE-2.htm",
+            platform="zhilian",
+            raw_data={"cardSource": "job_surface"},
+        ),
+    ]
+
+    summary = _safe_reviewability_summary(jobs)
+
+    assert summary == {
+        "candidate_count": 2,
+        "reviewable_count": 1,
+        "missing_field_counts": {"title": 0, "company": 1, "salary": 1},
+        "issue_pattern_counts": {"company+salary": 1},
+        "card_source_counts": {"job_anchor": 1, "job_surface": 1},
+        "incomplete_card_source_counts": {"job_surface": 1},
+        "incomplete_official_detail_count": 1,
+    }
+    encoded = str(summary)
+    assert "示例科技" not in encoded
+    assert "SAFE-" not in encoded
+
+
+def test_incomplete_official_candidate_requires_bounded_detail_gate():
+    candidate = Job(
+        name="运营经理",
+        company="示例科技有限公司",
+        salary="",
+        city="深圳",
+        url="https://www.zhaopin.com/jobdetail/SAFE.htm",
+        platform="zhilian",
+    )
+
+    assert _candidates_safe_after_detail_gate([candidate], {"ok": False}) is False
+    assert _candidates_safe_after_detail_gate([candidate], {"ok": True}) is True
+
+
+def test_incomplete_non_detail_candidate_stays_fail_closed():
+    candidate = Job(
+        name="运营经理",
+        company="示例科技有限公司",
+        salary="",
+        city="深圳",
+        url="https://www.zhaopin.com/jobs",
+        platform="zhilian",
+    )
+
+    assert _candidates_safe_after_detail_gate([candidate], {"ok": True}) is False

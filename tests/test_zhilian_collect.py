@@ -1351,6 +1351,13 @@ class _AuthenticatedRootMultiTargetDriver(_AuthenticatedTargetRouteRedirectsToRo
     ):
         del before, wait_seconds
         assert platform == "zhilian"
+        if not allow_changed_platform_page and not expected_title_text:
+            return {
+                "ok": False,
+                "outcome": "no_search_target_observed",
+                "new_target_count": 0,
+                "previous_target_closed": False,
+            }
         assert allow_changed_platform_page is True
         assert expected_title_text == self.target_city
         if not self.pending_target_transition:
@@ -1564,7 +1571,7 @@ def test_collector_adopts_changed_existing_target_after_authenticated_city_selec
 
     assert result.ok is True
     assert [job.city for job in result.jobs] == [target_city]
-    assert driver.target_captures == 1
+    assert driver.target_captures == 3
     assert driver.target_adoptions == 1
     assert driver.snapshot_pages == ["target_results"]
 

@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.39] - 2026-08-23
+
+### Fixed
+
+- Bind the initial Zhilian keyword activation and every bounded fallback submission method to the same CDP target lifecycle. A search action can no longer create an unowned page that survives a preserved-request retry.
+- Adopt one exact opener-linked official Zhilian target even while it is still on a provisional root page, close the previous action origin, and leave readable city, original query and result-state validation to the existing fail-closed collector.
+- Return `zhilian_search_target_cleanup_unverified` with a redacted action receipt when the exact action target cannot be reconciled or closed safely, instead of continuing against an ambiguous historical tab.
+- Strengthen the isolated Linux/Xvfb gate with two consecutive production search cycles in a high-cardinality target registry. Each cycle must adopt the action-owned target, close the prior origin and restore the platform target count before release.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed audits and the preserved uncharged Zhilian Discover request remain unchanged. Managed clients resume the same `jobagent zhilian discover` command after upgrade; no new round, relogin, profile cleanup, recollection or additional charge is required.
+
 ## [0.5.38] - 2026-08-23
 
 ### Fixed

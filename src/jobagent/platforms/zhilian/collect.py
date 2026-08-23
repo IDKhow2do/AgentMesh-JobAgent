@@ -183,6 +183,7 @@ class ZhilianCollectResult:
             "zhilian_search_input_not_committed",
             "zhilian_search_submit_control_not_activated",
             "zhilian_search_transition_not_observed",
+            "zhilian_search_target_cleanup_unverified",
         }:
             messages = {
                 "zhilian_search_input_not_committed": (
@@ -196,6 +197,10 @@ class ZhilianCollectResult:
                 "zhilian_search_transition_not_observed": (
                     "Zhilian accepted the readable search term, but button, Enter, and form "
                     "submission produced no verifiable route, history, or result-state change."
+                ),
+                "zhilian_search_target_cleanup_unverified": (
+                    "Zhilian created a browser target during search, but the exact target "
+                    "lifecycle could not be verified safely."
                 ),
             }
             payload.update(
@@ -714,6 +719,92 @@ class ZhilianReadOnlyCollector:
             }
         return result
 
+    def _capture_search_target_state(self) -> dict[str, Any]:
+        capture = getattr(
+            self.driver,
+            "capture_platform_target_state",
+            None,
+        )
+        if not callable(capture):
+            return {}
+        try:
+            captured = capture("zhilian")
+        except Exception:
+            return {}
+        return captured if isinstance(captured, dict) else {}
+
+    def _reconcile_search_target_state(
+        self,
+        before: dict[str, Any],
+        *,
+        wait_seconds: int,
+    ) -> dict[str, Any] | None:
+        adopt = getattr(
+            self.driver,
+            "adopt_platform_target_transition",
+            None,
+        )
+        if not before or not callable(adopt):
+            return None
+        try:
+            return adopt(
+                before,
+                platform="zhilian",
+                # A browser target is created immediately even when its
+                # document needs tens of seconds to settle. Adopt that owned
+                # target quickly; the collector performs the full readable
+                # city/query/result verification afterwards.
+                wait_seconds=min(max(float(wait_seconds), 2.0), 5.0),
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "outcome": "target_transition_probe_failed",
+                "exceptionType": type(exc).__name__,
+                "new_target_count": 0,
+                "previous_target_closed": False,
+            }
+
+    @staticmethod
+    def _search_target_cleanup_failed(
+        transition: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(transition, dict):
+            return False
+        return bool(
+            transition.get("outcome")
+            in {
+                "action_target_cleanup_unverified",
+                "target_transition_probe_failed",
+            }
+            or transition.get("target_cleanup_verified") is False
+        )
+
+    @staticmethod
+    def _search_target_transition_receipt(
+        transition: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(transition, dict):
+            return {}
+        receipt = {
+            "ok": bool(transition.get("ok")),
+            "outcome": str(transition.get("outcome") or ""),
+            "newTargetCount": _safe_int(transition.get("new_target_count")),
+            "previousTargetClosed": bool(
+                transition.get("previous_target_closed")
+            ),
+            "discardedActionTargetCount": _safe_int(
+                transition.get("discarded_action_target_count")
+            ),
+        }
+        if "target_cleanup_verified" in transition:
+            receipt["targetCleanupVerified"] = bool(
+                transition.get("target_cleanup_verified")
+            )
+        if transition.get("exceptionType"):
+            receipt["exceptionType"] = str(transition["exceptionType"])[:80]
+        return receipt
+
     def _click_keyword_control(
         self,
         keyword: str,
@@ -747,8 +838,44 @@ class ZhilianReadOnlyCollector:
                 "ok": False,
                 "error": "zhilian_keyword_submit_not_found",
             }
+        target_before = self._capture_search_target_state()
         self.driver._click_at(click_point.get("x"), click_point.get("y"))
         data["nativeClicked"] = True
+        target_transition = self._reconcile_search_target_state(
+            target_before,
+            wait_seconds=wait_seconds,
+        )
+        target_receipt = self._search_target_transition_receipt(
+            target_transition
+        )
+        if target_receipt:
+            data["targetTransition"] = target_receipt
+            action_receipt = _new_search_action_receipt(data, keyword)
+            attempt = {
+                "method": "initial_keyword_click",
+                "controlActivated": True,
+                "transitionObserved": False,
+                "targetOutcome": target_receipt.get("outcome"),
+                "newTargetCount": target_receipt.get("newTargetCount"),
+                "previousTargetClosed": target_receipt.get(
+                    "previousTargetClosed"
+                ),
+                "discardedActionTargetCount": target_receipt.get(
+                    "discardedActionTargetCount"
+                ),
+            }
+            if "targetCleanupVerified" in target_receipt:
+                attempt["targetCleanupVerified"] = target_receipt[
+                    "targetCleanupVerified"
+                ]
+            action_receipt["attempts"].append(attempt)
+            data["searchActionReceipt"] = action_receipt
+        if self._search_target_cleanup_failed(target_transition):
+            return {
+                **data,
+                "ok": False,
+                "error": "zhilian_search_target_cleanup_unverified",
+            }
         dialog = _dismiss_javascript_dialog(self.driver)
         data["dialog"] = dialog
         if dialog.get("dismissed"):
@@ -1618,6 +1745,22 @@ class ZhilianReadOnlyCollector:
         current = baseline
         activated_any = False
 
+        def capture_action_targets() -> dict[str, Any]:
+            return self._capture_search_target_state()
+
+        def reconcile_action_targets(
+            before: dict[str, Any],
+        ) -> dict[str, Any] | None:
+            return self._reconcile_search_target_state(
+                before,
+                wait_seconds=wait_seconds,
+            )
+
+        def target_cleanup_failed(
+            transition: dict[str, Any] | None,
+        ) -> bool:
+            return self._search_target_cleanup_failed(transition)
+
         def record_attempt(
             method: str,
             *,
@@ -1655,6 +1798,13 @@ class ZhilianReadOnlyCollector:
                 attempt["previousTargetClosed"] = bool(
                     target_transition.get("previous_target_closed")
                 )
+                attempt["discardedActionTargetCount"] = _safe_int(
+                    target_transition.get("discarded_action_target_count")
+                )
+                if "target_cleanup_verified" in target_transition:
+                    attempt["targetCleanupVerified"] = bool(
+                        target_transition.get("target_cleanup_verified")
+                    )
             receipt["attempts"].append(attempt)
             current = post
             return post, transition_observed, transition_probe
@@ -1685,19 +1835,8 @@ class ZhilianReadOnlyCollector:
             for activation_method, receipt_method in exact_methods:
                 activation: dict[str, Any] = {}
                 activation_error = ""
-                target_before: dict[str, Any] = {}
+                target_before = capture_action_targets()
                 target_transition: dict[str, Any] | None = None
-                if activation_method == "native_pointer":
-                    capture_targets = getattr(
-                        self.driver,
-                        "capture_platform_target_state",
-                        None,
-                    )
-                    if callable(capture_targets):
-                        try:
-                            target_before = capture_targets("zhilian")
-                        except Exception as exc:
-                            activation_error = type(exc).__name__
                 try:
                     activation = _unwrap_js_result_with_error(
                         self.driver._exec_js(
@@ -1722,19 +1861,10 @@ class ZhilianReadOnlyCollector:
                         try:
                             click_at(exact_point.get("x"), exact_point.get("y"))
                             activated = True
-                            adopt_target = getattr(
-                                self.driver,
-                                "adopt_platform_target_transition",
-                                None,
-                            )
-                            if target_before and callable(adopt_target):
-                                target_transition = adopt_target(
-                                    target_before,
-                                    platform="zhilian",
-                                    wait_seconds=min(max(float(wait_seconds), 0.0), 30.0),
-                                )
                         except Exception as exc:
                             activation_error = type(exc).__name__
+                if activated:
+                    target_transition = reconcile_action_targets(target_before)
                 activated_any = activated_any or activated
                 for source, target in (
                     ("buttonCandidateType", "buttonCandidateType"),
@@ -1754,6 +1884,17 @@ class ZhilianReadOnlyCollector:
                     or str(activation.get("error") or ""),
                     target_transition=target_transition,
                 )
+                if target_cleanup_failed(target_transition):
+                    receipt.update(
+                        _search_action_change_summary(action_origin, post)
+                    )
+                    return {
+                        **data,
+                        "ok": False,
+                        "error": "zhilian_search_target_cleanup_unverified",
+                        "searchActionReceipt": receipt,
+                        "searchTransitionProbe": transition_probe,
+                    }
                 if changed:
                     receipt.update(
                         _search_action_change_summary(action_origin, post)
@@ -1791,16 +1932,30 @@ class ZhilianReadOnlyCollector:
         if button_point and callable(click_at):
             activation_error = ""
             activated = False
+            target_before = capture_action_targets()
             try:
                 click_at(button_point.get("x"), button_point.get("y"))
                 activated = True
             except Exception as exc:  # Browser drivers expose heterogeneous errors.
                 activation_error = type(exc).__name__
+            target_transition = (
+                reconcile_action_targets(target_before) if activated else None
+            )
             post, changed, transition_probe = record_attempt(
                 "button_click",
                 activated=activated,
                 activation_error=activation_error,
+                target_transition=target_transition,
             )
+            if target_cleanup_failed(target_transition):
+                receipt.update(_search_action_change_summary(action_origin, post))
+                return {
+                    **data,
+                    "ok": False,
+                    "error": "zhilian_search_target_cleanup_unverified",
+                    "searchActionReceipt": receipt,
+                    "searchTransitionProbe": transition_probe,
+                }
             if changed:
                 receipt.update(_search_action_change_summary(action_origin, post))
                 receipt["transitionObserved"] = True
@@ -1814,17 +1969,31 @@ class ZhilianReadOnlyCollector:
         if input_point and callable(click_at) and callable(send):
             activation_error = ""
             activated = False
+            target_before = capture_action_targets()
             try:
                 click_at(input_point.get("x"), input_point.get("y"))
                 _dispatch_native_enter(send)
                 activated = True
             except Exception as exc:  # Browser drivers expose heterogeneous errors.
                 activation_error = type(exc).__name__
+            target_transition = (
+                reconcile_action_targets(target_before) if activated else None
+            )
             post, changed, transition_probe = record_attempt(
                 "input_enter",
                 activated=activated,
                 activation_error=activation_error,
+                target_transition=target_transition,
             )
+            if target_cleanup_failed(target_transition):
+                receipt.update(_search_action_change_summary(action_origin, post))
+                return {
+                    **data,
+                    "ok": False,
+                    "error": "zhilian_search_target_cleanup_unverified",
+                    "searchActionReceipt": receipt,
+                    "searchTransitionProbe": transition_probe,
+                }
             if changed:
                 receipt.update(_search_action_change_summary(action_origin, post))
                 receipt["transitionObserved"] = True
@@ -1837,6 +2006,7 @@ class ZhilianReadOnlyCollector:
 
         form_result: dict[str, Any] = {}
         activation_error = ""
+        target_before = capture_action_targets()
         try:
             form_result = _unwrap_js_result_with_error(
                 self.driver._exec_js(
@@ -1847,14 +2017,26 @@ class ZhilianReadOnlyCollector:
         except Exception as exc:  # A navigation may destroy the execution context.
             activation_error = type(exc).__name__
         form_activated = bool(form_result.get("formSubmitInvoked"))
+        target_transition = (
+            reconcile_action_targets(target_before) if form_activated else None
+        )
         post, changed, transition_probe = record_attempt(
             "form_submit",
             activated=form_activated,
             activation_error=activation_error
             or str(form_result.get("exceptionType") or ""),
             form_submit_invoked=form_activated,
+            target_transition=target_transition,
         )
         receipt.update(_search_action_change_summary(action_origin, post))
+        if target_cleanup_failed(target_transition):
+            return {
+                **data,
+                "ok": False,
+                "error": "zhilian_search_target_cleanup_unverified",
+                "searchActionReceipt": receipt,
+                "searchTransitionProbe": transition_probe,
+            }
         if changed:
             receipt["transitionObserved"] = True
             return {
@@ -2705,6 +2887,13 @@ def _safe_search_action_receipt(value: Any) -> dict[str, Any]:
             attempt["previous_target_closed"] = bool(
                 raw.get("previousTargetClosed")
             )
+            attempt["discarded_action_target_count"] = _safe_int(
+                raw.get("discardedActionTargetCount")
+            )
+            if "targetCleanupVerified" in raw:
+                attempt["target_cleanup_verified"] = bool(
+                    raw.get("targetCleanupVerified")
+                )
         attempts.append(attempt)
     return {
         "receipt_version": _safe_int(receipt.get("receiptVersion")),

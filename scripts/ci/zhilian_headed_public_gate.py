@@ -144,6 +144,7 @@ class AuthenticatedCityRootFixtureDriver:
         target_code: str,
         external_city_target: bool = False,
         open_action_target: bool = False,
+        open_search_action_target: bool = False,
     ):
         self.driver = driver
         self.target_city = target_city
@@ -151,6 +152,7 @@ class AuthenticatedCityRootFixtureDriver:
         self.target_code = target_code
         self.external_city_target = external_city_target
         self.open_action_target = open_action_target
+        self.open_search_action_target = open_search_action_target
         self.pagination_attempts = 0
         self.opened_kinds: list[str] = []
 
@@ -223,6 +225,10 @@ class AuthenticatedCityRootFixtureDriver:
         return [str(item) for item in (result.get("events") or []) if item]
 
     def _install(self, initial_kind: str) -> dict[str, Any]:
+        try:
+            self.driver.cdp.send("Page.stopLoading")
+        except Exception:
+            return {"ok": False, "error": "fixture_navigation_stop_failed"}
         target_city = json.dumps(self.target_city, ensure_ascii=False)
         target_slug = json.dumps(self.target_slug)
         target_code = json.dumps(self.target_code)
@@ -230,8 +236,14 @@ class AuthenticatedCityRootFixtureDriver:
         initial = json.dumps(initial_kind)
         external_city_target = json.dumps(self.external_city_target)
         open_action_target = json.dumps(self.open_action_target)
+        open_search_action_target = json.dumps(
+            self.open_search_action_target
+        )
         script = f"""
         (function(){{
+          try {{ window.stop(); }} catch (_error) {{}}
+          if (!document.head) document.documentElement.appendChild(document.createElement('head'));
+          if (!document.body) document.documentElement.appendChild(document.createElement('body'));
           const targetCity = {target_city};
           const targetSlug = {target_slug};
           const targetCode = {target_code};
@@ -239,6 +251,7 @@ class AuthenticatedCityRootFixtureDriver:
           const initialKind = {initial};
           const externalCityTarget = {external_city_target};
           const openActionTarget = {open_action_target};
+          const openSearchActionTarget = {open_search_action_target};
           const oldCity = '深圳';
           const css = `
             * {{ box-sizing: border-box; }}
@@ -299,6 +312,14 @@ class AuthenticatedCityRootFixtureDriver:
             if (!control) return;
             control.addEventListener('click', (event) => {{
               event.preventDefault();
+              if (openSearchActionTarget) {{
+                const opened = window.open('https://www.zhaopin.com/', '_blank');
+                window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+                window.__jobagentGateEvents.push(
+                  opened ? 'search_action_target_opened' : 'search_action_target_blocked'
+                );
+                return;
+              }}
               render(nextKind);
             }});
           }}
@@ -377,7 +398,13 @@ class AuthenticatedCityRootFixtureDriver:
           return JSON.stringify({{ok: true, kind: initialKind, readyState: document.readyState}});
         }})()
         """
-        return self.driver._exec_js(script)
+        installed = self.driver._exec_js(script)
+        retained = self.driver._exec_js(
+            "JSON.stringify({ok:true,fixtureReady:!!window.__jobagentGateRender&&!!document.querySelector('.fixture-shell')})"
+        )
+        if not installed.get("ok") or not retained.get("fixtureReady"):
+            return {"ok": False, "error": "fixture_document_not_retained"}
+        return {**installed, "fixtureReady": True}
 
 
 class _TargetFixtureExecutor:
@@ -412,6 +439,23 @@ class GateFixtureError(RuntimeError):
         self.code = code
 
 
+def _fixture_document_attachable(state: dict[str, Any]) -> bool:
+    hostname = str(state.get("hostname") or "").casefold()
+    return bool(
+        (hostname == "zhaopin.com" or hostname.endswith(".zhaopin.com"))
+        and state.get("documentReady")
+    )
+
+
+def _fixture_search_action_target_opened(events: list[str]) -> bool:
+    return bool(
+        {
+            "search_action_target_opened",
+            "search_action_target_gesture_opened",
+        }.intersection(events)
+    )
+
+
 def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/json/new?{quote(url, safe=':/?&=%#')}",
@@ -435,6 +479,7 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         target_slug: str,
         target_code: str,
         historical_targets: list[dict[str, Any]],
+        open_search_action_target: bool = False,
     ):
         super().__init__(
             driver,
@@ -443,6 +488,7 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             target_code=target_code,
             external_city_target=True,
             open_action_target=True,
+            open_search_action_target=open_search_action_target,
         )
         self.historical_targets = historical_targets
         self.baseline_target_ids = {
@@ -454,6 +500,23 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         self.action_origin: dict[str, Any] = {}
         self.target_adoption: dict[str, Any] = {}
         self.external_transition_installed = False
+
+    def open_url_in_new_tab(
+        self,
+        url: str,
+        wait_seconds: int = 5,
+    ) -> dict[str, Any]:
+        if self.open_search_action_target:
+            self.baseline_target_ids = {
+                str(target.get("id") or target.get("targetId") or "")
+                for target in list_targets(PORT)
+                if target.get("type") == "page"
+            }
+            self.action_target = {}
+            self.action_origin = {}
+            self.target_adoption = {}
+            self.external_transition_installed = False
+        return super().open_url_in_new_tab(url, wait_seconds=wait_seconds)
 
     def _install_target(
         self,
@@ -468,13 +531,9 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             page_state: dict[str, Any] = {}
             while time.monotonic() < deadline:
                 page_state = executor._exec_js(
-                    "JSON.stringify({hostname:location.hostname,readyState:document.readyState})"
+                    "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
                 )
-                hostname = str(page_state.get("hostname") or "")
-                if (
-                    hostname == "zhaopin.com"
-                    or hostname.endswith(".zhaopin.com")
-                ) and page_state.get("readyState") == "complete":
+                if _fixture_document_attachable(page_state):
                     break
                 time.sleep(0.1)
             else:
@@ -515,11 +574,62 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             time.sleep(0.1)
         return {}
 
+    def _open_action_target_with_user_gesture(self, event_prefix: str) -> None:
+        prefix = json.dumps(str(event_prefix))
+        self.driver.cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": f"""
+                  (function(){{
+                    const opened = window.open('https://www.zhaopin.com/', '_blank');
+                    window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+                    window.__jobagentGateEvents.push(
+                      {prefix} + (opened ? '_gesture_opened' : '_gesture_blocked')
+                    );
+                    return !!opened;
+                  }})()
+                """,
+                "returnByValue": True,
+                "userGesture": True,
+            },
+        )
+
     def _click_at(self, x: Any, y: Any) -> None:
         super()._click_at(x, y)
         if self.external_transition_installed:
             return
         events = super().fixture_events()
+        if (
+            self.open_search_action_target
+            and "search_action_target_opened" not in events
+        ):
+            self._open_action_target_with_user_gesture("search_action_target")
+            events = super().fixture_events()
+        if _fixture_search_action_target_opened(events):
+            action_target = self._wait_for_action_target()
+            if not action_target:
+                raise GateFixtureError("managed_search_target_unavailable")
+            action_origin = next(
+                (
+                    target
+                    for target in list_targets(PORT)
+                    if str(target.get("id") or target.get("targetId") or "")
+                    == str(self.driver.current_target_id or "")
+                ),
+                {},
+            )
+            if not action_origin:
+                raise GateFixtureError("managed_search_origin_unavailable")
+            child_installed = self._install_target(
+                action_target,
+                "target_results",
+            )
+            if not child_installed.get("ok"):
+                raise GateFixtureError("managed_search_child_fixture_failed")
+            self.action_target = action_target
+            self.action_origin = action_origin
+            self.external_transition_installed = True
+            return
         if (
             "target_city_selected" not in events
             or "action_target_opened" not in events
@@ -721,8 +831,8 @@ def _evaluate_one_page_collection_boundary(
     collector_candidate_count: int,
     page_two_attempted: bool,
     collection_budget_satisfied: bool,
-    all_parser_candidates_reviewable: bool,
-    all_collector_candidates_reviewable: bool,
+    all_parser_candidates_safe: bool,
+    all_collector_candidates_safe: bool,
 ) -> dict[str, Any]:
     """Classify what the disposable public-page gate can prove."""
 
@@ -738,8 +848,8 @@ def _evaluate_one_page_collection_boundary(
         and collector_candidate_count > 0
         and not page_two_attempted
         and collection_budget_satisfied
-        and all_parser_candidates_reviewable
-        and all_collector_candidates_reviewable
+        and all_parser_candidates_safe
+        and all_collector_candidates_safe
     )
     return {
         "ok": complete,
@@ -779,6 +889,45 @@ def _safe_collector_gate_payload(
             for key, value in diagnostics.items()
             if isinstance(value, (bool, int, float, str, type(None)))
         },
+    }
+
+
+def _safe_reviewability_summary(jobs: list[Job]) -> dict[str, Any]:
+    """Aggregate candidate quality without emitting job or company data."""
+
+    missing_field_counts = {"title": 0, "company": 0, "salary": 0}
+    issue_pattern_counts: dict[str, int] = {}
+    card_source_counts: dict[str, int] = {}
+    incomplete_card_source_counts: dict[str, int] = {}
+    incomplete_official_detail_count = 0
+    for job in jobs:
+        issues = delivery_reviewability_issues(
+            {"title": job.name, "company": job.company, "salary": job.salary}
+        )
+        raw = job.raw_data if isinstance(job.raw_data, dict) else {}
+        card_source = str(raw.get("cardSource") or "unknown")[:40]
+        card_source_counts[card_source] = card_source_counts.get(card_source, 0) + 1
+        if not issues:
+            continue
+        pattern = "+".join(sorted(issues))
+        issue_pattern_counts[pattern] = issue_pattern_counts.get(pattern, 0) + 1
+        incomplete_card_source_counts[card_source] = (
+            incomplete_card_source_counts.get(card_source, 0) + 1
+        )
+        for field in issues:
+            missing_field_counts[field] += 1
+        if _detail_url_kind(job.url) == "official_detail":
+            incomplete_official_detail_count += 1
+    return {
+        "candidate_count": len(jobs),
+        "reviewable_count": sum(is_reviewable_zhilian_job(job) for job in jobs),
+        "missing_field_counts": missing_field_counts,
+        "issue_pattern_counts": dict(sorted(issue_pattern_counts.items())),
+        "card_source_counts": dict(sorted(card_source_counts.items())),
+        "incomplete_card_source_counts": dict(
+            sorted(incomplete_card_source_counts.items())
+        ),
+        "incomplete_official_detail_count": incomplete_official_detail_count,
     }
 
 
@@ -984,9 +1133,22 @@ def _activate_public_city_result_from_city_page(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exercise a verified public city page's own official search destination."""
 
-    current = driver._exec_js(
-        build_zhilian_search_transition_script(QUERY, target_city)
-    )
+    current: dict[str, Any] = {}
+    source_reload_attempted = False
+    source_deadline = time.monotonic() + 120.0
+    source_reload_deadline = time.monotonic() + 45.0
+    source_script = build_zhilian_search_transition_script(QUERY, target_city)
+    while time.monotonic() < source_deadline:
+        current = driver._exec_js(source_script)
+        if current.get("readyState") == "complete":
+            break
+        if (
+            not source_reload_attempted
+            and time.monotonic() >= source_reload_deadline
+        ):
+            driver.cdp.send("Page.reload", {"ignoreCache": True})
+            source_reload_attempted = True
+        time.sleep(POLL_SECONDS)
     normalized_city = str(target_city).removesuffix("市")
     title = str(current.get("title") or "")
     current_url = _safe_url(current.get("url"))
@@ -1000,7 +1162,7 @@ def _activate_public_city_result_from_city_page(
         if item
     }
     if not (
-        current.get("readyState") in {"interactive", "complete"}
+        current.get("readyState") == "complete"
         and current_url
         and not _is_search_route(current.get("url"))
         and len([segment for segment in current_path.split("/") if segment]) == 1
@@ -1012,6 +1174,7 @@ def _activate_public_city_result_from_city_page(
         return {}, {
             "routeActivationVerified": False,
             "routeActivationError": "public_city_page_not_verified",
+            "sourceReloadAttempted": source_reload_attempted,
         }
     committed = _commit_keyword(driver)
     if not committed.get("ok"):
@@ -1040,7 +1203,9 @@ def _activate_public_city_result_from_city_page(
                 activation.get("buttonCandidateType") or ""
             )[:40],
         }
-    deadline = time.monotonic() + 120.0
+    deadline = time.monotonic() + 180.0
+    result_reload_deadline = time.monotonic() + 60.0
+    result_reload_attempted = False
     transition: dict[str, Any] = {}
     snapshot: dict[str, Any] = {}
     transition_script = build_zhilian_search_transition_script(QUERY, target_city)
@@ -1088,7 +1253,15 @@ def _activate_public_city_result_from_city_page(
                     "sourceReadyState": str(
                         current.get("readyState") or ""
                     )[:30],
+                    "sourceReloadAttempted": source_reload_attempted,
+                    "resultReloadAttempted": result_reload_attempted,
                 }
+        if (
+            not result_reload_attempted
+            and time.monotonic() >= result_reload_deadline
+        ):
+            driver.cdp.send("Page.reload", {"ignoreCache": True})
+            result_reload_attempted = True
         time.sleep(POLL_SECONDS)
     return {**transition, "ok": False}, {
         "routeActivationVerified": False,
@@ -1096,6 +1269,8 @@ def _activate_public_city_result_from_city_page(
         "routeActivationControlType": str(
             activation.get("buttonCandidateType") or ""
         )[:40],
+        "sourceReloadAttempted": source_reload_attempted,
+        "resultReloadAttempted": result_reload_attempted,
     }
 
 
@@ -1310,6 +1485,12 @@ def _run_live_city_switch_gate(driver: CDPBossDriver) -> dict[str, Any]:
                 "public_city_source_ready_state": str(
                     public_overlay.get("sourceReadyState") or ""
                 )[:30],
+                "public_city_source_reload_attempted": bool(
+                    public_overlay.get("sourceReloadAttempted")
+                ),
+                "public_result_reload_attempted": bool(
+                    public_overlay.get("resultReloadAttempted")
+                ),
                 "route_changed": route_changed,
                 "result_route": _is_search_route(transition.get("url")),
                 "ready_state": str(transition.get("readyState") or ""),
@@ -1374,13 +1555,9 @@ def _run_authenticated_root_production_gate(
         fixture_page_state: dict[str, Any] = {}
         while time.monotonic() < fixture_deadline:
             fixture_page_state = driver._exec_js(
-                "JSON.stringify({hostname:location.hostname,readyState:document.readyState})"
+                "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
             )
-            hostname = str(fixture_page_state.get("hostname") or "")
-            if (
-                hostname == "zhaopin.com"
-                or hostname.endswith(".zhaopin.com")
-            ) and fixture_page_state.get("readyState") == "complete":
+            if _fixture_document_attachable(fixture_page_state):
                 break
             time.sleep(0.1)
         else:
@@ -1414,6 +1591,7 @@ def _run_authenticated_root_production_gate(
             return {
                 "ok": False,
                 "failure": "authenticated_fixture_entry_install_failed",
+                "entry_install_error": str(entry_installed.get("error") or "")[:100],
                 "attempts": attempts,
             }
         collected = ZhilianReadOnlyCollector(
@@ -1436,6 +1614,22 @@ def _run_authenticated_root_production_gate(
             page_delay=0,
         )
         events = fixture.fixture_events()
+        keyword_search = collected.snapshot.get("keywordSearch")
+        keyword_search = (
+            keyword_search if isinstance(keyword_search, dict) else {}
+        )
+        search_transition = keyword_search.get("searchTransition")
+        search_transition = (
+            search_transition if isinstance(search_transition, dict) else {}
+        )
+        city_discovery = search_transition.get("cityDiscovery")
+        city_discovery = (
+            city_discovery if isinstance(city_discovery, dict) else {}
+        )
+        target_receipt = keyword_search.get("targetTransition")
+        target_receipt = (
+            target_receipt if isinstance(target_receipt, dict) else {}
+        )
         final_transition = fixture._exec_js(
             build_zhilian_search_transition_script(QUERY, target_city)
         )
@@ -1489,6 +1683,22 @@ def _run_authenticated_root_production_gate(
                 "page_two_attempted": fixture.pagination_attempts > 0,
                 "isolated_target_identity": bool(disposable_target_id),
                 "entry_fixture_installed": bool(entry_installed.get("ok")),
+                "fixture_events": events,
+                "keyword_search_error": str(
+                    keyword_search.get("error") or ""
+                )[:100],
+                "keyword_target_outcome": str(
+                    target_receipt.get("outcome") or ""
+                )[:80],
+                "keyword_target_cleanup_verified": bool(
+                    target_receipt.get("targetCleanupVerified", True)
+                ),
+                "city_discovery_action": str(
+                    city_discovery.get("action") or ""
+                )[:80],
+                "city_discovery_error": str(
+                    city_discovery.get("error") or ""
+                )[:100],
             }
         )
         driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
@@ -1780,66 +1990,10 @@ def _run_search_action_target_cleanup_gate(
             target_slug="managed-search-cleanup-city",
             target_code="951",
             historical_targets=historical_targets,
+            open_search_action_target=True,
         )
 
         for cycle in range(1, 3):
-            installed = fixture._install_target(
-                action_origin,
-                "authenticated_root_redirect",
-            )
-            if not installed.get("ok"):
-                return {
-                    "ok": False,
-                    "failure": "search_cleanup_origin_fixture_failed",
-                    "attempts": attempts,
-                }
-            action_control = driver._exec_js(
-                """
-                (function(){
-                  const control = document.querySelector('a.search-wrapper__button');
-                  if (!control) return JSON.stringify({ok:false,error:'control_missing'});
-                  const replacement = control.cloneNode(true);
-                  replacement.setAttribute('target', '_blank');
-                  replacement.addEventListener('click', (event) => {
-                    event.preventDefault();
-                    const opened = window.open('https://www.zhaopin.com/', '_blank');
-                    window.__jobagentGateEvents = window.__jobagentGateEvents || [];
-                    window.__jobagentGateEvents.push(
-                      opened ? 'search_action_target_opened' : 'search_action_target_blocked'
-                    );
-                  });
-                  control.replaceWith(replacement);
-                  return JSON.stringify({ok:true,target:replacement.target});
-                })()
-                """
-            )
-            if not action_control.get("ok"):
-                return {
-                    "ok": False,
-                    "failure": "search_cleanup_control_fixture_failed",
-                    "attempts": attempts,
-                }
-            committed = _commit_keyword(driver)
-            activation = driver._exec_js(
-                build_zhilian_search_control_activation_script(
-                    QUERY,
-                    method="native_pointer",
-                )
-            )
-            click_point = activation.get("clickPoint")
-            if not (
-                committed.get("ok")
-                and activation.get("ok")
-                and activation.get("searchDestinationReady")
-                and isinstance(click_point, dict)
-            ):
-                return {
-                    "ok": False,
-                    "failure": "search_cleanup_action_not_ready",
-                    "attempts": attempts,
-                }
-
-            before = driver.capture_platform_target_state("zhilian")
             target_count_before = len(
                 [
                     target
@@ -1848,37 +2002,42 @@ def _run_search_action_target_cleanup_gate(
                     and "zhaopin.com" in str(target.get("url") or "")
                 ]
             )
-            driver._click_at(click_point.get("x"), click_point.get("y"))
-            action_target = fixture._wait_for_action_target()
+            collected = ZhilianReadOnlyCollector(
+                driver=fixture,
+                login_verification={
+                    "valid": True,
+                    "source": "recent_login_check",
+                    "platform": "zhilian",
+                    "round_id": ensure_current_round()["round_id"],
+                    "browser_session_id": "ci-xvfb-search-target",
+                    "age_seconds": 30,
+                },
+            ).collect(
+                query=QUERY,
+                city=TARGET_CITIES[0],
+                limit=5,
+                wait_seconds=0,
+                page=1,
+                pages=1,
+                page_delay=0,
+            )
+            action_target = fixture.action_target
             if not action_target:
                 return {
                     "ok": False,
                     "failure": "search_cleanup_action_target_unavailable",
+                    "fixture_events": fixture.fixture_events(),
                     "attempts": attempts,
                 }
             disposable_targets.append(action_target)
-            child_installed = fixture._install_target(
-                action_target,
-                "authenticated_root_redirect",
-            )
-            origin_installed = fixture._install_target(
-                action_origin,
-                "target_results",
-            )
-            if not child_installed.get("ok") or not origin_installed.get("ok"):
-                return {
-                    "ok": False,
-                    "failure": "search_cleanup_transition_fixture_failed",
-                    "attempts": attempts,
-                }
-
-            transition = driver.adopt_platform_target_transition(
-                before,
-                platform="zhilian",
-                wait_seconds=15,
-            )
+            transition = fixture.target_adoption
             action_target_id = str(
                 action_target.get("id") or action_target.get("targetId") or ""
+            )
+            action_origin_id = str(
+                fixture.action_origin.get("id")
+                or fixture.action_origin.get("targetId")
+                or ""
             )
             remaining_target_ids = {
                 str(target.get("id") or target.get("targetId") or "")
@@ -1896,13 +2055,23 @@ def _run_search_action_target_cleanup_gate(
             attempt_ok = bool(
                 target_count_before >= 16
                 and transition.get("ok")
-                and transition.get("outcome") == "current_target_reused"
-                and transition.get("target_cleanup_verified") is True
-                and int(transition.get("discarded_action_target_count") or 0)
-                == 1
-                and action_target_id not in remaining_target_ids
+                and transition.get("outcome")
+                in {
+                    "action_linked_target_adopted",
+                    "action_linked_provisional_target_adopted",
+                }
+                and transition.get("previous_target_closed") is True
+                and action_origin_id not in remaining_target_ids
+                and action_target_id in remaining_target_ids
                 and target_count_after == target_count_before
-                and driver.current_target_id == action_origin_id
+                and driver.current_target_id == action_target_id
+                and collected.ok
+                and collected.jobs
+                and all(
+                    str(job.city or "") == TARGET_CITIES[0]
+                    for job in collected.jobs
+                )
+                and fixture.pagination_attempts == 0
             )
             attempts.append(
                 {
@@ -1910,17 +2079,26 @@ def _run_search_action_target_cleanup_gate(
                     "ok": attempt_ok,
                     "high_cardinality_target_registry": target_count_before >= 16,
                     "target_outcome": str(transition.get("outcome") or "")[:80],
-                    "target_cleanup_verified": bool(
-                        transition.get("target_cleanup_verified")
+                    "production_collector_used": True,
+                    "candidate_count": len(collected.jobs),
+                    "action_target_adopted": (
+                        driver.current_target_id == action_target_id
                     ),
-                    "generic_action_child_discarded": int(
-                        transition.get("discarded_action_target_count") or 0
-                    )
-                    == 1,
-                    "exact_action_target_absent": (
-                        action_target_id not in remaining_target_ids
+                    "previous_origin_closed": (
+                        action_origin_id not in remaining_target_ids
+                    ),
+                    "exact_action_target_present": (
+                        action_target_id in remaining_target_ids
                     ),
                     "target_count_stable": target_count_after == target_count_before,
+                    "target_city_only": bool(
+                        collected.jobs
+                        and all(
+                            str(job.city or "") == TARGET_CITIES[0]
+                            for job in collected.jobs
+                        )
+                    ),
+                    "page_two_attempted": fixture.pagination_attempts > 0,
                 }
             )
             if not attempt_ok:
@@ -1970,15 +2148,51 @@ def _detail_url_kind(value: Any) -> str:
     return "official_detail" if parsed.path.startswith("/jobdetail/") else "official_other"
 
 
+def _candidates_safe_after_detail_gate(
+    jobs: list[Job],
+    detail_gate: dict[str, Any],
+) -> bool:
+    if not jobs:
+        return False
+    incomplete = [job for job in jobs if not is_reviewable_zhilian_job(job)]
+    if not incomplete:
+        return True
+    return bool(
+        detail_gate.get("ok")
+        and all(_is_official_detail_url(job.url) for job in incomplete)
+    )
+
+
 def _run_public_detail_reviewability_gate(
     driver: CDPBossDriver,
     jobs: list[Job],
 ) -> dict[str, Any]:
-    candidates = [job for job in jobs if _is_official_detail_url(job.url)][:3]
+    unique: dict[str, Job] = {}
+    for job in jobs:
+        key = str(job.url or "") or f"{job.name}|{job.company}|{job.salary}"
+        unique.setdefault(key, job)
+    incomplete = [job for job in unique.values() if not is_reviewable_zhilian_job(job)]
+    if any(not _is_official_detail_url(job.url) for job in incomplete):
+        return {
+            "ok": False,
+            "failure": "incomplete_candidate_without_official_detail",
+            "incomplete_candidate_count": len(incomplete),
+        }
+    candidates = incomplete or [
+        job for job in unique.values() if _is_official_detail_url(job.url)
+    ][:3]
     if not candidates:
         return {"ok": False, "failure": "official_detail_candidate_missing"}
+    if len(candidates) > 5:
+        return {
+            "ok": False,
+            "failure": "incomplete_candidate_gate_budget_exceeded",
+            "incomplete_candidate_count": len(incomplete),
+        }
 
     attempts = 0
+    fully_reviewable_count = 0
+    safe_exclusion_count = 0
     last_diagnostics: dict[str, Any] = {}
     for candidate in candidates:
         attempts += 1
@@ -2055,7 +2269,11 @@ def _run_public_detail_reviewability_gate(
             "reviewability_issues": sorted(issues),
             "safe_exclusion_eligible": safe_exclusion_eligible,
         }
-        if fully_reviewable or safe_exclusion_eligible:
+        if fully_reviewable:
+            fully_reviewable_count += 1
+        elif safe_exclusion_eligible:
+            safe_exclusion_count += 1
+        if (fully_reviewable or safe_exclusion_eligible) and not incomplete:
             return {
                 "ok": True,
                 "attempt_count": attempts,
@@ -2066,6 +2284,28 @@ def _run_public_detail_reviewability_gate(
                 ),
                 **last_diagnostics,
             }
+        if not (fully_reviewable or safe_exclusion_eligible):
+            return {
+                "ok": False,
+                "attempt_count": attempts,
+                "failure": "public_detail_hydration_unverified",
+                "incomplete_candidate_count": len(incomplete),
+                "covered_incomplete_count": fully_reviewable_count
+                + safe_exclusion_count,
+                **last_diagnostics,
+            }
+    if incomplete:
+        return {
+            "ok": True,
+            "attempt_count": attempts,
+            "outcome": "all_incomplete_candidates_bounded",
+            "incomplete_candidate_count": len(incomplete),
+            "covered_incomplete_count": fully_reviewable_count
+            + safe_exclusion_count,
+            "fully_reviewable_count": fully_reviewable_count,
+            "safe_exclusion_count": safe_exclusion_count,
+            **last_diagnostics,
+        }
     return {
         "ok": False,
         "attempt_count": attempts,
@@ -2346,6 +2586,27 @@ def main() -> int:
             platform="zhilian",
             track_round=True,
         )
+        stage = "authenticated_root_production_fixture"
+        authenticated_root_gate = _run_authenticated_root_production_gate(driver)
+        report["authenticated_root_production_gate"] = authenticated_root_gate
+        if not authenticated_root_gate.get("ok"):
+            report["status"] = "failed_authenticated_root_production_path"
+            _write_report(report)
+            return 1
+        stage = "managed_multi_target_recovery_fixture"
+        managed_target_gate = _run_managed_multi_target_recovery_gate(driver)
+        report["managed_multi_target_recovery_gate"] = managed_target_gate
+        if not managed_target_gate.get("ok"):
+            report["status"] = "failed_managed_multi_target_recovery"
+            _write_report(report)
+            return 1
+        stage = "search_action_target_cleanup_fixture"
+        search_cleanup_gate = _run_search_action_target_cleanup_gate(driver)
+        report["search_action_target_cleanup_gate"] = search_cleanup_gate
+        if not search_cleanup_gate.get("ok"):
+            report["status"] = "failed_search_action_target_cleanup"
+            _write_report(report)
+            return 1
         deadline = time.monotonic() + TIMEOUT_SECONDS
         reload_deadline = time.monotonic() + ENTRY_RELOAD_SECONDS
         entry_reload_attempted = False
@@ -2562,12 +2823,26 @@ def main() -> int:
                 reviewable_collector_candidate_count=sum(
                     is_reviewable_zhilian_job(job) for job in collected.jobs
                 ),
+                parser_reviewability=_safe_reviewability_summary(parsed_jobs),
+                collector_reviewability=_safe_reviewability_summary(
+                    collected.jobs
+                ),
             )
             stage = "live_cross_city_switch"
             city_switch_gate = _run_live_city_switch_gate(driver)
             report["live_cross_city_switch_gate"] = city_switch_gate
             if not city_switch_gate.get("ok"):
                 report["status"] = "failed_live_cross_city_switch"
+                _write_report(report)
+                return 1
+            stage = "public_detail_reviewability"
+            detail_gate = _run_public_detail_reviewability_gate(
+                driver,
+                [*parsed_jobs, *collected.jobs],
+            )
+            report["public_detail_reviewability_gate"] = detail_gate
+            if not detail_gate.get("ok"):
+                report["status"] = "failed_public_detail_reviewability"
                 _write_report(report)
                 return 1
             collection_boundary = _evaluate_one_page_collection_boundary(
@@ -2580,25 +2855,20 @@ def main() -> int:
                 collector_candidate_count=len(collected.jobs),
                 page_two_attempted=bound_driver.pagination_attempts > 0,
                 collection_budget_satisfied=collection_budget_satisfied,
-                all_parser_candidates_reviewable=bool(parsed_jobs)
-                and all(is_reviewable_zhilian_job(job) for job in parsed_jobs),
-                all_collector_candidates_reviewable=bool(collected.jobs)
-                and all(is_reviewable_zhilian_job(job) for job in collected.jobs),
+                all_parser_candidates_safe=_candidates_safe_after_detail_gate(
+                    parsed_jobs,
+                    detail_gate,
+                ),
+                all_collector_candidates_safe=_candidates_safe_after_detail_gate(
+                    collected.jobs,
+                    detail_gate,
+                ),
             )
             if not collection_boundary["ok"]:
                 report.update(collection_boundary)
                 _write_report(report)
                 return 1
             if collection_boundary["status"] == "continue":
-                stage = "public_detail_reviewability"
-                detail_gate = _run_public_detail_reviewability_gate(
-                    driver, parsed_jobs
-                )
-                report["public_detail_reviewability_gate"] = detail_gate
-                if not detail_gate.get("ok"):
-                    report["status"] = "failed_public_detail_reviewability"
-                    _write_report(report)
-                    return 1
                 stage = "document_title_fallback_fixture"
                 title_fallback_gate = _run_document_title_fallback_gate(driver)
                 report["document_title_fallback_gate"] = title_fallback_gate
@@ -2620,31 +2890,6 @@ def main() -> int:
                     report["status"] = "failed_cross_city_fallback_boundary"
                     _write_report(report)
                     return 1
-            stage = "authenticated_root_production_fixture"
-            authenticated_root_gate = _run_authenticated_root_production_gate(
-                driver
-            )
-            report["authenticated_root_production_gate"] = (
-                authenticated_root_gate
-            )
-            if not authenticated_root_gate.get("ok"):
-                report["status"] = "failed_authenticated_root_production_path"
-                _write_report(report)
-                return 1
-            stage = "managed_multi_target_recovery_fixture"
-            managed_target_gate = _run_managed_multi_target_recovery_gate(driver)
-            report["managed_multi_target_recovery_gate"] = managed_target_gate
-            if not managed_target_gate.get("ok"):
-                report["status"] = "failed_managed_multi_target_recovery"
-                _write_report(report)
-                return 1
-            stage = "search_action_target_cleanup_fixture"
-            search_cleanup_gate = _run_search_action_target_cleanup_gate(driver)
-            report["search_action_target_cleanup_gate"] = search_cleanup_gate
-            if not search_cleanup_gate.get("ok"):
-                report["status"] = "failed_search_action_target_cleanup"
-                _write_report(report)
-                return 1
             report.update(
                 status=(
                     "passed_full"
@@ -2656,31 +2901,6 @@ def main() -> int:
             _write_report(report)
             return 0
         if route_complete and explicit_login_wall:
-            stage = "authenticated_root_production_fixture"
-            authenticated_root_gate = _run_authenticated_root_production_gate(
-                driver
-            )
-            report["authenticated_root_production_gate"] = (
-                authenticated_root_gate
-            )
-            if not authenticated_root_gate.get("ok"):
-                report["status"] = "failed_authenticated_root_production_path"
-                _write_report(report)
-                return 1
-            stage = "managed_multi_target_recovery_fixture"
-            managed_target_gate = _run_managed_multi_target_recovery_gate(driver)
-            report["managed_multi_target_recovery_gate"] = managed_target_gate
-            if not managed_target_gate.get("ok"):
-                report["status"] = "failed_managed_multi_target_recovery"
-                _write_report(report)
-                return 1
-            stage = "search_action_target_cleanup_fixture"
-            search_cleanup_gate = _run_search_action_target_cleanup_gate(driver)
-            report["search_action_target_cleanup_gate"] = search_cleanup_gate
-            if not search_cleanup_gate.get("ok"):
-                report["status"] = "failed_search_action_target_cleanup"
-                _write_report(report)
-                return 1
             report.update(
                 status="passed_route_only_login_wall_with_production_fixture",
                 remaining_unverified="job_list_signal",
