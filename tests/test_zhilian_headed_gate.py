@@ -5,6 +5,7 @@ from scripts.ci.zhilian_headed_public_gate import (
     _evaluate_one_page_collection_boundary,
     _explicit_public_login_wall_observed,
     _fixture_document_attachable,
+    _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
     _safe_reviewability_summary,
 )
@@ -31,6 +32,18 @@ def test_fixture_can_stop_an_official_committed_document():
             "readyState": "complete",
             "documentReady": True,
         }
+    ) is False
+
+
+def test_fixture_accepts_native_or_user_gesture_search_targets():
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_opened"]
+    ) is True
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_blocked", "search_action_target_gesture_opened"]
+    ) is True
+    assert _fixture_search_action_target_opened(
+        ["search_action_target_blocked", "search_action_target_gesture_blocked"]
     ) is False
 
 

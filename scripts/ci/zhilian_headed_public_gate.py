@@ -447,6 +447,15 @@ def _fixture_document_attachable(state: dict[str, Any]) -> bool:
     )
 
 
+def _fixture_search_action_target_opened(events: list[str]) -> bool:
+    return bool(
+        {
+            "search_action_target_opened",
+            "search_action_target_gesture_opened",
+        }.intersection(events)
+    )
+
+
 def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/json/new?{quote(url, safe=':/?&=%#')}",
@@ -565,12 +574,38 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             time.sleep(0.1)
         return {}
 
+    def _open_action_target_with_user_gesture(self, event_prefix: str) -> None:
+        prefix = json.dumps(str(event_prefix))
+        self.driver.cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": f"""
+                  (function(){{
+                    const opened = window.open('https://www.zhaopin.com/', '_blank');
+                    window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+                    window.__jobagentGateEvents.push(
+                      {prefix} + (opened ? '_gesture_opened' : '_gesture_blocked')
+                    );
+                    return !!opened;
+                  }})()
+                """,
+                "returnByValue": True,
+                "userGesture": True,
+            },
+        )
+
     def _click_at(self, x: Any, y: Any) -> None:
         super()._click_at(x, y)
         if self.external_transition_installed:
             return
         events = super().fixture_events()
-        if "search_action_target_opened" in events:
+        if (
+            self.open_search_action_target
+            and "search_action_target_opened" not in events
+        ):
+            self._open_action_target_with_user_gesture("search_action_target")
+            events = super().fixture_events()
+        if _fixture_search_action_target_opened(events):
             action_target = self._wait_for_action_target()
             if not action_target:
                 raise GateFixtureError("managed_search_target_unavailable")
@@ -1991,6 +2026,7 @@ def _run_search_action_target_cleanup_gate(
                 return {
                     "ok": False,
                     "failure": "search_cleanup_action_target_unavailable",
+                    "fixture_events": fixture.fixture_events(),
                     "attempts": attempts,
                 }
             disposable_targets.append(action_target)
