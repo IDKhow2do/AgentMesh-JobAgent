@@ -198,12 +198,14 @@ class AuthenticatedCityRootFixtureDriver:
         platform: str,
         wait_seconds: float = 2,
         allow_changed_platform_page: bool = False,
+        expected_title_text: str = "",
     ) -> dict[str, Any]:
         return self.driver.adopt_platform_target_transition(
             before,
             platform=platform,
             wait_seconds=wait_seconds,
             allow_changed_platform_page=allow_changed_platform_page,
+            expected_title_text=expected_title_text,
         )
 
     def dismiss_javascript_dialog(self) -> dict[str, Any]:
@@ -423,7 +425,7 @@ def _create_disposable_cdp_target(url: str) -> dict[str, Any]:
 
 
 class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver):
-    """Model a managed profile with many stale tabs and one action child."""
+    """Model a managed profile where an action child stays on the root page."""
 
     def __init__(
         self,
@@ -449,6 +451,7 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             if target.get("type") == "page"
         }
         self.action_target: dict[str, Any] = {}
+        self.action_origin: dict[str, Any] = {}
         self.target_adoption: dict[str, Any] = {}
         self.external_transition_installed = False
 
@@ -525,13 +528,31 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         action_target = self._wait_for_action_target()
         if not action_target:
             raise GateFixtureError("managed_action_target_unavailable")
-        installed = self._install_target(action_target, "target_results")
-        if not installed.get("ok"):
-            raise GateFixtureError("managed_action_target_fixture_failed")
+        action_origin = next(
+            (
+                target
+                for target in list_targets(PORT)
+                if str(target.get("id") or target.get("targetId") or "")
+                == str(self.driver.current_target_id or "")
+            ),
+            {},
+        )
+        if not action_origin:
+            raise GateFixtureError("managed_action_origin_unavailable")
+        child_installed = self._install_target(
+            action_target,
+            "authenticated_root_redirect",
+        )
+        if not child_installed.get("ok"):
+            raise GateFixtureError("managed_action_child_fixture_failed")
+        origin_installed = self._install_target(action_origin, "target_results")
+        if not origin_installed.get("ok"):
+            raise GateFixtureError("managed_action_origin_fixture_failed")
         noise = self._install_target(self.historical_targets[0], "target_results")
         if not noise.get("ok"):
             raise GateFixtureError("managed_noise_target_fixture_failed")
         self.action_target = action_target
+        self.action_origin = action_origin
         self.external_transition_installed = True
 
     def adopt_platform_target_transition(
@@ -541,12 +562,14 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
         platform: str,
         wait_seconds: float = 2,
         allow_changed_platform_page: bool = False,
+        expected_title_text: str = "",
     ) -> dict[str, Any]:
         self.target_adoption = super().adopt_platform_target_transition(
             before,
             platform=platform,
             wait_seconds=wait_seconds,
             allow_changed_platform_page=allow_changed_platform_page,
+            expected_title_text=expected_title_text,
         )
         return self.target_adoption
 
@@ -1481,11 +1504,27 @@ def _run_managed_multi_target_recovery_gate(
                 page_delay=0,
             )
             action_target = fixture.action_target
-            action_target_id = str(
-                action_target.get("id") or action_target.get("targetId") or ""
-            )
             if action_target:
                 disposable_targets.append(action_target)
+            action_origin_id = str(
+                fixture.action_origin.get("id")
+                or fixture.action_origin.get("targetId")
+                or ""
+            )
+            target_count_after = target_count_before + 1
+            cleanup_deadline = time.monotonic() + 10.0
+            while time.monotonic() < cleanup_deadline:
+                target_count_after = len(
+                    [
+                        target
+                        for target in list_targets(PORT)
+                        if target.get("type") == "page"
+                        and "zhaopin.com" in str(target.get("url") or "")
+                    ]
+                )
+                if target_count_after == target_count_before:
+                    break
+                time.sleep(0.1)
             job_cities = [str(job.city or "") for job in collected.jobs]
             adoption_outcome = str(fixture.target_adoption.get("outcome") or "")
             keyword_search = collected.snapshot.get("keywordSearch")
@@ -1508,8 +1547,16 @@ def _run_managed_multi_target_recovery_gate(
                 and target_count_before >= 16
                 and fixture.external_transition_installed
                 and fixture.target_adoption.get("ok")
-                and adoption_outcome == "action_linked_target_adopted"
-                and driver.current_target_id == action_target_id
+                and adoption_outcome == "current_target_reused"
+                and driver.current_target_id == action_origin_id
+                and int(
+                    fixture.target_adoption.get(
+                        "discarded_action_target_count"
+                    )
+                    or 0
+                )
+                == 1
+                and target_count_after == target_count_before
                 and collected.ok
                 and collected.jobs
                 and all(city == target_city for city in job_cities)
@@ -1522,11 +1569,20 @@ def _run_managed_multi_target_recovery_gate(
                     "ok": attempt_ok,
                     "error": str(collected.error or "")[:100],
                     "target_count_before": target_count_before,
+                    "target_count_after": target_count_after,
+                    "target_count_stable": target_count_after == target_count_before,
                     "high_cardinality_target_registry": target_count_before >= 16,
                     "persisted_login_receipt_used": True,
-                    "action_linked_target_adopted": (
-                        adoption_outcome == "action_linked_target_adopted"
+                    "action_origin_reused": (
+                        adoption_outcome == "current_target_reused"
                     ),
+                    "generic_action_child_discarded": int(
+                        fixture.target_adoption.get(
+                            "discarded_action_target_count"
+                        )
+                        or 0
+                    )
+                    == 1,
                     "action_candidate_count": int(
                         fixture.target_adoption.get("action_candidate_count") or 0
                     ),

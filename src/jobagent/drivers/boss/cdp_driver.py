@@ -118,6 +118,19 @@ class CDPBossDriver(BossActionDriver):
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _target_title_contains(
+        target: dict[str, Any],
+        expected_title_text: str,
+    ) -> bool:
+        """Require one readable destination hint before committing a target."""
+
+        expected = " ".join(str(expected_title_text or "").split()).casefold()
+        if not expected:
+            return True
+        title = " ".join(str(target.get("title") or "").split()).casefold()
+        return bool(title and expected in title)
+
     def _target_info_map(self) -> dict[str, dict[str, Any]]:
         """Return CDP target metadata when the connected Chrome exposes it."""
 
@@ -235,6 +248,7 @@ class CDPBossDriver(BossActionDriver):
         platform: str,
         wait_seconds: float = 2,
         allow_changed_platform_page: bool = False,
+        expected_title_text: str = "",
     ) -> dict[str, Any]:
         """Adopt one unambiguous official target transition."""
         if before.get("platform") != platform:
@@ -257,10 +271,35 @@ class CDPBossDriver(BossActionDriver):
             ).items()
             if target_id and fingerprint
         }
-        timeout = min(max(float(wait_seconds), 2.0), 30.0)
+        timeout = min(max(float(wait_seconds), 2.0), 90.0)
         deadline = time.monotonic() + timeout
         max_provisional_count = 0
         last_ambiguous_count = 0
+        last_owned_action_provisional: list[dict[str, Any]] = []
+
+        def discard_action_targets(
+            candidates: list[dict[str, Any]],
+            *,
+            selected_id: str = "",
+        ) -> int:
+            discarded = 0
+            for candidate in candidates:
+                target_id = str(
+                    candidate.get("id") or candidate.get("targetId") or ""
+                )
+                if (
+                    not target_id
+                    or target_id == selected_id
+                    or target_id in before_ids
+                ):
+                    continue
+                try:
+                    close_platform_target(self.manager.port, target_id)
+                except Exception:
+                    continue
+                discarded += 1
+            return discarded
+
         while True:
             targets = list_targets(self.manager.port)
             page_targets = [target for target in targets if target.get("type") == "page"]
@@ -299,6 +338,7 @@ class CDPBossDriver(BossActionDriver):
                     else current_changed
                     and self._trusted_changed_platform_target(current, platform)
                 )
+                and self._target_title_contains(current, expected_title_text)
             )
 
             changed_candidates = [
@@ -323,6 +363,7 @@ class CDPBossDriver(BossActionDriver):
                     if not allow_changed_platform_page
                     else self._trusted_changed_platform_target(target, platform)
                 )
+                and self._target_title_contains(target, expected_title_text)
             ]
             action_candidates = [
                 target
@@ -338,10 +379,25 @@ class CDPBossDriver(BossActionDriver):
                 and self._target_opener_id(target, target_infos)
                 == previous_target_id
             ]
+            platform_provisional = [
+                target
+                for target in provisional_targets
+                if platform_for_url(str(target.get("url") or "")) == platform
+            ]
+            owned_action_provisional = (
+                action_provisional
+                if action_provisional
+                else platform_provisional
+                if len(platform_provisional) == 1
+                else []
+            )
+            last_owned_action_provisional = owned_action_provisional
 
             selected: dict[str, Any] | None = None
             outcome = ""
-            if len(action_candidates) == 1 and len(action_provisional) <= 1:
+            if current_trusted and action_candidates:
+                last_ambiguous_count = 1 + len(action_candidates)
+            elif len(action_candidates) == 1 and len(action_provisional) <= 1:
                 selected = action_candidates[0]
                 outcome = "action_linked_target_adopted"
             elif len(action_candidates) > 1 or len(action_provisional) > 1:
@@ -349,14 +405,14 @@ class CDPBossDriver(BossActionDriver):
                     len(action_candidates),
                     len(action_provisional),
                 )
-            elif action_provisional:
+            elif current_trusted:
+                selected = current
+                outcome = "current_target_reused"
+            elif action_provisional and not expected_title_text:
                 # The action-created page may remain about:blank while Chrome
                 # establishes the official navigation. Keep observing it, but
                 # never connect until it reaches a trusted platform URL.
                 last_ambiguous_count = len(action_provisional)
-            elif current_trusted:
-                selected = current
-                outcome = "current_target_reused"
             else:
                 new_candidates = [
                     target
@@ -375,6 +431,11 @@ class CDPBossDriver(BossActionDriver):
                     outcome = "new_target_adopted"
                 elif len(new_candidates) > 1:
                     last_ambiguous_count = len(new_candidates)
+                elif expected_title_text and len(existing_candidates) == 1:
+                    selected = existing_candidates[0]
+                    outcome = "changed_existing_target_adopted"
+                elif expected_title_text and len(existing_candidates) > 1:
+                    last_ambiguous_count = len(existing_candidates)
                 elif provisional_targets:
                     last_ambiguous_count = len(provisional_targets)
                 elif len(existing_candidates) == 1:
@@ -409,12 +470,22 @@ class CDPBossDriver(BossActionDriver):
                         previous_closed = True
                     except Exception:
                         previous_closed = False
+                discarded_action_target_count = 0
+                if expected_title_text and not selected_is_new:
+                    discarded_action_target_count = discard_action_targets(
+                        owned_action_provisional,
+                        selected_id=selected_id,
+                    )
                 result = {
                     "ok": True,
                     "outcome": outcome,
                     "new_target_count": 1 if selected_is_new else 0,
                     "previous_target_closed": previous_closed,
                 }
+                if discarded_action_target_count:
+                    result["discarded_action_target_count"] = (
+                        discarded_action_target_count
+                    )
                 if outcome == "action_linked_target_adopted":
                     result.update(
                         {
@@ -440,6 +511,22 @@ class CDPBossDriver(BossActionDriver):
                         "outcome": "ambiguous_search_targets",
                         "new_target_count": last_ambiguous_count,
                         "previous_target_closed": False,
+                    }
+                if (
+                    expected_title_text
+                    and len(last_owned_action_provisional) == 1
+                ):
+                    discarded_action_target_count = discard_action_targets(
+                        last_owned_action_provisional
+                    )
+                    return {
+                        "ok": False,
+                        "outcome": "action_target_navigation_not_observed",
+                        "new_target_count": 1,
+                        "previous_target_closed": False,
+                        "discarded_action_target_count": (
+                            discarded_action_target_count
+                        ),
                     }
                 return {
                     "ok": False,

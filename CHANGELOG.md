@@ -2,6 +2,18 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.37] - 2026-08-23
+
+### Fixed
+
+- Keep observing both the Zhilian action origin and its newly opened platform page until one official destination proves the requested readable city. A generic root page is no longer committed merely because it belongs to the official domain.
+- Reuse the action origin when it completes the city transition, and close only the unique platform page created by that action when the child remains on the generic root. A bounded failed transition preserves the origin and reports `action_target_navigation_not_observed` instead of accumulating another page target.
+- Extend the isolated Linux/Xvfb release gate to model a high-cardinality managed profile where the action child stays on the root page while the origin reaches the target-city results. The gate covers two cities and requires the platform target count to remain stable.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed audits and the preserved uncharged Zhilian Discover request remain unchanged. Managed clients resume the same `jobagent zhilian discover` command after upgrade; no new round, relogin, profile cleanup, recollection or additional charge is required.
+
 ## [0.5.36] - 2026-08-23
 
 ### Fixed
