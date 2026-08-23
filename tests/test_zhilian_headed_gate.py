@@ -5,6 +5,7 @@ from scripts.ci.zhilian_headed_public_gate import (
     _evaluate_one_page_collection_boundary,
     _explicit_public_login_wall_observed,
     _fixture_document_attachable,
+    _fixture_search_control_layout_ready,
     _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
     _safe_reviewability_summary,
@@ -44,6 +45,15 @@ def test_fixture_accepts_native_or_user_gesture_search_targets():
     ) is True
     assert _fixture_search_action_target_opened(
         ["search_action_target_blocked", "search_action_target_gesture_blocked"]
+    ) is False
+
+
+def test_fixture_waits_for_search_controls_to_have_committed_layout():
+    assert _fixture_search_control_layout_ready(
+        {"documentReady": True, "inputReady": True, "buttonReady": True}
+    ) is True
+    assert _fixture_search_control_layout_ready(
+        {"documentReady": True, "inputReady": True, "buttonReady": False}
     ) is False
 
 

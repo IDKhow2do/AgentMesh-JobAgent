@@ -404,6 +404,34 @@ class AuthenticatedCityRootFixtureDriver:
         )
         if not installed.get("ok") or not retained.get("fixtureReady"):
             return {"ok": False, "error": "fixture_document_not_retained"}
+        if initial_kind != "city_directory":
+            layout_deadline = time.monotonic() + 5.0
+            layout_state: dict[str, Any] = {}
+            while time.monotonic() < layout_deadline:
+                layout_state = self.driver._exec_js(
+                    """
+                    JSON.stringify((() => {
+                      const input = document.querySelector('.search-wrapper__input');
+                      const button = document.querySelector('.search-wrapper__button');
+                      const inputRect = input?.getBoundingClientRect();
+                      const buttonRect = button?.getBoundingClientRect();
+                      return {
+                        ok: true,
+                        documentReady: document.readyState === 'complete',
+                        inputReady: !!input && !!inputRect && inputRect.width > 0 && inputRect.height > 0,
+                        buttonReady: !!button && !!buttonRect && buttonRect.width > 0 && buttonRect.height > 0,
+                      };
+                    })())
+                    """
+                )
+                if _fixture_search_control_layout_ready(layout_state):
+                    break
+                time.sleep(0.05)
+            else:
+                return {
+                    "ok": False,
+                    "error": "fixture_search_control_layout_unavailable",
+                }
         return {**installed, "fixtureReady": True}
 
 
@@ -444,6 +472,14 @@ def _fixture_document_attachable(state: dict[str, Any]) -> bool:
     return bool(
         (hostname == "zhaopin.com" or hostname.endswith(".zhaopin.com"))
         and state.get("documentReady")
+    )
+
+
+def _fixture_search_control_layout_ready(state: dict[str, Any]) -> bool:
+    return bool(
+        state.get("documentReady")
+        and state.get("inputReady")
+        and state.get("buttonReady")
     )
 
 
@@ -2023,10 +2059,34 @@ def _run_search_action_target_cleanup_gate(
             )
             action_target = fixture.action_target
             if not action_target:
+                keyword_search = collected.snapshot.get("keywordSearch")
+                keyword_search = (
+                    keyword_search if isinstance(keyword_search, dict) else {}
+                )
+                target_transition = keyword_search.get("targetTransition")
+                target_transition = (
+                    target_transition
+                    if isinstance(target_transition, dict)
+                    else {}
+                )
                 return {
                     "ok": False,
                     "failure": "search_cleanup_action_target_unavailable",
                     "fixture_events": fixture.fixture_events(),
+                    "collector_ok": bool(collected.ok),
+                    "collector_error": str(collected.error or "")[:100],
+                    "keyword_search_error": str(
+                        keyword_search.get("error") or ""
+                    )[:100],
+                    "keyword_native_clicked": bool(
+                        keyword_search.get("nativeClicked")
+                    ),
+                    "keyword_click_point_present": isinstance(
+                        keyword_search.get("clickPoint"), dict
+                    ),
+                    "keyword_target_outcome": str(
+                        target_transition.get("outcome") or ""
+                    )[:80],
                     "attempts": attempts,
                 }
             disposable_targets.append(action_target)
