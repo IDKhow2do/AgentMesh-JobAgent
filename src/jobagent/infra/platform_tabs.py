@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -75,16 +76,73 @@ def _activate_target(port: int, target_id: str) -> None:
         pass
 
 
-def close_platform_target(port: int, target_id: str) -> None:
-    """Close one exact CDP target after its replacement is under control."""
+def close_platform_target(
+    port: int,
+    target_id: str,
+    *,
+    expected_websocket_url: str = "",
+    wait_seconds: float = 3.0,
+) -> dict[str, Any]:
+    """Close one exact CDP target and verify that identity disappears."""
     if not target_id:
-        return
+        return {
+            "closed": False,
+            "outcome": "target_identity_missing",
+            "target_id": "",
+        }
+    current = _find_target_by_id(list_targets(port), target_id)
+    if current is None:
+        return {
+            "closed": True,
+            "outcome": "target_already_absent",
+            "target_id": target_id,
+        }
+    observed_websocket_url = str(current.get("webSocketDebuggerUrl") or "")
+    if (
+        expected_websocket_url
+        and observed_websocket_url
+        and observed_websocket_url != expected_websocket_url
+    ):
+        return {
+            "closed": False,
+            "outcome": "target_identity_mismatch",
+            "target_id": target_id,
+        }
     try:
         _request_json(port, f"/json/close/{quote(target_id, safe='')}")
     except json.JSONDecodeError:
         # Chrome answers this endpoint with plain text after accepting the
-        # close. A non-JSON success body must not be reported as a failure.
-        return
+        # close. Acceptance is not completion; the exact identity is polled.
+        pass
+
+    timeout = min(max(float(wait_seconds), 0.0), 10.0)
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = _find_target_by_id(list_targets(port), target_id)
+        if remaining is None:
+            return {
+                "closed": True,
+                "outcome": "target_closed",
+                "target_id": target_id,
+            }
+        remaining_websocket_url = str(remaining.get("webSocketDebuggerUrl") or "")
+        if (
+            expected_websocket_url
+            and remaining_websocket_url
+            and remaining_websocket_url != expected_websocket_url
+        ):
+            return {
+                "closed": False,
+                "outcome": "target_identity_replaced",
+                "target_id": target_id,
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "closed": False,
+                "outcome": "target_close_not_observed",
+                "target_id": target_id,
+            }
+        time.sleep(0.05)
 
 
 def _target_id(target: dict[str, Any]) -> str:
