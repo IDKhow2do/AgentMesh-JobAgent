@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.38] - 2026-08-23
+
+### Fixed
+
+- Verify that the exact CDP target identity disappears after Chrome accepts a close request. A plain-text close response alone is no longer treated as proof that the page target was removed.
+- Apply bounded provisional-target cleanup to Zhilian search actions as well as city-selection actions. When the action origin completes the requested transition, the client keeps that origin and removes the action-created generic child instead of leaving one more historical page after every recovery attempt.
+- Fail closed with `action_target_cleanup_unverified` when the exact target cannot be proven closed or its identity changes during cleanup, rather than continuing with an ambiguous target registry.
+- Extend the isolated Linux/Xvfb release gate with two consecutive real search-control activations in a high-cardinality target registry. Both cycles must reuse the correct origin, remove the exact action child and leave the platform target count unchanged.
+
+### Compatibility
+
+- Existing API Keys, account binding, managed Chrome profile, login session, active round, completed audits and the preserved uncharged Zhilian Discover request remain unchanged. Managed clients resume the same `jobagent zhilian discover` command after upgrade; no new round, relogin, profile cleanup, recollection or additional charge is required.
+
 ## [0.5.37] - 2026-08-23
 
 ### Fixed

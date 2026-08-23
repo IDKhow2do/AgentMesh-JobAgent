@@ -281,8 +281,9 @@ class CDPBossDriver(BossActionDriver):
             candidates: list[dict[str, Any]],
             *,
             selected_id: str = "",
-        ) -> int:
+        ) -> tuple[int, bool]:
             discarded = 0
+            cleanup_verified = True
             for candidate in candidates:
                 target_id = str(
                     candidate.get("id") or candidate.get("targetId") or ""
@@ -294,11 +295,21 @@ class CDPBossDriver(BossActionDriver):
                 ):
                     continue
                 try:
-                    close_platform_target(self.manager.port, target_id)
+                    receipt = close_platform_target(
+                        self.manager.port,
+                        target_id,
+                        expected_websocket_url=str(
+                            candidate.get("webSocketDebuggerUrl") or ""
+                        ),
+                    )
                 except Exception:
+                    cleanup_verified = False
                     continue
-                discarded += 1
-            return discarded
+                if receipt.get("closed"):
+                    discarded += 1
+                else:
+                    cleanup_verified = False
+            return discarded, cleanup_verified
 
         while True:
             targets = list_targets(self.manager.port)
@@ -460,28 +471,68 @@ class CDPBossDriver(BossActionDriver):
                 self.current_platform = platform
                 self.current_target_id = selected_id
                 previous_closed = False
+                previous_cleanup_verified = True
                 if (
                     selected_is_new
                     and previous_target_id
                     and previous_target_id in before_ids
                 ):
+                    previous_target = next(
+                        (
+                            target
+                            for target in page_targets
+                            if str(
+                                target.get("id") or target.get("targetId") or ""
+                            )
+                            == previous_target_id
+                        ),
+                        None,
+                    )
                     try:
-                        close_platform_target(self.manager.port, previous_target_id)
-                        previous_closed = True
+                        receipt = close_platform_target(
+                            self.manager.port,
+                            previous_target_id,
+                            expected_websocket_url=str(
+                                (previous_target or {}).get(
+                                    "webSocketDebuggerUrl"
+                                )
+                                or ""
+                            ),
+                        )
+                        previous_closed = bool(receipt.get("closed"))
+                        previous_cleanup_verified = previous_closed
                     except Exception:
                         previous_closed = False
+                        previous_cleanup_verified = False
                 discarded_action_target_count = 0
-                if expected_title_text and not selected_is_new:
-                    discarded_action_target_count = discard_action_targets(
+                target_cleanup_verified = True
+                if not selected_is_new:
+                    (
+                        discarded_action_target_count,
+                        target_cleanup_verified,
+                    ) = discard_action_targets(
                         owned_action_provisional,
                         selected_id=selected_id,
                     )
+                if not previous_cleanup_verified or not target_cleanup_verified:
+                    return {
+                        "ok": False,
+                        "outcome": "action_target_cleanup_unverified",
+                        "new_target_count": 1 if selected_is_new else 0,
+                        "previous_target_closed": previous_closed,
+                        "discarded_action_target_count": (
+                            discarded_action_target_count
+                        ),
+                        "target_cleanup_verified": False,
+                    }
                 result = {
                     "ok": True,
                     "outcome": outcome,
                     "new_target_count": 1 if selected_is_new else 0,
                     "previous_target_closed": previous_closed,
                 }
+                if owned_action_provisional and not selected_is_new:
+                    result["target_cleanup_verified"] = True
                 if discarded_action_target_count:
                     result["discarded_action_target_count"] = (
                         discarded_action_target_count
@@ -512,21 +563,24 @@ class CDPBossDriver(BossActionDriver):
                         "new_target_count": last_ambiguous_count,
                         "previous_target_closed": False,
                     }
-                if (
-                    expected_title_text
-                    and len(last_owned_action_provisional) == 1
-                ):
-                    discarded_action_target_count = discard_action_targets(
-                        last_owned_action_provisional
-                    )
+                if len(last_owned_action_provisional) == 1:
+                    (
+                        discarded_action_target_count,
+                        target_cleanup_verified,
+                    ) = discard_action_targets(last_owned_action_provisional)
                     return {
                         "ok": False,
-                        "outcome": "action_target_navigation_not_observed",
+                        "outcome": (
+                            "action_target_navigation_not_observed"
+                            if target_cleanup_verified
+                            else "action_target_cleanup_unverified"
+                        ),
                         "new_target_count": 1,
                         "previous_target_closed": False,
                         "discarded_action_target_count": (
                             discarded_action_target_count
                         ),
+                        "target_cleanup_verified": target_cleanup_verified,
                     }
                 return {
                     "ok": False,

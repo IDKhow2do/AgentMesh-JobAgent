@@ -1338,14 +1338,84 @@ def _run_authenticated_root_production_gate(
     if len(TARGET_CITIES) < 2:
         return {"ok": False, "failure": "two_target_cities_required"}
 
+    original_target_id = str(driver.current_target_id or "")
+    original_target = next(
+        (
+            target
+            for target in list_targets(PORT)
+            if str(target.get("id") or target.get("targetId") or "")
+            == original_target_id
+        ),
+        None,
+    )
+    if not original_target or not original_target.get("webSocketDebuggerUrl"):
+        return {"ok": False, "failure": "authenticated_fixture_root_unavailable"}
+
     attempts: list[dict[str, Any]] = []
     for index, target_city in enumerate(TARGET_CITIES[:2], start=1):
+        disposable_target = _create_disposable_cdp_target(
+            "https://www.zhaopin.com/"
+        )
+        disposable_target_id = str(
+            disposable_target.get("id")
+            or disposable_target.get("targetId")
+            or ""
+        )
+        driver.cdp.connect(str(disposable_target["webSocketDebuggerUrl"]))
+        driver.current_platform = "zhilian"
+        driver.current_target_id = disposable_target_id
         fixture = AuthenticatedCityRootFixtureDriver(
             driver,
             target_city=target_city,
             target_slug=f"gate-city-{index}",
             target_code=str(930 + index),
         )
+        fixture_deadline = time.monotonic() + 90.0
+        fixture_page_state: dict[str, Any] = {}
+        while time.monotonic() < fixture_deadline:
+            fixture_page_state = driver._exec_js(
+                "JSON.stringify({hostname:location.hostname,readyState:document.readyState})"
+            )
+            hostname = str(fixture_page_state.get("hostname") or "")
+            if (
+                hostname == "zhaopin.com"
+                or hostname.endswith(".zhaopin.com")
+            ) and fixture_page_state.get("readyState") == "complete":
+                break
+            time.sleep(0.1)
+        else:
+            driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
+            driver.current_platform = "zhilian"
+            driver.current_target_id = original_target_id
+            close_platform_target(
+                PORT,
+                disposable_target_id,
+                expected_websocket_url=str(
+                    disposable_target.get("webSocketDebuggerUrl") or ""
+                ),
+            )
+            return {
+                "ok": False,
+                "failure": "authenticated_fixture_target_not_complete",
+                "attempts": attempts,
+            }
+        entry_installed = fixture._install("entry")
+        if not entry_installed.get("ok"):
+            driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
+            driver.current_platform = "zhilian"
+            driver.current_target_id = original_target_id
+            close_platform_target(
+                PORT,
+                disposable_target_id,
+                expected_websocket_url=str(
+                    disposable_target.get("webSocketDebuggerUrl") or ""
+                ),
+            )
+            return {
+                "ok": False,
+                "failure": "authenticated_fixture_entry_install_failed",
+                "attempts": attempts,
+            }
         collected = ZhilianReadOnlyCollector(
             driver=fixture,
             login_verification={
@@ -1417,8 +1487,25 @@ def _run_authenticated_root_production_gate(
                 "target_result_transition": _safe_transition(final_transition),
                 "old_city_result_rejected": "stale_results" in events,
                 "page_two_attempted": fixture.pagination_attempts > 0,
+                "isolated_target_identity": bool(disposable_target_id),
+                "entry_fixture_installed": bool(entry_installed.get("ok")),
             }
         )
+        driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
+        driver.current_platform = "zhilian"
+        driver.current_target_id = original_target_id
+        close_receipt = close_platform_target(
+            PORT,
+            disposable_target_id,
+            expected_websocket_url=str(
+                disposable_target.get("webSocketDebuggerUrl") or ""
+            ),
+        )
+        attempts[-1]["isolated_target_cleanup_verified"] = bool(
+            close_receipt.get("closed")
+        )
+        attempt_ok = bool(attempt_ok and close_receipt.get("closed"))
+        attempts[-1]["ok"] = attempt_ok
         if not attempt_ok:
             return {
                 "ok": False,
@@ -1649,6 +1736,214 @@ def _run_managed_multi_target_recovery_gate(
                         pass
                     closed_ids.add(target_id)
     return {"ok": True, "attempts": attempts}
+
+
+def _run_search_action_target_cleanup_gate(
+    driver: CDPBossDriver,
+) -> dict[str, Any]:
+    """Prove repeated search actions do not leak their provisional target."""
+
+    original_target_id = str(driver.current_target_id or "")
+    original_target = next(
+        (
+            target
+            for target in list_targets(PORT)
+            if str(target.get("id") or target.get("targetId") or "")
+            == original_target_id
+        ),
+        None,
+    )
+    if not original_target or not original_target.get("webSocketDebuggerUrl"):
+        return {"ok": False, "failure": "search_cleanup_root_unavailable"}
+
+    disposable_targets: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    try:
+        action_origin = _create_disposable_cdp_target(
+            "https://www.zhaopin.com/"
+        )
+        disposable_targets.append(action_origin)
+        historical_targets = [
+            _create_disposable_cdp_target("https://www.zhaopin.com/")
+            for _ in range(15)
+        ]
+        disposable_targets.extend(historical_targets)
+        action_origin_id = str(
+            action_origin.get("id") or action_origin.get("targetId") or ""
+        )
+        driver.cdp.connect(str(action_origin["webSocketDebuggerUrl"]))
+        driver.current_platform = "zhilian"
+        driver.current_target_id = action_origin_id
+        fixture = ManagedMultiTargetCityRootFixtureDriver(
+            driver,
+            target_city=TARGET_CITIES[0],
+            target_slug="managed-search-cleanup-city",
+            target_code="951",
+            historical_targets=historical_targets,
+        )
+
+        for cycle in range(1, 3):
+            installed = fixture._install_target(
+                action_origin,
+                "authenticated_root_redirect",
+            )
+            if not installed.get("ok"):
+                return {
+                    "ok": False,
+                    "failure": "search_cleanup_origin_fixture_failed",
+                    "attempts": attempts,
+                }
+            action_control = driver._exec_js(
+                """
+                (function(){
+                  const control = document.querySelector('a.search-wrapper__button');
+                  if (!control) return JSON.stringify({ok:false,error:'control_missing'});
+                  const replacement = control.cloneNode(true);
+                  replacement.setAttribute('target', '_blank');
+                  replacement.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    const opened = window.open('https://www.zhaopin.com/', '_blank');
+                    window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+                    window.__jobagentGateEvents.push(
+                      opened ? 'search_action_target_opened' : 'search_action_target_blocked'
+                    );
+                  });
+                  control.replaceWith(replacement);
+                  return JSON.stringify({ok:true,target:replacement.target});
+                })()
+                """
+            )
+            if not action_control.get("ok"):
+                return {
+                    "ok": False,
+                    "failure": "search_cleanup_control_fixture_failed",
+                    "attempts": attempts,
+                }
+            committed = _commit_keyword(driver)
+            activation = driver._exec_js(
+                build_zhilian_search_control_activation_script(
+                    QUERY,
+                    method="native_pointer",
+                )
+            )
+            click_point = activation.get("clickPoint")
+            if not (
+                committed.get("ok")
+                and activation.get("ok")
+                and activation.get("searchDestinationReady")
+                and isinstance(click_point, dict)
+            ):
+                return {
+                    "ok": False,
+                    "failure": "search_cleanup_action_not_ready",
+                    "attempts": attempts,
+                }
+
+            before = driver.capture_platform_target_state("zhilian")
+            target_count_before = len(
+                [
+                    target
+                    for target in list_targets(PORT)
+                    if target.get("type") == "page"
+                    and "zhaopin.com" in str(target.get("url") or "")
+                ]
+            )
+            driver._click_at(click_point.get("x"), click_point.get("y"))
+            action_target = fixture._wait_for_action_target()
+            if not action_target:
+                return {
+                    "ok": False,
+                    "failure": "search_cleanup_action_target_unavailable",
+                    "attempts": attempts,
+                }
+            disposable_targets.append(action_target)
+            child_installed = fixture._install_target(
+                action_target,
+                "authenticated_root_redirect",
+            )
+            origin_installed = fixture._install_target(
+                action_origin,
+                "target_results",
+            )
+            if not child_installed.get("ok") or not origin_installed.get("ok"):
+                return {
+                    "ok": False,
+                    "failure": "search_cleanup_transition_fixture_failed",
+                    "attempts": attempts,
+                }
+
+            transition = driver.adopt_platform_target_transition(
+                before,
+                platform="zhilian",
+                wait_seconds=15,
+            )
+            action_target_id = str(
+                action_target.get("id") or action_target.get("targetId") or ""
+            )
+            remaining_target_ids = {
+                str(target.get("id") or target.get("targetId") or "")
+                for target in list_targets(PORT)
+                if target.get("type") == "page"
+            }
+            target_count_after = len(
+                [
+                    target
+                    for target in list_targets(PORT)
+                    if target.get("type") == "page"
+                    and "zhaopin.com" in str(target.get("url") or "")
+                ]
+            )
+            attempt_ok = bool(
+                target_count_before >= 16
+                and transition.get("ok")
+                and transition.get("outcome") == "current_target_reused"
+                and transition.get("target_cleanup_verified") is True
+                and int(transition.get("discarded_action_target_count") or 0)
+                == 1
+                and action_target_id not in remaining_target_ids
+                and target_count_after == target_count_before
+                and driver.current_target_id == action_origin_id
+            )
+            attempts.append(
+                {
+                    "cycle": cycle,
+                    "ok": attempt_ok,
+                    "high_cardinality_target_registry": target_count_before >= 16,
+                    "target_outcome": str(transition.get("outcome") or "")[:80],
+                    "target_cleanup_verified": bool(
+                        transition.get("target_cleanup_verified")
+                    ),
+                    "generic_action_child_discarded": int(
+                        transition.get("discarded_action_target_count") or 0
+                    )
+                    == 1,
+                    "exact_action_target_absent": (
+                        action_target_id not in remaining_target_ids
+                    ),
+                    "target_count_stable": target_count_after == target_count_before,
+                }
+            )
+            if not attempt_ok:
+                return {
+                    "ok": False,
+                    "failure": "search_action_target_cleanup_not_verified",
+                    "attempts": attempts,
+                }
+        return {"ok": True, "attempts": attempts}
+    finally:
+        driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
+        driver.current_platform = "zhilian"
+        driver.current_target_id = original_target_id
+        closed_ids: set[str] = set()
+        for target in disposable_targets:
+            target_id = str(target.get("id") or target.get("targetId") or "")
+            if not target_id or target_id in closed_ids:
+                continue
+            try:
+                close_platform_target(PORT, target_id)
+            except Exception:
+                pass
+            closed_ids.add(target_id)
 
 
 def _is_official_detail_url(value: Any) -> bool:
@@ -2343,6 +2638,13 @@ def main() -> int:
                 report["status"] = "failed_managed_multi_target_recovery"
                 _write_report(report)
                 return 1
+            stage = "search_action_target_cleanup_fixture"
+            search_cleanup_gate = _run_search_action_target_cleanup_gate(driver)
+            report["search_action_target_cleanup_gate"] = search_cleanup_gate
+            if not search_cleanup_gate.get("ok"):
+                report["status"] = "failed_search_action_target_cleanup"
+                _write_report(report)
+                return 1
             report.update(
                 status=(
                     "passed_full"
@@ -2370,6 +2672,13 @@ def main() -> int:
             report["managed_multi_target_recovery_gate"] = managed_target_gate
             if not managed_target_gate.get("ok"):
                 report["status"] = "failed_managed_multi_target_recovery"
+                _write_report(report)
+                return 1
+            stage = "search_action_target_cleanup_fixture"
+            search_cleanup_gate = _run_search_action_target_cleanup_gate(driver)
+            report["search_action_target_cleanup_gate"] = search_cleanup_gate
+            if not search_cleanup_gate.get("ok"):
+                report["status"] = "failed_search_action_target_cleanup"
                 _write_report(report)
                 return 1
             report.update(
