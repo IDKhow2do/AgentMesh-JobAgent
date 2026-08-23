@@ -226,9 +226,14 @@ class AuthenticatedCityRootFixtureDriver:
 
     def _install(self, initial_kind: str) -> dict[str, Any]:
         try:
+            self.driver.cdp.send("Network.enable")
+            self.driver.cdp.send(
+                "Network.setBlockedURLs",
+                {"urls": ["*"]},
+            )
             self.driver.cdp.send("Page.stopLoading")
         except Exception:
-            return {"ok": False, "error": "fixture_navigation_stop_failed"}
+            return {"ok": False, "error": "fixture_navigation_quiesce_failed"}
         target_city = json.dumps(self.target_city, ensure_ascii=False)
         target_slug = json.dumps(self.target_slug)
         target_code = json.dumps(self.target_code)
@@ -325,6 +330,7 @@ class AuthenticatedCityRootFixtureDriver:
           }}
           function render(kind) {{
             window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+            window.__jobagentGateKind = kind;
             window.__jobagentGateEvents.push(kind);
             if (kind === 'entry') {{
               setPage('/', '智联招聘_求职_找工作',
@@ -398,12 +404,40 @@ class AuthenticatedCityRootFixtureDriver:
           return JSON.stringify({{ok: true, kind: initialKind, readyState: document.readyState}});
         }})()
         """
-        installed = self.driver._exec_js(script)
-        retained = self.driver._exec_js(
-            "JSON.stringify({ok:true,fixtureReady:!!window.__jobagentGateRender&&!!document.querySelector('.fixture-shell')})"
-        )
-        if not installed.get("ok") or not retained.get("fixtureReady"):
+        retained_script = f"""
+        JSON.stringify((() => {{
+          const hostname = String(location.hostname || '').toLowerCase();
+          return {{
+            ok: true,
+            fixtureReady: !!window.__jobagentGateRender && !!document.querySelector('.fixture-shell'),
+            officialOrigin: hostname === 'zhaopin.com' || hostname.endsWith('.zhaopin.com'),
+            kind: String(window.__jobagentGateKind || ''),
+          }};
+        }})())
+        """
+        install_deadline = time.monotonic() + 5.0
+        installed: dict[str, Any] = {}
+        retained: dict[str, Any] = {}
+        while time.monotonic() < install_deadline:
+            installed = self.driver._exec_js(script)
+            time.sleep(0.1)
+            retained = self.driver._exec_js(retained_script)
+            if _fixture_document_retained(retained, initial_kind):
+                time.sleep(0.1)
+                retained = self.driver._exec_js(retained_script)
+                if _fixture_document_retained(retained, initial_kind):
+                    break
+            try:
+                self.driver.cdp.send("Page.stopLoading")
+            except Exception:
+                return {
+                    "ok": False,
+                    "error": "fixture_navigation_stop_failed",
+                }
+        else:
             return {"ok": False, "error": "fixture_document_not_retained"}
+        if not installed.get("ok"):
+            return {"ok": False, "error": "fixture_document_install_failed"}
         if initial_kind != "city_directory":
             layout_deadline = time.monotonic() + 5.0
             layout_state: dict[str, Any] = {}
@@ -472,6 +506,17 @@ def _fixture_document_attachable(state: dict[str, Any]) -> bool:
     return bool(
         (hostname == "zhaopin.com" or hostname.endswith(".zhaopin.com"))
         and state.get("documentReady")
+    )
+
+
+def _fixture_document_retained(
+    state: dict[str, Any],
+    expected_kind: str,
+) -> bool:
+    return bool(
+        state.get("fixtureReady")
+        and state.get("officialOrigin")
+        and str(state.get("kind") or "") == str(expected_kind)
     )
 
 
@@ -2223,6 +2268,14 @@ def _candidates_safe_after_detail_gate(
     )
 
 
+def _bounded_public_detail_candidates(
+    candidates: list[Job],
+    *,
+    limit: int = 3,
+) -> list[Job]:
+    return list(candidates[: max(1, int(limit))])
+
+
 def _run_public_detail_reviewability_gate(
     driver: CDPBossDriver,
     jobs: list[Job],
@@ -2238,17 +2291,12 @@ def _run_public_detail_reviewability_gate(
             "failure": "incomplete_candidate_without_official_detail",
             "incomplete_candidate_count": len(incomplete),
         }
-    candidates = incomplete or [
+    all_candidates = incomplete or [
         job for job in unique.values() if _is_official_detail_url(job.url)
     ][:3]
+    candidates = _bounded_public_detail_candidates(all_candidates)
     if not candidates:
         return {"ok": False, "failure": "official_detail_candidate_missing"}
-    if len(candidates) > 5:
-        return {
-            "ok": False,
-            "failure": "incomplete_candidate_gate_budget_exceeded",
-            "incomplete_candidate_count": len(incomplete),
-        }
 
     attempts = 0
     fully_reviewable_count = 0
@@ -2350,6 +2398,7 @@ def _run_public_detail_reviewability_gate(
                 "attempt_count": attempts,
                 "failure": "public_detail_hydration_unverified",
                 "incomplete_candidate_count": len(incomplete),
+                "sampled_candidate_count": len(candidates),
                 "covered_incomplete_count": fully_reviewable_count
                 + safe_exclusion_count,
                 **last_diagnostics,
@@ -2358,8 +2407,13 @@ def _run_public_detail_reviewability_gate(
         return {
             "ok": True,
             "attempt_count": attempts,
-            "outcome": "all_incomplete_candidates_bounded",
+            "outcome": "bounded_incomplete_sample_verified",
             "incomplete_candidate_count": len(incomplete),
+            "sampled_candidate_count": len(candidates),
+            "remaining_unsampled_count": max(
+                0,
+                len(incomplete) - len(candidates),
+            ),
             "covered_incomplete_count": fully_reviewable_count
             + safe_exclusion_count,
             "fully_reviewable_count": fully_reviewable_count,

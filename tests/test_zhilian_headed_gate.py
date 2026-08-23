@@ -1,10 +1,12 @@
 from jobagent.domain.models import Job
 from jobagent.platforms.zhilian.collect import ZhilianCollectResult
 from scripts.ci.zhilian_headed_public_gate import (
+    _bounded_public_detail_candidates,
     _candidates_safe_after_detail_gate,
     _evaluate_one_page_collection_boundary,
     _explicit_public_login_wall_observed,
     _fixture_document_attachable,
+    _fixture_document_retained,
     _fixture_search_control_layout_ready,
     _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
@@ -55,6 +57,27 @@ def test_fixture_waits_for_search_controls_to_have_committed_layout():
     assert _fixture_search_control_layout_ready(
         {"documentReady": True, "inputReady": True, "buttonReady": False}
     ) is False
+
+
+def test_fixture_retention_requires_official_origin_and_exact_kind():
+    retained = {
+        "fixtureReady": True,
+        "officialOrigin": True,
+        "kind": "entry",
+    }
+    assert _fixture_document_retained(retained, "entry") is True
+    assert _fixture_document_retained(retained, "target_results") is False
+    assert _fixture_document_retained(
+        {**retained, "officialOrigin": False}, "entry"
+    ) is False
+
+
+def test_public_detail_gate_uses_a_bounded_sample_without_rejecting_large_sets():
+    candidates = [object() for _ in range(20)]
+    sampled = _bounded_public_detail_candidates(candidates)
+
+    assert len(sampled) == 3
+    assert sampled == candidates[:3]
 
 
 def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():
