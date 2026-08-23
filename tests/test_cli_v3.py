@@ -286,6 +286,7 @@ def test_init_verifies_new_api_key_before_saving(monkeypatch):
         ("save", "jobagent_live_new"),
     ]
     assert result["account"]["account"]["id"] == 1
+    assert result["workbench_url"] == "https://agentmesh360.com/workbench/"
 
 
 def test_upgrade_check_reports_legacy_key_and_profile_together(tmp_path, monkeypatch):

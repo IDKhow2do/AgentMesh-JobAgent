@@ -244,7 +244,11 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
     if not args.no_verify:
         account = cloud_client.me(api_key=args.key.strip())
     path = save_api_key(args.key)
-    payload: dict[str, Any] = {"ok": True, "credentials_path": str(path)}
+    payload: dict[str, Any] = {
+        "ok": True,
+        "credentials_path": str(path),
+        "workbench_url": "https://agentmesh360.com/workbench/",
+    }
     if account is not None:
         from jobagent.infra.account_state import AccountStateError, ensure_account_state
 
@@ -264,7 +268,7 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
     payload["next_suggested"] = (
         "jobagent resume analyze --file <resume>"
         if access.get("usable")
-        else "https://agentmesh360.com/app/#pricing"
+        else "https://agentmesh360.com/app/?lang=zh-CN#pricing"
         if access.get("paid_pass_required")
         else "jobagent doctor env"
     )
@@ -455,7 +459,7 @@ def _doctor_env() -> dict[str, Any]:
     elif not local_state.get("ready"):
         next_suggested = str(local_state.get("next_suggested") or "jobagent account status")
     elif not access.get("usable"):
-        next_suggested = "https://agentmesh360.com/app/#pricing"
+        next_suggested = "https://agentmesh360.com/app/?lang=zh-CN#pricing"
     elif not profile_exists:
         next_suggested = "jobagent resume analyze --file <resume>"
     else:
