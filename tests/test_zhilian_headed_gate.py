@@ -1,13 +1,17 @@
 from jobagent.domain.models import Job
 from jobagent.platforms.zhilian.collect import ZhilianCollectResult
 from scripts.ci.zhilian_headed_public_gate import (
+    _bounded_public_detail_candidates,
     _candidates_safe_after_detail_gate,
     _evaluate_one_page_collection_boundary,
     _explicit_public_login_wall_observed,
     _fixture_document_attachable,
+    _fixture_document_retained,
+    _fixture_search_control_layout_ready,
     _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
     _safe_reviewability_summary,
+    _wait_for_fixture_executor_attachable,
 )
 
 
@@ -45,6 +49,65 @@ def test_fixture_accepts_native_or_user_gesture_search_targets():
     assert _fixture_search_action_target_opened(
         ["search_action_target_blocked", "search_action_target_gesture_blocked"]
     ) is False
+
+
+def test_fixture_waits_for_search_controls_to_have_committed_layout():
+    assert _fixture_search_control_layout_ready(
+        {"documentReady": True, "inputReady": True, "buttonReady": True}
+    ) is True
+    assert _fixture_search_control_layout_ready(
+        {"documentReady": True, "inputReady": True, "buttonReady": False}
+    ) is False
+
+
+def test_fixture_retention_requires_official_origin_and_exact_kind():
+    retained = {
+        "fixtureReady": True,
+        "officialOrigin": True,
+        "kind": "entry",
+    }
+    assert _fixture_document_retained(retained, "entry") is True
+    assert _fixture_document_retained(retained, "target_results") is False
+    assert _fixture_document_retained(
+        {**retained, "officialOrigin": False}, "entry"
+    ) is False
+
+
+def test_public_detail_gate_uses_a_bounded_sample_without_rejecting_large_sets():
+    candidates = [object() for _ in range(20)]
+    sampled = _bounded_public_detail_candidates(candidates)
+
+    assert len(sampled) == 3
+    assert sampled == candidates[:3]
+
+
+def test_fixture_attachable_wait_is_bounded_and_reports_ready_state():
+    class Executor:
+        def __init__(self):
+            self.calls = 0
+
+        def _exec_js(self, _script):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "hostname": "",
+                    "readyState": "loading",
+                    "documentReady": True,
+                }
+            return {
+                "hostname": "www.zhaopin.com",
+                "readyState": "complete",
+                "documentReady": True,
+            }
+
+    executor = Executor()
+    result = _wait_for_fixture_executor_attachable(
+        executor,
+        timeout_seconds=1,
+    )
+
+    assert result == {"ok": True, "readyState": "complete"}
+    assert executor.calls == 2
 
 
 def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():

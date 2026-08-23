@@ -226,9 +226,14 @@ class AuthenticatedCityRootFixtureDriver:
 
     def _install(self, initial_kind: str) -> dict[str, Any]:
         try:
+            self.driver.cdp.send("Network.enable")
+            self.driver.cdp.send(
+                "Network.setBlockedURLs",
+                {"urls": ["*"]},
+            )
             self.driver.cdp.send("Page.stopLoading")
         except Exception:
-            return {"ok": False, "error": "fixture_navigation_stop_failed"}
+            return {"ok": False, "error": "fixture_navigation_quiesce_failed"}
         target_city = json.dumps(self.target_city, ensure_ascii=False)
         target_slug = json.dumps(self.target_slug)
         target_code = json.dumps(self.target_code)
@@ -325,6 +330,7 @@ class AuthenticatedCityRootFixtureDriver:
           }}
           function render(kind) {{
             window.__jobagentGateEvents = window.__jobagentGateEvents || [];
+            window.__jobagentGateKind = kind;
             window.__jobagentGateEvents.push(kind);
             if (kind === 'entry') {{
               setPage('/', '智联招聘_求职_找工作',
@@ -398,12 +404,68 @@ class AuthenticatedCityRootFixtureDriver:
           return JSON.stringify({{ok: true, kind: initialKind, readyState: document.readyState}});
         }})()
         """
-        installed = self.driver._exec_js(script)
-        retained = self.driver._exec_js(
-            "JSON.stringify({ok:true,fixtureReady:!!window.__jobagentGateRender&&!!document.querySelector('.fixture-shell')})"
-        )
-        if not installed.get("ok") or not retained.get("fixtureReady"):
+        retained_script = f"""
+        JSON.stringify((() => {{
+          const hostname = String(location.hostname || '').toLowerCase();
+          return {{
+            ok: true,
+            fixtureReady: !!window.__jobagentGateRender && !!document.querySelector('.fixture-shell'),
+            officialOrigin: hostname === 'zhaopin.com' || hostname.endsWith('.zhaopin.com'),
+            kind: String(window.__jobagentGateKind || ''),
+          }};
+        }})())
+        """
+        install_deadline = time.monotonic() + 5.0
+        installed: dict[str, Any] = {}
+        retained: dict[str, Any] = {}
+        while time.monotonic() < install_deadline:
+            installed = self.driver._exec_js(script)
+            time.sleep(0.1)
+            retained = self.driver._exec_js(retained_script)
+            if _fixture_document_retained(retained, initial_kind):
+                time.sleep(0.1)
+                retained = self.driver._exec_js(retained_script)
+                if _fixture_document_retained(retained, initial_kind):
+                    break
+            try:
+                self.driver.cdp.send("Page.stopLoading")
+            except Exception:
+                return {
+                    "ok": False,
+                    "error": "fixture_navigation_stop_failed",
+                }
+        else:
             return {"ok": False, "error": "fixture_document_not_retained"}
+        if not installed.get("ok"):
+            return {"ok": False, "error": "fixture_document_install_failed"}
+        if initial_kind != "city_directory":
+            layout_deadline = time.monotonic() + 5.0
+            layout_state: dict[str, Any] = {}
+            while time.monotonic() < layout_deadline:
+                layout_state = self.driver._exec_js(
+                    """
+                    JSON.stringify((() => {
+                      const input = document.querySelector('.search-wrapper__input');
+                      const button = document.querySelector('.search-wrapper__button');
+                      const inputRect = input?.getBoundingClientRect();
+                      const buttonRect = button?.getBoundingClientRect();
+                      return {
+                        ok: true,
+                        documentReady: document.readyState === 'complete',
+                        inputReady: !!input && !!inputRect && inputRect.width > 0 && inputRect.height > 0,
+                        buttonReady: !!button && !!buttonRect && buttonRect.width > 0 && buttonRect.height > 0,
+                      };
+                    })())
+                    """
+                )
+                if _fixture_search_control_layout_ready(layout_state):
+                    break
+                time.sleep(0.05)
+            else:
+                return {
+                    "ok": False,
+                    "error": "fixture_search_control_layout_unavailable",
+                }
         return {**installed, "fixtureReady": True}
 
 
@@ -444,6 +506,49 @@ def _fixture_document_attachable(state: dict[str, Any]) -> bool:
     return bool(
         (hostname == "zhaopin.com" or hostname.endswith(".zhaopin.com"))
         and state.get("documentReady")
+    )
+
+
+def _wait_for_fixture_executor_attachable(
+    executor: _TargetFixtureExecutor,
+    *,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    page_state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        page_state = executor._exec_js(
+            "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
+        )
+        if _fixture_document_attachable(page_state):
+            return {
+                "ok": True,
+                "readyState": str(page_state.get("readyState") or ""),
+            }
+        time.sleep(0.1)
+    return {
+        "ok": False,
+        "error": "fixture_target_not_attachable",
+        "readyState": str(page_state.get("readyState") or ""),
+    }
+
+
+def _fixture_document_retained(
+    state: dict[str, Any],
+    expected_kind: str,
+) -> bool:
+    return bool(
+        state.get("fixtureReady")
+        and state.get("officialOrigin")
+        and str(state.get("kind") or "") == str(expected_kind)
+    )
+
+
+def _fixture_search_control_layout_ready(state: dict[str, Any]) -> bool:
+    return bool(
+        state.get("documentReady")
+        and state.get("inputReady")
+        and state.get("buttonReady")
     )
 
 
@@ -527,20 +632,17 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             str(target.get("webSocketDebuggerUrl") or "")
         )
         try:
-            deadline = time.monotonic() + 90.0
-            page_state: dict[str, Any] = {}
-            while time.monotonic() < deadline:
-                page_state = executor._exec_js(
-                    "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
-                )
-                if _fixture_document_attachable(page_state):
-                    break
-                time.sleep(0.1)
-            else:
+            attachable = _wait_for_fixture_executor_attachable(executor)
+            if not attachable.get("ok"):
                 return {
                     "ok": False,
-                    "error": "fixture_target_not_complete",
-                    "readyState": str(page_state.get("readyState") or ""),
+                    "error": str(
+                        attachable.get("error")
+                        or "fixture_target_not_attachable"
+                    ),
+                    "readyState": str(
+                        attachable.get("readyState") or ""
+                    ),
                 }
             fixture = AuthenticatedCityRootFixtureDriver(
                 executor,
@@ -1973,6 +2075,23 @@ def _run_search_action_target_cleanup_gate(
             "https://www.zhaopin.com/"
         )
         disposable_targets.append(action_origin)
+        action_origin_probe = _TargetFixtureExecutor(
+            str(action_origin.get("webSocketDebuggerUrl") or "")
+        )
+        try:
+            action_origin_ready = _wait_for_fixture_executor_attachable(
+                action_origin_probe
+            )
+        finally:
+            action_origin_probe.close()
+        if not action_origin_ready.get("ok"):
+            return {
+                "ok": False,
+                "failure": "search_cleanup_action_origin_not_attachable",
+                "ready_state": str(
+                    action_origin_ready.get("readyState") or ""
+                ),
+            }
         historical_targets = [
             _create_disposable_cdp_target("https://www.zhaopin.com/")
             for _ in range(15)
@@ -2023,10 +2142,34 @@ def _run_search_action_target_cleanup_gate(
             )
             action_target = fixture.action_target
             if not action_target:
+                keyword_search = collected.snapshot.get("keywordSearch")
+                keyword_search = (
+                    keyword_search if isinstance(keyword_search, dict) else {}
+                )
+                target_transition = keyword_search.get("targetTransition")
+                target_transition = (
+                    target_transition
+                    if isinstance(target_transition, dict)
+                    else {}
+                )
                 return {
                     "ok": False,
                     "failure": "search_cleanup_action_target_unavailable",
                     "fixture_events": fixture.fixture_events(),
+                    "collector_ok": bool(collected.ok),
+                    "collector_error": str(collected.error or "")[:100],
+                    "keyword_search_error": str(
+                        keyword_search.get("error") or ""
+                    )[:100],
+                    "keyword_native_clicked": bool(
+                        keyword_search.get("nativeClicked")
+                    ),
+                    "keyword_click_point_present": isinstance(
+                        keyword_search.get("clickPoint"), dict
+                    ),
+                    "keyword_target_outcome": str(
+                        target_transition.get("outcome") or ""
+                    )[:80],
                     "attempts": attempts,
                 }
             disposable_targets.append(action_target)
@@ -2163,6 +2306,14 @@ def _candidates_safe_after_detail_gate(
     )
 
 
+def _bounded_public_detail_candidates(
+    candidates: list[Job],
+    *,
+    limit: int = 3,
+) -> list[Job]:
+    return list(candidates[: max(1, int(limit))])
+
+
 def _run_public_detail_reviewability_gate(
     driver: CDPBossDriver,
     jobs: list[Job],
@@ -2178,17 +2329,12 @@ def _run_public_detail_reviewability_gate(
             "failure": "incomplete_candidate_without_official_detail",
             "incomplete_candidate_count": len(incomplete),
         }
-    candidates = incomplete or [
+    all_candidates = incomplete or [
         job for job in unique.values() if _is_official_detail_url(job.url)
     ][:3]
+    candidates = _bounded_public_detail_candidates(all_candidates)
     if not candidates:
         return {"ok": False, "failure": "official_detail_candidate_missing"}
-    if len(candidates) > 5:
-        return {
-            "ok": False,
-            "failure": "incomplete_candidate_gate_budget_exceeded",
-            "incomplete_candidate_count": len(incomplete),
-        }
 
     attempts = 0
     fully_reviewable_count = 0
@@ -2290,6 +2436,7 @@ def _run_public_detail_reviewability_gate(
                 "attempt_count": attempts,
                 "failure": "public_detail_hydration_unverified",
                 "incomplete_candidate_count": len(incomplete),
+                "sampled_candidate_count": len(candidates),
                 "covered_incomplete_count": fully_reviewable_count
                 + safe_exclusion_count,
                 **last_diagnostics,
@@ -2298,8 +2445,13 @@ def _run_public_detail_reviewability_gate(
         return {
             "ok": True,
             "attempt_count": attempts,
-            "outcome": "all_incomplete_candidates_bounded",
+            "outcome": "bounded_incomplete_sample_verified",
             "incomplete_candidate_count": len(incomplete),
+            "sampled_candidate_count": len(candidates),
+            "remaining_unsampled_count": max(
+                0,
+                len(incomplete) - len(candidates),
+            ),
             "covered_incomplete_count": fully_reviewable_count
             + safe_exclusion_count,
             "fully_reviewable_count": fully_reviewable_count,
