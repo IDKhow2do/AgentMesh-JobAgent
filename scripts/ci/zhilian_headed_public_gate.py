@@ -509,6 +509,30 @@ def _fixture_document_attachable(state: dict[str, Any]) -> bool:
     )
 
 
+def _wait_for_fixture_executor_attachable(
+    executor: _TargetFixtureExecutor,
+    *,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    page_state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        page_state = executor._exec_js(
+            "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
+        )
+        if _fixture_document_attachable(page_state):
+            return {
+                "ok": True,
+                "readyState": str(page_state.get("readyState") or ""),
+            }
+        time.sleep(0.1)
+    return {
+        "ok": False,
+        "error": "fixture_target_not_attachable",
+        "readyState": str(page_state.get("readyState") or ""),
+    }
+
+
 def _fixture_document_retained(
     state: dict[str, Any],
     expected_kind: str,
@@ -608,20 +632,17 @@ class ManagedMultiTargetCityRootFixtureDriver(AuthenticatedCityRootFixtureDriver
             str(target.get("webSocketDebuggerUrl") or "")
         )
         try:
-            deadline = time.monotonic() + 90.0
-            page_state: dict[str, Any] = {}
-            while time.monotonic() < deadline:
-                page_state = executor._exec_js(
-                    "JSON.stringify({hostname:location.hostname,readyState:document.readyState,documentReady:!!document.documentElement})"
-                )
-                if _fixture_document_attachable(page_state):
-                    break
-                time.sleep(0.1)
-            else:
+            attachable = _wait_for_fixture_executor_attachable(executor)
+            if not attachable.get("ok"):
                 return {
                     "ok": False,
-                    "error": "fixture_target_not_complete",
-                    "readyState": str(page_state.get("readyState") or ""),
+                    "error": str(
+                        attachable.get("error")
+                        or "fixture_target_not_attachable"
+                    ),
+                    "readyState": str(
+                        attachable.get("readyState") or ""
+                    ),
                 }
             fixture = AuthenticatedCityRootFixtureDriver(
                 executor,
@@ -2054,6 +2075,23 @@ def _run_search_action_target_cleanup_gate(
             "https://www.zhaopin.com/"
         )
         disposable_targets.append(action_origin)
+        action_origin_probe = _TargetFixtureExecutor(
+            str(action_origin.get("webSocketDebuggerUrl") or "")
+        )
+        try:
+            action_origin_ready = _wait_for_fixture_executor_attachable(
+                action_origin_probe
+            )
+        finally:
+            action_origin_probe.close()
+        if not action_origin_ready.get("ok"):
+            return {
+                "ok": False,
+                "failure": "search_cleanup_action_origin_not_attachable",
+                "ready_state": str(
+                    action_origin_ready.get("readyState") or ""
+                ),
+            }
         historical_targets = [
             _create_disposable_cdp_target("https://www.zhaopin.com/")
             for _ in range(15)

@@ -11,6 +11,7 @@ from scripts.ci.zhilian_headed_public_gate import (
     _fixture_search_action_target_opened,
     _safe_collector_gate_payload,
     _safe_reviewability_summary,
+    _wait_for_fixture_executor_attachable,
 )
 
 
@@ -78,6 +79,35 @@ def test_public_detail_gate_uses_a_bounded_sample_without_rejecting_large_sets()
 
     assert len(sampled) == 3
     assert sampled == candidates[:3]
+
+
+def test_fixture_attachable_wait_is_bounded_and_reports_ready_state():
+    class Executor:
+        def __init__(self):
+            self.calls = 0
+
+        def _exec_js(self, _script):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "hostname": "",
+                    "readyState": "loading",
+                    "documentReady": True,
+                }
+            return {
+                "hostname": "www.zhaopin.com",
+                "readyState": "complete",
+                "documentReady": True,
+            }
+
+    executor = Executor()
+    result = _wait_for_fixture_executor_attachable(
+        executor,
+        timeout_seconds=1,
+    )
+
+    assert result == {"ok": True, "readyState": "complete"}
+    assert executor.calls == 2
 
 
 def test_public_login_wall_preserves_route_gate_and_names_unverified_boundary():
