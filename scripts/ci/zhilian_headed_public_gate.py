@@ -1579,6 +1579,22 @@ def _run_authenticated_root_production_gate(
             page_delay=0,
         )
         events = fixture.fixture_events()
+        keyword_search = collected.snapshot.get("keywordSearch")
+        keyword_search = (
+            keyword_search if isinstance(keyword_search, dict) else {}
+        )
+        search_transition = keyword_search.get("searchTransition")
+        search_transition = (
+            search_transition if isinstance(search_transition, dict) else {}
+        )
+        city_discovery = search_transition.get("cityDiscovery")
+        city_discovery = (
+            city_discovery if isinstance(city_discovery, dict) else {}
+        )
+        target_receipt = keyword_search.get("targetTransition")
+        target_receipt = (
+            target_receipt if isinstance(target_receipt, dict) else {}
+        )
         final_transition = fixture._exec_js(
             build_zhilian_search_transition_script(QUERY, target_city)
         )
@@ -1632,6 +1648,22 @@ def _run_authenticated_root_production_gate(
                 "page_two_attempted": fixture.pagination_attempts > 0,
                 "isolated_target_identity": bool(disposable_target_id),
                 "entry_fixture_installed": bool(entry_installed.get("ok")),
+                "fixture_events": events,
+                "keyword_search_error": str(
+                    keyword_search.get("error") or ""
+                )[:100],
+                "keyword_target_outcome": str(
+                    target_receipt.get("outcome") or ""
+                )[:80],
+                "keyword_target_cleanup_verified": bool(
+                    target_receipt.get("targetCleanupVerified", True)
+                ),
+                "city_discovery_action": str(
+                    city_discovery.get("action") or ""
+                )[:80],
+                "city_discovery_error": str(
+                    city_discovery.get("error") or ""
+                )[:100],
             }
         )
         driver.cdp.connect(str(original_target["webSocketDebuggerUrl"]))
