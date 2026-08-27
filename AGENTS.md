@@ -73,6 +73,18 @@ This is the public Job Agent CLI repository in the AgentMesh ecosystem. It conta
 - User resumes, cookies, local profiles, API Keys, and audit logs are sensitive.
 - Real browser actions are serial. Never run shared Chrome sessions or shared audit/state writes concurrently.
 
+## Collaboration Rules (added 2026-08-27 per Ferdinand)
+
+- Multiple agents (codex, zcode) work here concurrently. Branch naming:
+  `<agent>/<short-description>-<YYYYMMDD>`; always branch from the latest
+  `origin/main`; never force-push `main`.
+- **Worktree/branch merge-back**: if work developed in a worktree or branch
+  ships anywhere (release, docs users install, skills users download), the
+  same session that shipped it must land it on `main` and push. Shipped
+  artifacts that `main` does not contain are a P0 process violation.
+  Remove worktree registrations once merged; docs/review-only branches must
+  be resolved (merge or delete) within one week.
+
 ## Current Focus
 
 This repository should remain a clean public distribution surface: installable CLI, public docs, public skills, tests, and user-safe onboarding. Internal R&D decisions belong elsewhere.
