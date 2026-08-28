@@ -2,6 +2,19 @@
 
 All notable public Job Agent client changes are documented here.
 
+## [0.5.40] - 2026-08-28
+
+### Added
+
+- Return the Job Agent web workbench URL during first-time API Key setup so a new user's Agent can introduce the persistent resume, interview, application, offer and negotiation workspace before job-platform work begins.
+- Notify existing account-bound installations about the workbench once on their next successful verified command. The machine-readable announcement is non-blocking and keeps the original workflow continuation unchanged.
+- Persist the once-only delivery marker inside each account's local namespace so managed upgrades and account switching neither repeat the notice nor leak it across accounts.
+
+### Compatibility
+
+- Existing API Keys, managed Chrome profiles, recruiting-site sessions, resume profiles, active rounds, signed decisions, delivery previews, authorizations and audits remain unchanged. The announcement does not create a round, consume credits, open a browser or perform a recruiting action.
+- Failed or unverified commands do not consume the announcement. New installations already receiving the first-run workbench handoff do not receive a duplicate launch notice.
+
 ## [0.5.39] - 2026-08-23
 
 ### Fixed

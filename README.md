@@ -55,6 +55,15 @@ jobagent resume analyze --file ~/Downloads/resume.pdf --target-cities <city1> [c
 jobagent round start
 ```
 
+`jobagent init` returns `workbench_url=https://agentmesh360.com/workbench/` so a
+new user's Agent can introduce the Job Agent web workbench immediately. Existing
+installations receive the same launch information once after their first
+successful account-verified command. When top-level `announcements` contains
+`id=jobagent_workbench_launch_202608`, the host Agent should show a non-blocking
+information card when available, or a short localized message with the URL.
+It must then continue the original `next_suggested` command without asking for
+acknowledgement or repeating the announcement later.
+
 The Agent must not copy a target role from documentation examples or infer that
 the user already chose one. When the user explicitly states a target role, pass
 that exact intent directly:

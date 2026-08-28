@@ -176,7 +176,7 @@ wheels = [
 
 [[package]]
 name = "job-agent"
-version = "0.5.21"
+version = "0.5.40"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
