@@ -20,6 +20,7 @@ _ACCOUNT_REF = re.compile(r"^acct_[A-Za-z0-9_-]{8,}$")
 _ACCOUNT_OWNED_PATHS = (
     "profile.json",
     "support_state.json",
+    "product_announcements.json",
     "current_round.json",
     "pending_interaction.json",
     "rounds",

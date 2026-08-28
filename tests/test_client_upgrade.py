@@ -27,6 +27,14 @@ def _seed_preserved_state(app_dir: Path) -> None:
     _write_json(state / "audit_log.json", [{"job_id": "boss-1", "delivered": True}])
     _write_json(state / "liepin_audit_log.json", [{"job_id": "liepin-1"}])
     _write_json(state / "support_state.json", {"star_prompt_shown": True})
+    _write_json(
+        state / "product_announcements.json",
+        {
+            "schema_version": 1,
+            "account_ref": "acct_existing_user",
+            "delivered": {"jobagent_workbench_launch_202608": {}},
+        },
+    )
     _write_json(state / "discoveries" / "boss-old.json", {"manifest": {"signed": True}})
 
 
@@ -111,6 +119,7 @@ def test_old_install_clears_only_ephemeral_state_and_migrates_round(tmp_path):
     assert (state / "audit_log.json").exists()
     assert (state / "liepin_audit_log.json").exists()
     assert (state / "support_state.json").exists()
+    assert (state / "product_announcements.json").exists()
     assert (state / "discoveries" / "boss-old.json").exists()
     migrated_round = json.loads((state / "current_round.json").read_text(encoding="utf-8"))
     assert migrated_round["schema_version"] == 3

@@ -277,6 +277,10 @@ def test_init_verifies_new_api_key_before_saving(monkeypatch):
         "jobagent.infra.account_state.ensure_account_state",
         lambda _account, **_kwargs: {"status": "ready", "ready": True},
     )
+    monkeypatch.setattr(
+        "jobagent.infra.product_announcements.mark_workbench_launch_announced",
+        lambda: calls.append(("mark_workbench", None)),
+    )
     args = build_parser().parse_args(["init", "--key", "jobagent_live_new"])
 
     result = cli._init(args)
@@ -284,9 +288,82 @@ def test_init_verifies_new_api_key_before_saving(monkeypatch):
     assert calls == [
         ("verify", "jobagent_live_new"),
         ("save", "jobagent_live_new"),
+        ("mark_workbench", None),
     ]
     assert result["account"]["account"]["id"] == 1
     assert result["workbench_url"] == "https://agentmesh360.com/workbench/"
+
+
+def test_existing_user_receives_non_blocking_workbench_announcement_once(
+    monkeypatch, capsys
+):
+    from jobagent import cli
+
+    announcement = {
+        "schema": "agentmesh360.product_announcement.v1",
+        "id": "jobagent_workbench_launch_202608",
+        "kind": "product_launch",
+        "product": "jobagent",
+        "blocking": False,
+        "requires_user_action": False,
+    }
+    pending = [announcement, None]
+    monkeypatch.setattr(cli, "_maybe_update", lambda _args: None)
+    monkeypatch.setattr(cli, "_prepare_client_upgrade", lambda _args: None)
+    monkeypatch.setattr(
+        cli,
+        "_verify_state_owner_for_command",
+        lambda _args: {"mode": "online", "offline": False, "stale": False},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_dispatch",
+        lambda _args: {
+            "ok": True,
+            "workflow": {"current_platform": "boss"},
+            "next_suggested": "jobagent boss login --check",
+        },
+    )
+    monkeypatch.setattr(
+        "jobagent.infra.product_announcements.claim_workbench_launch_announcement",
+        lambda: pending.pop(0),
+    )
+    monkeypatch.setattr("sys.argv", ["jobagent", "round", "status"])
+
+    cli.main()
+    first = json.loads(capsys.readouterr().out)
+    cli.main()
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["announcements"] == [announcement]
+    assert first["next_suggested"] == "jobagent boss login --check"
+    assert "announcements" not in second
+    assert second["next_suggested"] == "jobagent boss login --check"
+
+
+def test_failed_or_unverified_command_does_not_consume_workbench_announcement(
+    monkeypatch,
+):
+    from jobagent import cli
+
+    calls = []
+    monkeypatch.setattr(
+        "jobagent.infra.product_announcements.claim_workbench_launch_announcement",
+        lambda: calls.append("claim") or {"id": "workbench"},
+    )
+
+    failed = cli._attach_pending_product_announcements(
+        {"ok": False, "error": "cloud_unavailable"},
+        account_verified=True,
+    )
+    unverified = cli._attach_pending_product_announcements(
+        {"ok": True},
+        account_verified=False,
+    )
+
+    assert failed == {"ok": False, "error": "cloud_unavailable"}
+    assert unverified == {"ok": True}
+    assert calls == []
 
 
 def test_upgrade_check_reports_legacy_key_and_profile_together(tmp_path, monkeypatch):
@@ -430,7 +507,7 @@ def test_doctor_env_reports_healthy_environment_when_credits_are_insufficient(
     assert result["cloud_access"]["usable"] is False
     assert result["workflow"]["ready"] is False
     assert result["api_key_action"] is None
-    assert result["next_suggested"] == "https://agentmesh360.com/app/#pricing"
+    assert result["next_suggested"] == "https://agentmesh360.com/app/?lang=zh-CN#pricing"
 
 
 def test_round_skip_requires_explicit_confirmation(monkeypatch):

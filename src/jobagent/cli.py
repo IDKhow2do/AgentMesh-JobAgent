@@ -251,6 +251,9 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
     }
     if account is not None:
         from jobagent.infra.account_state import AccountStateError, ensure_account_state
+        from jobagent.infra.product_announcements import (
+            mark_workbench_launch_announced,
+        )
 
         payload["account"] = account
         payload["cloud_access"] = _cloud_access(account, profile_exists=False)
@@ -264,6 +267,7 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
             payload["credentials_path"] = str(path)
             payload["account"] = account
             return payload
+        mark_workbench_launch_announced()
     access = payload.get("cloud_access") or {}
     payload["next_suggested"] = (
         "jobagent resume analyze --file <resume>"
@@ -305,6 +309,26 @@ def _account(args: argparse.Namespace) -> dict[str, Any]:
         new_state=args.new_state,
         api_key=api_key,
     )
+
+
+def _attach_pending_product_announcements(
+    result: dict[str, Any],
+    *,
+    account_verified: bool,
+) -> dict[str, Any]:
+    if not account_verified or result.get("ok") is False:
+        return result
+    from jobagent.infra.product_announcements import (
+        claim_workbench_launch_announcement,
+    )
+
+    announcement = claim_workbench_launch_announcement()
+    if not announcement:
+        return result
+    existing = result.get("announcements")
+    announcements = list(existing) if isinstance(existing, list) else []
+    announcements.append(announcement)
+    return {**result, "announcements": announcements}
 
 
 def _offline_local_control_allowed(args: argparse.Namespace) -> bool:
@@ -1297,6 +1321,10 @@ def main() -> None:
                 "stale": True,
                 "account_verification": account_verification,
             }
+        result = _attach_pending_product_announcements(
+            result,
+            account_verified=account_verification is not None,
+        )
         _print(result)
         if result.get("ok") is False:
             raise SystemExit(2)

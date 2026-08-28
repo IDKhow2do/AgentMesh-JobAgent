@@ -52,6 +52,10 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
         '{"interaction_id":"interaction-a"}',
         encoding="utf-8",
     )
+    (state / "product_announcements.json").write_text(
+        '{"account_ref":"acct_account_a","delivered":{"workbench":{}}}',
+        encoding="utf-8",
+    )
     (state / "archive").mkdir()
     (state / "archive" / "old-decision.json").write_text(
         '{"owner":"a"}', encoding="utf-8"
@@ -67,6 +71,7 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
     assert switched["browser_profile_preserved"] is True
     assert not (state / "profile.json").exists()
     assert not (state / "pending_interaction.json").exists()
+    assert not (state / "product_announcements.json").exists()
     assert not (state / "archive").exists()
     assert not (state / "browser_session.json").exists()
     (state / "profile.json").write_text('{"owner":"b"}', encoding="utf-8")
@@ -79,6 +84,7 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
 
     assert "profile.json" in restored["restored"]
     assert "pending_interaction.json" in restored["restored"]
+    assert "product_announcements.json" in restored["restored"]
     assert "archive" in restored["restored"]
     assert json.loads((state / "profile.json").read_text(encoding="utf-8"))["owner"] == "a"
     assert json.loads(
@@ -87,6 +93,9 @@ def test_switch_preserves_and_restores_each_accounts_state(tmp_path):
     assert json.loads(
         (state / "pending_interaction.json").read_text(encoding="utf-8")
     )["interaction_id"] == "interaction-a"
+    assert json.loads(
+        (state / "product_announcements.json").read_text(encoding="utf-8")
+    )["account_ref"] == "acct_account_a"
     assert state_owner_status("acct_account_a", app_dir=tmp_path)["ready"] is True
     saved_b = tmp_path / "accounts" / "acct_account_b" / "state" / "profile.json"
     assert json.loads(saved_b.read_text(encoding="utf-8"))["owner"] == "b"
