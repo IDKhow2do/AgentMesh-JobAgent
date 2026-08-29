@@ -1,4 +1,12 @@
-from jobagent.official import BrowserLimits, build_official_queue, canonical_job_key, claim_items, detect_ats, update_item
+from jobagent.official import (
+    BrowserLimits,
+    authorize_final_review,
+    build_official_queue,
+    claim_items,
+    detect_ats,
+    review_is_valid,
+    update_item,
+)
 
 
 def test_detect_known_ats_hosts():
@@ -44,13 +52,22 @@ def test_form_claim_respects_two_active_forms():
     assert len(claim_items(queue, kind="form")) == 0
 
 
-def test_submit_is_serial():
+def test_submit_requires_review_then_is_serial():
     jobs = [
         {"platform": "boss", "company": "A", "title": "AI", "city": "上海", "url": "https://boss/a", "decision": "selected"},
         {"platform": "boss", "company": "B", "title": "AI", "city": "上海", "url": "https://boss/b", "decision": "selected"},
     ]
     queue = build_official_queue(jobs)
     first, second = queue["items"]
+    try:
+        update_item(queue, first["canonical_job_key"], "submitting")
+    except ValueError as exc:
+        assert "final_user_review_required" in str(exc)
+    else:
+        raise AssertionError("submit should be blocked before final review")
+
+    authorize_final_review(queue)
+    assert review_is_valid(queue)
     update_item(queue, first["canonical_job_key"], "submitting")
     try:
         update_item(queue, second["canonical_job_key"], "submitting")
@@ -58,6 +75,15 @@ def test_submit_is_serial():
         assert "concurrency is 1" in str(exc)
     else:
         raise AssertionError("second simultaneous submit should be rejected")
+
+
+def test_queue_change_invalidates_review():
+    jobs = [{"platform": "boss", "company": "A", "title": "AI", "city": "上海", "url": "https://boss/a", "decision": "selected"}]
+    queue = build_official_queue(jobs)
+    authorize_final_review(queue)
+    assert review_is_valid(queue)
+    queue["items"][0]["title"] = "Different Role"
+    assert not review_is_valid(queue)
 
 
 def test_browser_limits_reject_parallel_submit_configuration():
