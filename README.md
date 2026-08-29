@@ -1,319 +1,238 @@
-# AgentMesh360 Job Agent
+# Codex Job Agent — Official First
 
-**Official website:** [jobagent.agentmesh360.com](https://jobagent.agentmesh360.com/)
+> A local-first job-search toolchain for **Codex**: discover jobs across Chinese recruiting platforms, prefer verified company Careers/ATS applications, keep personal data local, and require the user to approve one final plan before anything is submitted.
 
-AgentMesh360 Job Agent is an Agent-native job-search product. Its open-source CLI connects recruiting platforms through the user's own browser session, while AgentMesh360 cloud intelligence provides the official candidate profile, job decisions and personalized communication.
+This repository is a customized fork of [AgentMesh-JobAgent](https://github.com/jiyangnan/AgentMesh-JobAgent). It preserves the upstream browser/platform implementations under the Apache-2.0 license, but the **default workflow in this fork does not require AgentMesh360, cloud credits, or another LLM API key**.
 
-The cloud turns the resume into a recruiter-side 36-dimension candidate profile, creates profile-driven search plans, classifies every deduplicated job into signed `selected / review / rejected` results with reasons and risks, and generates evidence-grounded personalized greetings where the platform supports them. The CLI verifies those official results before delivery.
+## What the fork is for
 
-It supports four independent recruiting-platform workflows:
-
-1. Boss直聘
-2. 猎聘
-3. 智联招聘
-4. 前程无忧 / 51Job
-
-Each platform is isolated from the others. A page change on one platform does not disable the remaining workflows.
-
-## Product Flow
+You should mostly talk to Codex instead of operating scripts yourself:
 
 ```text
-Resume profile
-  -> Boss Discover / signed review / delivery preview / user confirmation / delivery / audit
-  -> Liepin Discover / signed review / delivery preview / user confirmation / delivery / audit
-  -> Zhilian Discover / signed review / delivery preview / user confirmation / delivery / audit
-  -> 51Job Discover / signed review / delivery preview / user confirmation / delivery / audit
-  -> completed round
+You
+ ↓
+Codex — career knowledge + reasoning
+ ↓
+Job tooling
+ ├─ BOSS直聘
+ ├─ 猎聘
+ ├─ 智联招聘
+ ├─ 51Job
+ └─ Company Careers / ATS
+      ├─ Greenhouse
+      ├─ Lever
+      ├─ Ashby
+      ├─ Workday
+      ├─ SmartRecruiters
+      ├─ iCIMS / Jobvite
+      ├─ Oracle / SAP
+      ├─ Moka / 北森
+      └─ generic official forms via Codex Browser
 ```
 
-One completed Discover covers one platform, processes up to 100 deduplicated candidate jobs and costs a fixed 10 credits. Cloud resume analysis costs 5 credits. The signed cloud response remains authoritative for charges and refunds; pre-decision browser failures are not charged, cloud-decision failures are refunded, and retrying the same task does not charge twice.
+The recruiting platforms are useful for discovery, fallback and recruiter communication. When Codex can reliably find the same requisition on the employer's official Careers/ATS site, the official route is preferred for the resume submission.
 
-Job Agent uses an AgentMesh360 universal API Key. Registration and API Key creation are free in the [AgentMesh360 account center](https://agentmesh360.com/app/). The open-source client is free; AgentMesh360 cloud capabilities use credits, and new accounts start with zero cloud credits. The optional monthly pass costs CNY 29, lasts 30 days, and includes 1,000 credits shared across AgentMesh360 cloud products. It does not renew automatically, and unused credits expire with the pass. Previously issued signup-trial credits remain usable until their original expiry.
+## Core behavior
 
-## Install
+- **Codex is the AI layer.** No separate OpenAI/DeepSeek/Claude API integration is needed.
+- **Local personal data.** Resume, contact details, screening answers and career notes stay under ignored `career/private/` / `.jobagent-local/`.
+- **Conversational onboarding.** Codex reads your existing resume first, then asks only for missing/ambiguous information.
+- **Four recruiting platforms.** BOSS, 猎聘, 智联 and 51Job reuse the upstream browser collectors/delivery adapters.
+- **Official-first routing.** Verified company Careers/ATS postings are preferred for resume submission.
+- **Cross-channel dedupe.** Obvious copies become one canonical job while retaining source URLs.
+- **Incremental daily runs.** Previously seen/unchanged jobs are indexed; prior decisions can be reused only if both the JD fingerprint and your Career Profile are unchanged.
+- **Bounded browser load.** At most 4 open official tabs, 2 active application forms and 1 final submission.
+- **User-owned final review.** No platform send or official final Submit can happen without approval of the exact reviewed materials.
 
-macOS or Linux:
+## The normal UX
+
+After setup, your interaction should feel roughly like this:
+
+> **You:** 开始今天的求职。
+>
+> **Codex:** 今天发现 126 条，跨平台去重后 78 个；52 个是已见且未变化，复用 48 个缓存判断，需要重点分析 30 个。最终建议 11 个。我已经找到其中 7 个官网职位并准备好投递材料，4 个走招聘平台。这里是最终评审。
+>
+> **You:** 3、8 不投，5 换 FDE 版简历，其他可以。
+>
+> **Codex:** 已更新最终方案，请再次确认。
+>
+> **You:** 同意，开始投。
+
+Only after the last explicit approval are execution authorizations created.
+
+## Quick start for Codex
+
+Clone the repository and open it in Codex, then tell Codex:
+
+```text
+Read AGENTS.md and CODEX_LOCAL.md and take ownership of this repo as my local job-search agent. Do not use AgentMesh360 or any extra paid LLM API. Run the focused tests and doctor checks first. If my career/private profile is incomplete, read my resume and interview me conversationally, asking only for missing information. Then search and rank jobs, prefer verified official Careers/ATS submission, and use the platform adapters as discovery/fallback/recruiter communication. Use incremental cache so unchanged jobs are not re-analyzed unnecessarily. Before any real send or submit, generate FINAL_REVIEW.md and show me the whole plan. I am the final reviewer. Only after I explicitly approve the exact plan may you persist both review authorizations, dry-run, and execute. Keep browser limits at 4 tabs, 2 active forms and 1 final submit. Fix repository bugs you encounter, but do not weaken these safety gates.
+```
+
+Canonical instructions for Codex live in [`AGENTS.md`](./AGENTS.md) and [`CODEX_LOCAL.md`](./CODEX_LOCAL.md).
+
+## Install / test
+
+Python 3.11+ is required.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/install.sh | bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+pip install -e '.[dev]'
+pytest tests/test_local_cli.py tests/test_local_state.py tests/test_official.py
+jobagent-local doctor
+jobagent-local profile
 ```
 
-Windows PowerShell:
+The focused test suite is deterministic and does not perform real job applications.
 
-```powershell
-irm https://raw.githubusercontent.com/jiyangnan/AgentMesh-JobAgent/main/scripts/install.ps1 | iex
+## Career Onboarding
+
+Do not manually create a giant form. Put your existing resume under `career/private/` (or tell Codex where it is), then let Codex interview you.
+
+Recommended private knowledge base:
+
+```text
+career/private/
+├── MASTER_PROFILE.md
+├── TARGETS.md
+├── FILTERS.md
+├── PROJECTS.md
+├── STORIES.md
+├── ANSWERS.json
+├── ONBOARDING_STATE.json
+└── resumes/
 ```
 
-The official installer creates a managed installation. Starting with `0.3.0`, managed installations verify signed release policy and safely update between commands. When an update is found, the CLI emits machine-readable progress events for detection, start, completion and original-command continuation. These events appear only for a real update; an up-to-date client stays quiet. A developer source checkout is never changed automatically.
+These paths are gitignored. See [`docs/CAREER_ONBOARDING.md`](./docs/CAREER_ONBOARDING.md).
 
-## Set Up
+## Discovery and incremental review
+
+Example:
 
 ```bash
-jobagent init --key <your_api_key>
-jobagent doctor env
-jobagent resume analyze --file ~/Downloads/resume.pdf --target-cities <city1> [city2 ...]
-jobagent round start
+jobagent-local round \
+  --city 上海 \
+  --city 苏州 \
+  --keyword FDE \
+  --keyword 'AI应用工程师'
 ```
 
-`jobagent init` returns `workbench_url=https://agentmesh360.com/workbench/` so a
-new user's Agent can introduce the Job Agent web workbench immediately. Existing
-installations receive the same launch information once after their first
-successful account-verified command. When top-level `announcements` contains
-`id=jobagent_workbench_launch_202608`, the host Agent should show a non-blocking
-information card when available, or a short localized message with the URL.
-It must then continue the original `next_suggested` command without asking for
-acknowledgement or repeating the announcement later.
+A run writes:
 
-The Agent must not copy a target role from documentation examples or infer that
-the user already chose one. When the user explicitly states a target role, pass
-that exact intent directly:
+```text
+.jobagent-local/runs/<timestamp>/
+├── boss.json
+├── liepin.json
+├── zhilian.json
+├── 51job.json
+├── summary.json
+├── review-index.json
+└── review.json
+```
+
+`review-index.json` is intentionally compact. Codex should read it first and deep-read the full JD only for new, changed, uncertain or promising jobs.
+
+Persistent local state:
+
+```text
+.jobagent-local/
+├── job-index.json       # first/last seen + JD fingerprint
+├── decision-cache.json  # profile-aware reusable Codex decisions
+└── runs/
+```
+
+If your Career Profile changes, stale cached decisions are not blindly reused.
+
+## Official Careers / ATS
+
+After Codex verifies official URLs for selected jobs:
 
 ```bash
-jobagent resume analyze --file ~/Downloads/resume.pdf --target-role "<user-stated target role>" --target-cities <city1> [city2 ...]
-jobagent round start --target-role "<user-stated target role>"
+jobagent-official prepare --input <review.json>
 ```
 
-After an existing installation updates, Job Agent automatically clears rebuildable runtime caches and migrates compatible saved state before any platform command. API Keys, recruiting-site login cookies, resume profiles, audit history and user preferences are preserved. Run `jobagent upgrade-check`; if it returns `ok=false`, follow `next_suggested` and repeat the check before opening a platform.
-
-Local profiles, rounds, decisions and audits are bound to the opaque AgentMesh account behind the configured API Key. Existing pre-`0.4.0` state is never claimed silently. Confirm it once only when it belongs to the current account:
+Only verified official jobs are claimable as forms:
 
 ```bash
-jobagent account status
-jobagent account bind --confirm-legacy
+jobagent-official claim --queue <official-queue.json> --kind form
 ```
 
-When changing to a Key from another account, preserve the previous account's state and enter the new account namespace explicitly:
+Hard limits:
+
+| Resource | Limit |
+|---|---:|
+| Open official tabs | 4 |
+| Active form tabs | 2 |
+| Final submits | 1 |
+
+Unknown forms are handled by Codex Browser. The project does not try to bypass CAPTCHA, SMS, identity checks or other platform safeguards.
+
+See [`docs/OFFICIAL_FIRST.md`](./docs/OFFICIAL_FIRST.md).
+
+## The final review gate
+
+Codex creates a human-readable:
 
 ```bash
-jobagent init --key <new_api_key>
-jobagent account switch --new-state
+jobagent-local summary --input <review.json>
 ```
 
-The recruiting-site Chrome profile remains available; account-owned profiles, rounds, decisions and audits are saved and restored separately.
+which writes:
 
-Do not delete `~/.jobagent` or the Job Agent Chrome profile as a general upgrade fix. When the CLI returns `client_upgrade_required`, relay every reported conflict and use its recovery command instead.
+```text
+FINAL_REVIEW.md
+```
 
-The resume original and recruiting-site cookies remain on the user's machine. The profile and candidate job fields needed for Discover are sent to the Job Agent cloud service for decision.
+That page should contain every proposed job, score, important risk, channel, official/ATS route, resume variant, greeting and material screening answer.
 
-## Platform Commands
+You can approve all, exclude jobs or request edits. Any material change requires another review.
 
-Start a new round explicitly. Reading status never creates a round:
+After explicit approval, Codex records exact digests:
 
 ```bash
-jobagent round start
+jobagent-local review --input <review.json> --approve
+jobagent-official review --queue <official-queue.json> --approve
 ```
 
-At least one target city is required. A fresh `resume analyze` asks for cities
-before the cloud call when none were supplied or saved, preventing a second
-paid analysis just to repair an empty city. An older city-less profile receives
-a structured city-input interaction from `round start`; answer it with repeated
-`--target-city` arguments. When no target role was supplied, `round start` returns an AgentMesh360
-`interaction_required` payload with three stable choices: accept the suggested
-roles, keep them and append roles, or replace them. A host Agent must render a
-native prompt card when the card interface is callable in its current surface
-and mode. If that interface is unavailable, it displays the included
-numbered-text fallback without changing the choices. Do not describe this as
-the host lacking card support when only the current mode lacks the interface.
-For Codex, the response includes ready-to-call
-`host_presentations.adapters.codex.arguments` plus an `answer_mapping`; use it
-when `request_user_input` is callable in the current mode.
-
-The host continues every card or text answer through the interaction ID:
+Platform dry-run:
 
 ```bash
-jobagent interaction respond --interaction-id "<id>" --choice accept_suggested
-jobagent interaction respond --interaction-id "<id>" --choice append_roles
-jobagent interaction respond --interaction-id "<id>" --choice replace_roles
-jobagent interaction respond --interaction-id "<id>" --target-role "<user-stated target role>"
-jobagent interaction respond --interaction-id "<id>" --target-city "<city1>" --target-city "<city2>"
-jobagent round status
+jobagent-local apply --input <review.json>
 ```
 
-Append and replace choices return a second role-input interaction when no role
-was included in the first response. The CLI validates the interaction ID and
-profile digest, and repeated responses cannot create a duplicate round.
-
-Direct commands remain available when the user's message already contains the
-intent:
+Real platform action:
 
 ```bash
-jobagent round start --accept-suggested
-jobagent round start --target-role "<user-stated target role>"
-jobagent round start --accept-suggested --target-role "<user-stated target role>"
+jobagent-local apply --input <review.json> --send
 ```
 
-The confirmed target roles belong to this round and do not rewrite resume job
-history. If the user already named a target role, the host Agent passes it
-directly and does not ask again.
+`--send` is **not sufficient by itself**: it is rejected unless the current selected materials still match the user's final-review authorization.
 
-If the user explicitly refreshes the profile before any candidate or delivery
-evidence exists, Job Agent safely rebinds the active round and preserves a recent
-login receipt. Once discovery has progressed, profile replacement fails closed;
-the CLI never mixes old search results with a new city or resume.
+Official submission is likewise blocked at `submitting` / `submitted` unless the approved official materials still match their digest. Execution status itself does not invalidate approval, so a multi-job batch can progress serially; changing the URL, resume, answers or other reviewed material does.
 
-Every platform command returns a `workflow` object. A platform audit does not end the overall task while `workflow.continue_required=true`; the Agent must run `workflow.next_suggested` and continue to the next platform. The overall task is complete only when `workflow.workflow_complete=true`. A platform may be skipped for the current round only after the user explicitly approves:
+## Platform behavior
 
-```bash
-jobagent round skip --platform <platform> --confirm-skip
+- **BOSS:** structured discovery and verified personalized greeting flow.
+- **猎聘:** existing controlled application/resume delivery implementation.
+- **智联:** resume-submit flow; greeting is not equivalent to BOSS first-contact messaging.
+- **51Job:** resume-submit flow with delivery reconciliation.
+
+A failure on one platform should not stop independent discovery on the others.
+
+## Why keep the project if Codex can browse websites?
+
+Codex Browser is the general-purpose fallback. This repository supplies durable job-specific primitives that should not be re-invented every run: platform parsers, structured candidate records, delivery state machines, dedupe, auditability, bounded browser queues, incremental job history and final-review authorization.
+
+In short:
+
+```text
+Codex Browser = flexible general hand
+This repo      = job-search tooling + memory + guardrails
 ```
 
-Long Discover and delivery operations emit timestamped stage events and periodic heartbeats. Transient TLS, connection and gateway failures are retried automatically for idempotent Discover requests. If all bounded attempts fail, the CLI returns a stable machine code, `retryable=true`, `request_preserved=true` and one exact `next_suggested` command. Before a SearchPlan arrives, the persisted `request_id` is reused and `billing_status=not_charged`; after candidate collection, the same `discover_id` and local candidate set are reused without an additional charge. If a valid signed SearchPlan expires while that request is preserved, the CLI renews the plan against the same IDs with zero renewal charge and continues automatically. Signature, account or request-context mismatches are never treated as recoverable expiry. Do not create a replacement round, reopen the platform or recollect jobs.
+## Upstream and license
 
-If only cloud account verification is temporarily unreachable, `jobagent round status` and a user-confirmed `jobagent round skip ... --confirm-skip` can use key-bound local state. Their output is explicitly marked `offline=true` and `stale=true`; the next platform is available only after the skip command itself returns `ok=true`. Missing or mismatched local proof returns `offline_account_proof_required` or `offline_account_proof_mismatch` without exposing round state. Do not edit account files or delete `~/.jobagent` or its Chrome profile.
+This fork derives from [`jiyangnan/AgentMesh-JobAgent`](https://github.com/jiyangnan/AgentMesh-JobAgent) and retains its Apache License 2.0 attribution. The upstream AgentMesh360 cloud workflow still exists in the inherited source for compatibility/reference, but it is not the default workflow documented or requested by `AGENTS.md` in this fork.
 
-Audits are compact by default:
-
-```bash
-jobagent round audit
-jobagent round audit --failures-only
-jobagent round audit --platform liepin --details --recent 20
-```
-
-If an existing Job Agent browser appears slow, stuck or incorrectly classified as logged out, inspect it without launching Chrome or navigating away from the current page:
-
-```bash
-jobagent browser diagnose --platform boss
-```
-
-The diagnostic separates CDP reachability, tab presence, page readiness and login evidence. Follow its `next_suggested`; do not clear the Chrome profile as a first response.
-
-### Boss直聘
-
-```bash
-jobagent boss login
-jobagent boss discover
-jobagent boss greet preview
-jobagent interaction respond --interaction-id "<id>" --choice confirm_all
-jobagent boss greet send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
-jobagent boss audit
-```
-
-Boss uses a personalized greeting. `greet preview` shows the signed decision and greeting before any real send. A platform-generated default introduction may establish the conversation, but it does not count as delivery until the reviewed personalized greeting is also verified in the chat.
-
-### 猎聘
-
-```bash
-jobagent liepin login
-jobagent liepin discover
-jobagent liepin apply review
-jobagent interaction respond --interaction-id "<id>" --choice confirm_all
-jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
-jobagent liepin audit
-```
-
-猎聘目标城市未内置或旧数字码失效时，CLI 会先读取当前可信结果页中的官方城市链接；当前受管会话停在个人首页时，再有界打开官方通用搜索结果页寻找同一链接，最后才尝试城市目录。没有数字码也可以继续，但必须进入 `/city-<slug>/zhaopin/` 搜索路由，并确认相对前一页发生真实变化；页面元信息与标题、可见搜索框与 URL 查询词、真实结果或明确空结果必须同时一致。城市首页推荐不会进入候选，分页保持在已验证路由上；后续出现数字码也只有再次交叉验证后才缓存。失败时保留当前轮次、登录 Chrome、画像和未收费的 Discover 请求。
-
-用户确认待投清单后，猎聘发送阶段直接打开每个已审核、已签名的岗位详情 URL，不会再根据当前浏览器标签中的旧城市重建搜索，也不要求目标城市必须有数值 code。CLI 会在任何投递动作前确认浏览器实际进入了同一个签名详情路由；只有详情页明确出现登录墙时才提示登录。若详情验证失败，原 preview、authorization、round 和审计保持不变，额外 credits 为 0。
-
-### 智联招聘
-
-```bash
-jobagent zhilian login
-jobagent zhilian discover
-jobagent zhilian apply review
-jobagent interaction respond --interaction-id "<id>" --choice confirm_all
-jobagent zhilian apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
-jobagent zhilian audit
-```
-
-If a preserved Zhilian decision contains a generic link label or is missing company
-or salary, `jobagent zhilian apply review` repairs trusted fields from the signed job
-detail URLs. If one detail page still cannot expose reviewable core fields, that
-single candidate is safely excluded instead of blocking the repaired candidates.
-The cloud returns a replacement signature for the same Discover with zero additional
-credits, then the CLI shows the remaining complete preview and still waits for the
-user's delivery confirmation. Do not create a replacement round or Discover.
-
-智联结果页中的 `kw...` URL 片段是平台内部状态，不是云端生成的职位搜索词。Agent 必须以 CLI 返回的可读 `query`、错误码和 `next_suggested` 为准，不得把该片段重新用于搜索，也不得据此自行跳过智联。
-
-智联慢导航期间，`loading` 或登录/账号证据冲突只会返回 `unknown`，不会要求用户重复登录。首页常驻的通用“登录/注册”入口属于弱证据；当个人中心导航与简历管理、投递活动等独立账户证据一致时，CLI 会继续按已登录处理。可见凭据表单或登录验证界面属于强未登录证据；强登录与强账户证据并存时仍会安全停止。只有稳定的 `zhilian_login_required` 才需要用户介入。城市筛选控件改版或旧城市 seed 失效时，CLI 会继续读取只读快照，并用页面标题、可见城市和岗位卡片等独立证据验证新城市码；单独一个 `jl` URL 码不会被信任。证据不足时流程关闭且不收费。若返回 `zhilian_page_state_unknown`、`retryable=true` 和 `request_preserved=true`，直接执行精确的 `next_suggested`，原 `request_id` 会被复用。
-
-搜索结果页可能不展示首页的账户区域。CLI 只会在最近的登录验证仍绑定当前轮次与同一受管 Chrome、结果页已完成加载且存在多项搜索页证据时继续；可见登录表单或验证界面仍会立即停止。若页面已经就绪但当前岗位卡结构无法解析，会返回 `zhilian_job_cards_not_found`、安全诊断、`retryable=true` 与 `no_charge=true`，不会把 DOM 变化误报成用户掉线。签名 SearchPlan 的 `page_limit` 只是每个可读查询的上限：第一页明确无结果或页面证据确认没有下一页时不会强行采集第 2 页；一个查询为空只结束该查询，后续签名查询仍会继续。全部查询耗尽后返回 `no_candidates`、`search_exhausted=true` 与不收费状态，等待用户明确决定是否跳过智联，不再建议无限重复同一 Discover。URL 中的 `kw...` 始终只是不透明平台状态，不能替代可读查询验证。
-
-当智联只提供可读城市 slug、暂时没有数值城市码时，CLI 会先独立验证官方城市页，再从该页提交 SearchPlan 的原始可读查询。城市首页的推荐职位不会被当作关键词搜索结果；只有页面实际进入搜索路由，并再次验证可读 query 与城市后，岗位卡才会进入候选。后续若页面暴露数值城市码，CLI 会交叉验证后再缓存，而不是静态猜测。
-
-智联的搜索按钮、输入框 Enter 与表单提交会按一次性有界顺序尝试，每一步都必须观察到真实 URL、history、文档导航或结果状态变化才算成功。若页面接收了动作但没有变化，CLI 返回 `zhilian_search_input_not_committed`、`zhilian_search_submit_control_not_activated` 或 `zhilian_search_transition_not_observed`，并附带不含 Cookie、账号和页面正文的 `diagnostics.action_receipt`；这些错误不可自动重试，应执行返回的只读 `browser diagnose`。真正已经开始但尚未完成的导航继续使用原 `request_id`、不重复收费，并以独立的搜索导航恢复预算收敛，不会被改写为城市证据错误。
-
-### 前程无忧 / 51Job
-
-```bash
-jobagent 51job login
-jobagent 51job discover
-jobagent 51job apply review
-jobagent interaction respond --interaction-id "<id>" --choice confirm_all
-jobagent 51job apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
-jobagent 51job audit
-```
-
-猎聘 completes two verified actions for every selected job: it sends the resume associated with the user's platform account and then sends the signed personalized greeting generated from the resume profile and job. A platform-owned default introduction does not count as the personalized greeting. 智联招聘 and 51Job remain resume-submit workflows; on 51Job, the web chat entry is a mobile QR handoff.
-
-51Job verifies resume submission from the current `we.51job.com` surface rather than treating its separately authenticated legacy history domain as the source of truth. If an apply click was observed but final evidence remains insufficient, the CLI records an idempotent `delivery_indeterminate` outcome, continues the remaining authorized jobs and preserves the same preview, authorization, round and Discover. Run the exact returned `next_suggested` only while `retryable=true`: reconciliation is read-only and never clicks that job again. After two attempts or 24 hours, an item that still cannot converge becomes terminal `delivery_unresolved`; the send stage reports cumulative delivered, unavailable and unresolved outcomes and continues to audit without another cloud charge. Do not repeat Discover, clear the managed profile or classify unresolved as delivered or failed.
-
-Boss and 猎聘 require a non-empty signed personalized greeting of at most 100 characters before either preview or real delivery can proceed. Their success records include the delivered-message evidence. 智联招聘 and 51Job explicitly report personalized message delivery as unsupported instead of treating a review note as a sent message.
-
-## Review Rules
-
-- Before any real delivery, review emits `agentmesh360.delivery_preview v1` with every pending job and stops with a structured confirmation. The Agent must show the complete table, or the exact text fallback, and wait for the user's choice.
-- The stable choices are `confirm_all`, `exclude_jobs`, and `cancel_delivery`. Exclusions use displayed job numbers, regenerate the complete list and require another final confirmation. The Agent never chooses on the user's behalf.
-- Only an accepted interaction creates `agentmesh360.delivery_authorization v1`. Send requires both its bound `--preview-id` and `--authorization-id`; missing, stale, cross-platform, cross-round or changed-list authorization fails before a recruiting page opens.
-- An older review file may return `delivery_preview_required` or `delivery_confirmation_required`. The Agent reruns only the returned review command, shows the regenerated list and waits for a fresh confirmation; prior user promotions are preserved and no new Discover charge is created.
-- `review` jobs are excluded unless the user explicitly promotes their job IDs with `--promote ... --confirm-promote`.
-- `rejected` jobs are never automatically promoted.
-- Boss review excludes jobs already recorded as successfully delivered, and the send command checks the audit history again before opening any job page.
-- A raw send command is not user authorization. Confirmation is completed only through the pending `interaction_required` response.
-- Recruiting-platform browser actions run serially in the product order shown above.
-- `jobagent round start` is the only command that creates a new round. A completed round stays completed until that explicit command runs.
-- Never pre-login future platforms. Enter only the current platform, finish its `login -> discover -> review -> delivery preview -> delivery confirmation -> send -> audit` chain, and complete its audit before logging in to the next platform.
-- Completing one platform is not completing the round. The Agent must follow `workflow.next_suggested` until `workflow.workflow_complete=true`.
-- One send covers the complete reviewed selected list, up to 100 jobs. The default send limit is 100.
-- If the CLI reports login, CAPTCHA, verification or resume-selection intervention, the Agent must stop and ask the user to complete it.
-
-Example review override:
-
-```bash
-jobagent liepin apply review --promote <job-id> --confirm-promote
-jobagent interaction respond --interaction-id "<id>" --choice confirm_all
-jobagent liepin apply send --input <review_file> --preview-id <preview_id> --authorization-id <authorization_id>
-```
-
-## Signed Decisions
-
-The cloud service returns signed SearchPlans and DecisionManifests. The CLI verifies the signature, protocol version, platform, expiry, Discover ID and candidate digest before saving or using a decision. Invalid or expired decisions cannot enter the official send workflow.
-
-The local decision file contains the signed result needed for review and delivery. It does not persist the transient raw candidate pool.
-
-## Updates
-
-```bash
-jobagent update check
-```
-
-Official managed installations verify the Core ReleaseManifest, exact Git tag and commit, canonical archive SHA256 and smoke test. The installer fixes the canonical Git archive permissions so machine-level Git settings cannot change the digest. Updates are deferred while a Discover or send action is active and roll back if verification or installation fails. If an older installation reports `release artifact hash mismatch`, re-run the official installer once; it preserves Job Agent account state, browser sessions, profiles, rounds and audits.
-
-## Agent Instructions
-
-The canonical agent workflow is in [docs/agent-onboarding.md](docs/agent-onboarding.md). Distribution assets are available for:
-
-- [Claude Code](skills/claude-code/SKILL.md)
-- [OpenClaw / ClawHub](skills/openclaw-job-agent/SKILL.md)
-
-## Safety and Privacy
-
-- Never paste API Keys, browser cookies or complete resume text into issues.
-- Starting a job-search round authorizes discovery and signed review. Each platform's final delivery list still requires explicit user confirmation.
-- Never auto-promote `review` jobs or send `rejected` jobs.
-- Do not run shared browser actions in parallel.
-- Stop immediately when the CLI requests user intervention.
-- Use the platform normally and comply with its terms and applicable law.
-
-## Support
-
-- Product: [jobagent.agentmesh360.com](https://jobagent.agentmesh360.com/)
-- Account and API Key: [agentmesh360.com/app](https://agentmesh360.com/app/)
-- Public repository: [jiyangnan/AgentMesh-JobAgent](https://github.com/jiyangnan/AgentMesh-JobAgent)
-
-After the first successful real delivery, Job Agent displays one optional GitHub star prompt. It is shown once and never affects installation or use.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).
+See [`LICENSE`](./LICENSE) for license terms.
