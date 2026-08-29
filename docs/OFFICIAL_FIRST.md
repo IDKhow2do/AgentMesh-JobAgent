@@ -1,13 +1,13 @@
 # Official-first application workflow
 
-This fork treats recruiting platforms primarily as discovery and recruiter-communication sources. When the same job can be verified on the employer's official Careers/ATS site, the official route is preferred for resume submission.
+Recruiting platforms are primarily discovery, fallback and recruiter-communication sources. When the same selected job is reliably verified on the employer's own Careers/ATS system, prefer the official route for the resume submission.
 
-## Channel policy
+## Resolution policy
 
-1. Discover jobs from Boss / Liepin / Zhilian / 51Job.
-2. Codex deduplicates obvious cross-platform copies into one canonical job.
-3. For selected/review jobs, Codex searches for the employer's official Careers page or ATS posting.
-4. Codex writes these fields into `review.json` only after verification:
+1. Discover and initially filter jobs first; do not open official sites for obviously rejected jobs.
+2. Deduplicate obvious platform copies into one canonical job while preserving all source URLs.
+3. For selected/promising jobs, find the employer's exact Careers/ATS requisition.
+4. Only write an official match when evidence is strong:
 
 ```json
 {
@@ -22,33 +22,41 @@ This fork treats recruiting platforms primarily as discovery and recruiter-commu
 }
 ```
 
-5. Run `jobagent-official prepare --input <review.json>`.
-6. If confidence is >= 0.80 and evidence exists, `preferred_channel=official`; otherwise the recruiting platform remains the fallback channel.
-7. A canonical job is submitted only once. A successful official submission blocks duplicate resume submission on Boss/Liepin/Zhilian/51Job, while recruiter communication may still be used when appropriate.
+5. Run:
+
+```bash
+jobagent-official prepare --input <review.json>
+```
+
+At confidence >= 0.80 with evidence, the item becomes `preferred_channel=official`; otherwise it is represented as `fallback_platform` and is **not** claimed as an official browser form.
+
+A canonical job gets one resume submission. If official succeeds, suppress duplicate platform resume submission. A separately approved BOSS recruiter follow-up may still be useful and must be represented explicitly as `platform_action=message_only` in final review.
 
 ## ATS routing
 
-Known host patterns are classified as Greenhouse, Lever, Ashby, Workday, SmartRecruiters, iCIMS, Jobvite, Oracle/Taleo, SAP SuccessFactors, Moka, or Beisen. Unknown official forms are `generic_official` and should be handled by Codex Browser rather than guessed selectors.
+Known hosts are classified as Greenhouse, Lever, Ashby, Workday, SmartRecruiters, iCIMS, Jobvite, Oracle/Taleo, SAP SuccessFactors, Moka or Beisen. Unknown official forms remain `generic_official` and should be handled by Codex Browser instead of guessed selectors.
 
-The ATS label is a routing hint, not proof that automation is safe. CAPTCHA, SMS, identity checks, legal declarations, novel screening questions, or ambiguous form fields require user help.
+An ATS label is only a routing hint. CAPTCHA, SMS, identity checks, legal declarations, novel screening questions and ambiguous fields require user help where appropriate.
 
-## Browser queue and tab limits
+## Browser queue limits
 
-The queue has hard defaults:
+Hard defaults:
 
-- max open browser tabs: **4**
-- max simultaneous application/form tabs: **2**
-- max simultaneous final submissions: **1**
+```text
+max open tabs         = 4
+max active form tabs  = 2
+max final submits     = 1
+```
 
-Use:
+Claim form slots with:
 
 ```bash
 jobagent-official claim --queue <official-queue.json> --kind form
 ```
 
-Only claimed jobs may be opened as active application forms. Finish, park as `human_required`, or fail one before claiming more when the cap is reached.
+Only `preferred_channel=official` items with a verified `official_url` and `status=queued` can be claimed. Platform fallback items never consume official form slots.
 
-Final submission is always serial. Before clicking a final Submit/Apply button, mark the item `submitting`; the queue rejects a second simultaneous `submitting` item.
+Close/release a tab when an item is finished, failed, skipped or moved to fallback before claiming more. A job paused for user input can be `human_required`; avoid keeping many heavy ATS tabs alive when the question can be recorded and resumed later.
 
 ## State machine
 
@@ -67,14 +75,40 @@ or
   -> fallback_platform
 ```
 
-Use `jobagent-official update` after meaningful transitions. Close the browser tab once a job reaches `submitted`, `failed`, `skipped`, or `fallback_platform` unless it is intentionally kept for recruiter communication.
+Final submit is always serial. The queue rejects a second simultaneous `submitting` job.
 
-## Official resolver rules for Codex
+## Final-review authorization
 
-Do not assume the first search result is official. Prefer links reachable from the employer's verified corporate domain or an ATS posting clearly branded for that employer. Verify company, role/title, location, and JD similarity. If the evidence is weak, leave `official_url` unset and use the recruiting platform.
+Form research/filling may occur before final approval, but a final Submit/Apply cannot.
 
-Do not create a duplicate application merely because the official title differs slightly. Compare company + normalized title + city + JD. If it is probably the same requisition, keep one canonical record and preserve every source URL under `sources`.
+After the user has seen the complete consolidated `FINAL_REVIEW.md`, authorize the official subset:
 
-## Personal information
+```bash
+jobagent-official review --queue <official-queue.json> --approve
+```
 
-All candidate data is local only. The first Codex run should conduct Career Onboarding and write private files under `career/private/`. Do not commit them.
+Partial approval uses repeated `--key` values.
+
+The authorization digest binds the **reviewed application materials**, including:
+
+- canonical job/company/title/city
+- official URL and ATS route
+- fallback sources
+- score/risks shown to the user
+- resume variant
+- material screening answers
+- any proposed platform follow-up action
+
+Execution status is intentionally **not** part of the digest. Therefore normal transitions such as `queued -> filling -> submitting -> submitted` do not invalidate approval. Changing a reviewed URL, resume choice, screening answer, route, risk/material or approved job does invalidate it and requires another final review.
+
+This distinction is important: approval should survive execution progress, but never survive a changed application plan.
+
+## Resolver rules for Codex
+
+Do not assume the first web result is official. Prefer links reachable from the verified employer domain or a clearly employer-branded ATS tenant. Verify company, title/role, location and JD similarity. If confidence is weak, leave `official_url` unset and use the platform fallback.
+
+Do not create duplicate applications merely because an official title differs slightly. Compare company + normalized role/title + city + JD. Preserve all source URLs under `sources` so another recruiting platform remains available if one fallback breaks.
+
+## Privacy
+
+All candidate/application state is local. Personal data and screening answers belong only under `career/private/` or `.jobagent-local/`. Never commit them.
