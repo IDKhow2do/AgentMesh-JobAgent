@@ -2,7 +2,7 @@
 [project]
 name = "job-agent"
 version = "0.5.40"
-description = "Agent-native job discovery and delivery CLI for AgentMesh 360"
+description = "Codex-native local job discovery, official-first routing, review, and delivery tooling"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
