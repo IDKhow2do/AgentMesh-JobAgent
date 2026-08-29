@@ -2,119 +2,118 @@
 
 > **Modified in the IDKhow2do fork.** This fork defaults to the local-only, Codex-native workflow. The upstream AgentMesh360 cloud workflow remains in the original source/docs for reference, but Codex MUST NOT require or call AgentMesh360 cloud services unless the user explicitly asks to restore the upstream commercial workflow.
 
-## Default Mode: Local Only
+## Default Mode: Local Only, Official First
 
-Read `CODEX_LOCAL.md` before doing job-search work.
+Read `CODEX_LOCAL.md`, `docs/OFFICIAL_FIRST.md`, and `docs/CAREER_ONBOARDING.md` before doing job-search work.
 
 The default architecture is:
 
 ```text
-User -> Codex -> jobagent-local -> local browser/platform adapters
-                  |                    |
-                  |                    +-> Boss / Liepin / Zhilian / 51Job
-                  +-> local JSON review files
-
-Codex itself = search-intent reasoning + JD review + scoring + greeting generation
+User -> Codex
+          |-> career/private knowledge base
+          |-> jobagent-local -> Boss / Liepin / Zhilian / 51Job discovery
+          |-> official-careers resolver -> ATS / company career site
+          |-> jobagent-official -> dedupe + queue + tab/submission limits
 ```
+
+Codex is the reasoning layer. Recruiting-platform code and official-career queue code are deterministic tools.
 
 ### Hard rules
 
 1. Do not run `jobagent init --key ...` in the local workflow.
-2. Do not request an AgentMesh360 API key.
-3. Do not call AgentMesh360 cloud resume analysis, SearchPlan, decision, credit, or greeting endpoints.
-4. Do not ask for an OpenAI/DeepSeek/Claude API key. The interactive Codex session itself is the reasoning layer.
-5. Reuse the existing open-source browser collectors and delivery implementations instead of rewriting recruiting-site automation unless a platform adapter is broken.
-6. Keep all personal data under ignored paths: `career/private/` and `.jobagent-local/`.
-7. Never commit resumes, phone numbers, email addresses, recruiting-site cookies, login tokens, private career profiles, generated application history, or other user-specific job-search data.
-8. Recruiting-site login should be completed by the user in the managed browser when QR/SMS/manual verification is required. Never request the user's recruiting-site password in chat or store it in the repository.
-9. Discovery may run without delivery authorization. Real delivery is different: always show the selected jobs to the user and require an explicit instruction to submit/apply/send before using `jobagent-local apply ... --send`.
-10. `jobagent-local apply` without `--send` is the mandatory first dry-run for a newly reviewed batch.
-11. Keep browser actions serial. A failure on one platform must not prevent discovery on the other platforms.
-12. Never invent resume facts, job requirements, salary, employer details, or skills. Preserve uncertainty in `risks`/`reasons` instead of guessing.
+2. Do not request an AgentMesh360 API key or another LLM API key.
+3. Keep all personal data under ignored paths: `career/private/` and `.jobagent-local/`.
+4. Never commit resumes, contact data, cookies, login tokens, private profiles, screening answers, or application history.
+5. When login/QR/SMS/CAPTCHA/legal declaration requires the user, stop only that job and ask for the smallest necessary action.
+6. Never invent resume facts, metrics, skills, company facts, JD facts, salary, work authorization, sponsorship, relocation, travel, demographic, legal, or screening answers.
+7. Read an existing resume before asking onboarding questions. Ask only for missing or ambiguous information, one concrete question at a time.
+8. Recruiting platforms are discovery + recruiter-communication sources. If the same selected job is reliably verified on the employer's official Careers/ATS site, prefer official resume submission.
+9. Do not assume a search result is official. Verify employer identity, title/role, location, and JD similarity. Only populate `official_url` when there is real evidence.
+10. Cross-channel duplicates become one canonical job. A successful resume submission through one channel blocks duplicate resume submission through the others unless the user explicitly asks otherwise.
+11. Official browser limits are hard defaults: max 4 open tabs, max 2 simultaneous application/form tabs, and exactly 1 final submission at a time.
+12. Close or release completed/failed/fallback official tabs before claiming more queue items.
+13. Real submission always requires explicit user approval. Analysis/discovery phrases never authorize submission.
+14. For platform delivery, `jobagent-local apply` must be dry-run first; `--send` requires explicit approval.
+15. For official ATS delivery, fill/validate may proceed after the user approved the job set, but the final Submit/Apply action remains serial and must be tracked in `official-queue.json`.
+16. Unknown or changing official forms should be handled by Codex Browser, not guessed selectors. Known ATS labels are routing hints, not permission to bypass safeguards.
 
 ## Start Here
 
-1. `CODEX_LOCAL.md` — canonical workflow for this fork.
-2. `src/jobagent/local_cli.py` — local-only CLI orchestration.
-3. `src/jobagent/platforms/discovery.py` — shared four-platform collection layer.
-4. `src/jobagent/platforms/*/apply.py` and Boss `send_flow.py` — existing delivery implementations reused by local mode.
-5. `career/README.md` — private career-profile layout.
-6. `pyproject.toml` — exposes `jobagent-local`.
+1. `CODEX_LOCAL.md` — canonical end-to-end workflow.
+2. `docs/CAREER_ONBOARDING.md` — conversational profile-building rules.
+3. `docs/OFFICIAL_FIRST.md` — official Careers/ATS policy, queue, and tab limits.
+4. `src/jobagent/local_cli.py` — four-platform local discovery/delivery.
+5. `src/jobagent/official.py` — canonical dedupe, ATS detection, queue policy.
+6. `src/jobagent/official_cli.py` — queue CLI (`jobagent-official`).
+7. `src/jobagent/platforms/*` — existing platform collectors/senders.
 
-The upstream `README.md`, `docs/agent-onboarding.md`, cloud client, signed decision protocol, credits, and account binding describe the original AgentMesh360 product. They are **legacy/upstream mode** in this fork, not the default execution path.
+The upstream README/cloud protocol remains reference-only in this fork.
 
 ## Common Commands
-
-Install:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 pip install -e '.[dev]'
+pytest tests/test_local_cli.py tests/test_official.py
 jobagent-local doctor
 ```
 
-Discover all supported platforms:
+Discover platforms:
 
 ```bash
-jobagent-local round \
-  --city 上海 \
-  --keyword FDE \
-  --keyword 'AI应用工程师'
+jobagent-local round --city 上海 --keyword FDE --keyword 'AI应用工程师'
 ```
 
-The output is written under `.jobagent-local/runs/<timestamp>/`. Codex must review the generated `review.json`, using the user's private career profile, then add `decision`, `score`, `reasons`, `risks`, and `greeting` where appropriate.
+Codex then reviews `review.json`, builds/updates the private career profile, resolves official career URLs for selected/review jobs, and writes `official_url`, `official_match_confidence`, and `official_evidence` only when verified.
 
-Dry-run selected jobs:
+Prepare official-first queue:
+
+```bash
+jobagent-official prepare --input .jobagent-local/runs/<timestamp>/review.json
+jobagent-official status --queue .jobagent-local/runs/<timestamp>/official-queue.json --details
+```
+
+Claim at most the permitted form slots:
+
+```bash
+jobagent-official claim --queue .jobagent-local/runs/<timestamp>/official-queue.json --kind form
+```
+
+Use `jobagent-official update` for `filling`, `human_required`, `ready_to_submit`, `submitting`, `submitted`, `failed`, or `fallback_platform`. The queue rejects two simultaneous `submitting` jobs.
+
+Platform fallback stays available:
 
 ```bash
 jobagent-local apply --input .jobagent-local/runs/<timestamp>/review.json
-```
-
-Only after explicit user authorization:
-
-```bash
+# only after explicit approval
 jobagent-local apply --input .jobagent-local/runs/<timestamp>/review.json --send
 ```
 
-## Review Policy
+## Review and Routing Policy
 
-Use these decisions:
+Use `selected`, `review`, and `rejected`. Apply user hard filters before scoring. Preserve uncertainty in `risks` instead of guessing. A nominal experience mismatch is a risk, not automatically fatal unless the user's filters make it one.
 
-- `selected`: recommend for delivery.
-- `review`: plausible but user should inspect.
-- `rejected`: do not deliver.
+Official resolution is preferred after selection, not before every raw result. This avoids opening dozens of career sites for jobs that would be rejected anyway.
 
-Apply the user's explicit hard filters before scoring. For duplicate postings across platforms, preserve the strongest canonical record and note duplicates rather than recommending repeated applications unless the user specifically wants that.
+If official submission succeeds, mark the canonical job submitted via official and suppress platform resume delivery. Platform messaging can still be used as a recruiter communication channel when it adds value and does not misrepresent submission status.
 
-Do not treat a nominal years-of-experience mismatch as an automatic rejection unless the user's filters say so; report it as a risk and judge the actual responsibilities against the user's evidence. Do not weaken explicit degree, location, employment-type, outsourcing, compensation, or other hard filters when the user has declared them mandatory.
-
-## Platform Notes
-
-- Boss: local delivery requires a non-empty reviewed personalized greeting and uses the existing verified Boss greeting flow.
-- Liepin: local mode reuses `LiepinApplySender`.
-- Zhilian: local mode reuses `ZhilianApplySender`; its application flow is resume submission, not automatic first-contact greeting delivery.
-- 51Job: local mode reuses `Job51ApplySender`; its web application flow is resume submission and greeting text is review/handoff context.
-
-When a platform asks for login, captcha, QR, SMS, or other human verification, surface that need to the user. Do not attempt to defeat platform risk controls or bypass verification.
+If official resolution or application fails for a non-user-specific technical reason, mark `fallback_platform` and use the best existing platform source. If the form requires missing user facts, use `human_required`, ask the user, store the confirmed answer locally, and resume that job.
 
 ## Development Rules
 
-- Keep changes compatible with Python 3.11+.
-- Preserve the Apache-2.0 license and attribution. Modified upstream files should carry an obvious modification notice where practical.
-- Prefer adding local-only orchestration around the public platform boundaries rather than deleting upstream code. This keeps the fork easy to compare and rebase.
-- Add tests for local logic that does not require a live recruiting site. Do not make CI perform real applications or depend on a user's logged-in browser.
-- Never put private operational secrets or anti-abuse evasion logic in this public repository.
+Keep Python 3.11+ compatibility and Apache-2.0 attribution. Prefer additive local orchestration around upstream boundaries so rebasing stays possible. Add tests for deterministic logic; never make CI perform real applications. Never add anti-abuse evasion or verification bypass logic.
 
 ## Done Means
 
-For local-only changes:
-
-- `jobagent-local doctor` starts without an AgentMesh API key.
-- local SearchPlans can be built from user-provided cities/keywords.
-- a four-platform round isolates platform failures and emits `review.json`.
-- Codex can enrich `review.json` without third-party LLM API calls.
-- apply defaults to dry-run; real delivery requires `--send` plus prior explicit user approval.
-- personal data paths are gitignored.
-- tests or at least a Python syntax/import smoke check are run when the environment permits; if network/runtime dependencies prevent verification, say so explicitly in the handoff.
+- no AgentMesh API key is required in the default workflow;
+- four-platform discovery emits a local review file;
+- career onboarding is conversational and private;
+- cross-platform duplicates can become one canonical job;
+- verified official Careers/ATS links are preferred;
+- ATS type is detected when possible;
+- queue limits enforce 4 open tabs / 2 form tabs / 1 submit;
+- successful official submission prevents duplicate platform resume submission;
+- real application always requires explicit user authorization;
+- tests/smoke checks are run when possible, and any untested live-browser behavior is disclosed.
