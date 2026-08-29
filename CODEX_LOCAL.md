@@ -2,15 +2,25 @@
 
 This fork is local-only and Codex-native. Do not use AgentMesh360 cloud credits or request an AgentMesh API key. Codex is the reasoning layer; the repository supplies recruiting-platform adapters, official-career routing, dedupe, queue state, and safe delivery controls.
 
+## Non-negotiable final review gate
+
+The user is the final reviewer. Discovery, research, scoring, official-site matching, form preparation and draft answers may happen before approval, but **no application may be submitted and no recruiter greeting may be sent until the user has reviewed one complete final plan and explicitly approved it**.
+
+Before asking for approval, present one consolidated list containing every proposed application: company, role, city, score, important risks, preferred channel (official/platform), official URL/ATS when known, fallback channel, resume variant, greeting/message if any, and any non-trivial screening answers. The user may approve all, exclude individual jobs, or request changes. Regenerate the final plan after changes.
+
+For official/ATS submission, persist the exact approved snapshot with:
+
+```bash
+jobagent-official review --queue <official-queue.json> --approve
+```
+
+or approve only chosen canonical keys with repeated `--key`. Queue content changes invalidate authorization automatically. `submitting`/`submitted` states are rejected without a valid matching authorization digest.
+
+For recruiting-platform delivery, treat the same final approval as mandatory. Run `jobagent-local apply` dry-run first; only after the consolidated final review is approved may Codex add `--send`. Do not interpret earlier statements such as “帮我找工作”, “看看这些”, “准备一下”, or a general preference for automatic applications as final approval.
+
 ## First run
 
-Read:
-
-1. `AGENTS.md`
-2. `docs/CAREER_ONBOARDING.md`
-3. `docs/OFFICIAL_FIRST.md`
-
-Install:
+Read `AGENTS.md`, `docs/CAREER_ONBOARDING.md`, and `docs/OFFICIAL_FIRST.md`. Then install and test:
 
 ```bash
 python3 -m venv .venv
@@ -27,107 +37,21 @@ Do not ask the user to manually fill a giant form. If a resume is provided, read
 
 Never invent answers. When an ATS asks something not covered by the local profile, pause that job, ask the smallest necessary question, save the confirmed answer locally, and continue.
 
-## Discovery
+## Workflow
 
-Use all four supported recruiting platforms when useful:
+1. Discover jobs from BOSS / Liepin / Zhilian / 51Job and other useful sources.
+2. Codex reviews, scores and deduplicates.
+3. For selected candidates, search for the exact official Careers/ATS posting. Official is preferred only with reliable matching evidence.
+4. Prepare forms using the local career profile. Unknown material questions require the user.
+5. Build `official-queue.json`; respect 4 total tabs, 2 form tabs, 1 submit.
+6. Produce the **single consolidated final review plan** for the user.
+7. Wait. No send/submit action before explicit approval.
+8. Record final-review authorization for the exact queue and run platform dry-runs.
+9. Submit serially. Successful official submission suppresses duplicate platform resume submission; platform communication may still be used when explicitly included in the approved plan.
+10. Audit outcomes and report delivered / failed / human-required separately.
 
-```bash
-jobagent-local round \
-  --city 上海 \
-  --city 苏州 \
-  --keyword FDE \
-  --keyword 'AI应用工程师'
-```
-
-Review the resulting `review.json` yourself. Apply the user's hard filters, score the JD, add `decision`, `score`, `reasons`, `risks`, and `greeting`, and deduplicate obvious cross-platform copies.
-
-## Official-first resolution
-
-For `selected` and promising `review` jobs, use Codex Browser/search to look for the same requisition on the employer's official Careers page or official ATS. Do this **after** initial JD filtering so you do not open dozens of sites for rejected jobs.
-
-Only write an official match when evidence is strong:
-
-```json
-{
-  "official_url": "https://...",
-  "official_match_confidence": 0.93,
-  "official_evidence": {
-    "company_match": true,
-    "title_match": true,
-    "location_match": true,
-    "jd_match": "high"
-  }
-}
-```
-
-Then create the application queue:
-
-```bash
-jobagent-official prepare --input .jobagent-local/runs/<timestamp>/review.json
-```
-
-The queue prefers a verified official route at confidence >= 0.80. Otherwise it retains the recruiting platform as fallback. Known ATS hosts are labeled Greenhouse, Lever, Ashby, Workday, SmartRecruiters, iCIMS, Jobvite, Oracle/Taleo, SAP SuccessFactors, Moka, or Beisen; unknown forms remain `generic_official` and should be handled by Codex Browser.
-
-## Browser concurrency
-
-Hard defaults:
+## Recommended Codex startup prompt
 
 ```text
-max open tabs          = 4
-max active form tabs   = 2
-max final submissions  = 1
-```
-
-Claim only available form slots:
-
-```bash
-jobagent-official claim --queue <official-queue.json> --kind form
-```
-
-Do not open unclaimed application forms. When a form is done, blocked, failed, or moved to fallback, update its queue status and close/release the tab before claiming another.
-
-Final Submit/Apply is always serial. Mark the job `submitting` immediately before the final click; the queue rejects a second simultaneous submit.
-
-Example transitions:
-
-```bash
-jobagent-official update --queue <queue> --key <key> --status filling
-jobagent-official update --queue <queue> --key <key> --status human_required
-jobagent-official update --queue <queue> --key <key> --status ready_to_submit
-jobagent-official update --queue <queue> --key <key> --status submitting
-jobagent-official update --queue <queue> --key <key> --status submitted --submitted-via official
-```
-
-## Cross-channel rule
-
-The same canonical job should receive one resume submission. If official submission succeeds, suppress duplicate resume submission through Boss/Liepin/Zhilian/51Job. Platform recruiter communication may still be used when useful, e.g. telling a recruiter truthfully that the official application has already been submitted.
-
-If official resolution/application fails technically, mark `fallback_platform` and use the best platform source instead.
-
-## Platform delivery fallback
-
-Always dry-run first:
-
-```bash
-jobagent-local apply --input <review.json>
-```
-
-Only after explicit user approval:
-
-```bash
-jobagent-local apply --input <review.json> --send
-```
-
-## Recommended startup prompt for Codex
-
-```text
-Read AGENTS.md, CODEX_LOCAL.md, docs/CAREER_ONBOARDING.md and docs/OFFICIAL_FIRST.md first. This is my local-only job-search agent. Do not use AgentMesh360 or any paid LLM API. You are the reasoning layer.
-
-On first use, ask me for my resume if I have one, read it first, then interview me conversationally only for missing facts. Keep every real personal detail under career/private and never commit it.
-
-When I ask you to find jobs, use Boss/Liepin/Zhilian/51Job as discovery sources, review and score jobs, and deduplicate them. For jobs I actually want, try to resolve the exact job on the employer's official Careers/ATS site. Prefer verified official applications over platform resume submission.
-
-Use jobagent-official for the official queue. Never exceed 4 open tabs, 2 simultaneous form tabs, or 1 final submission. Close/release finished tabs before claiming more. Unknown ATS/forms should be handled with your browser rather than guessed selectors.
-
-Never submit the same canonical job twice across channels. Do not click a final Submit/Apply or run jobagent-local --send unless I have clearly approved the job set. If a form asks for information you do not know, ask me rather than inventing it, store my confirmed answer locally, then continue.
+Read AGENTS.md and CODEX_LOCAL.md. Use local-only mode; do not use AgentMesh360 or another paid LLM API. Start by interviewing me conversationally to build my private Career Profile from my resume. Then discover and score jobs, prefer verified official Careers/ATS applications, deduplicate cross-channel postings, and prepare application materials. Before any real submission or recruiter message, give me ONE complete consolidated final review plan covering every proposed job, channel, resume/message and important screening answer. I am the final reviewer. Wait for my explicit approval. After approval, persist the exact review authorization, dry-run, then submit serially. If the plan changes, ask me to review it again. Keep browser limits at 4 open tabs, 2 active forms and 1 final submit.
 ```
