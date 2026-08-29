@@ -1,8 +1,11 @@
+# Modified in the IDKhow2do fork: local-only job-agent data must never be committed.
 .DS_Store
 __pycache__/
 *.pyc
 .jobagent/
+.jobagent-local/
 .jobagent-install.json
+career/private/
 data/
 .venv/
 *.egg-info/
