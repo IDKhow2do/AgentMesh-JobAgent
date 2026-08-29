@@ -76,11 +76,7 @@ def merge_cross_channel_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]
         if not isinstance(raw, dict):
             continue
         key = canonical_job_key(raw)
-        source = {
-            "platform": raw.get("platform"),
-            "url": raw.get("url"),
-            "id": raw.get("id"),
-        }
+        source = {"platform": raw.get("platform"), "url": raw.get("url"), "id": raw.get("id")}
         existing = grouped.get(key)
         if existing is None:
             existing = dict(raw)
@@ -88,7 +84,6 @@ def merge_cross_channel_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]
             existing["sources"] = [source]
             grouped[key] = existing
             continue
-
         if source not in existing.setdefault("sources", []):
             existing["sources"].append(source)
         for field in ("jd", "salary", "experience", "degree", "skills"):
@@ -159,11 +154,26 @@ _REVIEW_FIELDS = (
 )
 
 
-def queue_digest(queue: dict[str, Any]) -> str:
+def _official_review_keys(queue: dict[str, Any]) -> list[str]:
+    return [
+        str(item.get("canonical_job_key"))
+        for item in queue.get("items", [])
+        if item.get("preferred_channel") == "official"
+    ]
+
+
+def queue_digest(queue: dict[str, Any], approved_keys: list[str] | None = None) -> str:
+    """Hash approved application MATERIAL, never mutable execution status.
+
+    State transitions (filling/submitting/submitted) must not invalidate the
+    user's approval. Changing URL, resume, screening answers, route, risk or
+    other reviewed material does invalidate it.
+    """
+    keys = set(approved_keys if approved_keys is not None else _official_review_keys(queue))
     material = [
         {field: item.get(field) for field in _REVIEW_FIELDS}
         for item in queue.get("items", [])
-        if item.get("status") not in {"skipped", "submitted"}
+        if str(item.get("canonical_job_key")) in keys
     ]
     material.sort(key=lambda item: str(item.get("canonical_job_key") or ""))
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -193,6 +203,7 @@ def build_official_queue(jobs: list[dict[str, Any]], threshold: float = OFFICIAL
             resume_variant=job.get("resume_variant"),
             screening_answers=job.get("screening_answers"),
             platform_action=job.get("platform_action"),
+            status="queued" if official else "fallback_platform",
         )
         items.append(item.to_dict())
 
@@ -214,25 +225,22 @@ def build_official_queue(jobs: list[dict[str, Any]], threshold: float = OFFICIAL
 
 
 def authorize_final_review(queue: dict[str, Any], approved_keys: list[str] | None = None) -> dict[str, Any]:
-    eligible = [
-        str(item.get("canonical_job_key"))
-        for item in queue.get("items", [])
-        if item.get("status") not in {"skipped", "submitted"}
-    ]
+    eligible = _official_review_keys(queue)
     allowed = set(eligible)
-    approved = set(approved_keys or eligible)
+    approved = set(approved_keys if approved_keys is not None else eligible)
     unknown = sorted(approved - allowed)
     if unknown:
-        raise ValueError(f"approved keys are not eligible queue items: {', '.join(unknown)}")
+        raise ValueError(f"approved keys are not official queue items: {', '.join(unknown)}")
+    if not approved:
+        raise ValueError("there are no official queue items to approve")
 
     for item in queue.get("items", []):
-        if item.get("status") in {"submitted", "skipped"}:
-            continue
-        if item.get("canonical_job_key") not in approved:
+        key = str(item.get("canonical_job_key"))
+        if item.get("preferred_channel") == "official" and key not in approved and item.get("status") != "submitted":
             item["status"] = "skipped"
             item["last_error"] = "excluded_by_user_final_review"
 
-    digest = queue_digest(queue)
+    digest = queue_digest(queue, sorted(approved))
     queue["review_digest"] = digest
     queue["review_authorization"] = {
         "approved": True,
@@ -245,7 +253,13 @@ def authorize_final_review(queue: dict[str, Any], approved_keys: list[str] | Non
 
 def review_is_valid(queue: dict[str, Any]) -> bool:
     authorization = queue.get("review_authorization") or {}
-    return bool(authorization.get("approved") and authorization.get("digest") == queue_digest(queue))
+    keys = authorization.get("approved_keys")
+    return bool(
+        authorization.get("approved")
+        and isinstance(keys, list)
+        and keys
+        and authorization.get("digest") == queue_digest(queue, [str(key) for key in keys])
+    )
 
 
 def claim_items(queue: dict[str, Any], kind: str = "form") -> list[dict[str, Any]]:
@@ -261,7 +275,7 @@ def claim_items(queue: dict[str, Any], kind: str = "form") -> list[dict[str, Any
     for item in queue.get("items", []):
         if available <= 0:
             break
-        if item.get("status") != "queued":
+        if item.get("status") != "queued" or item.get("preferred_channel") != "official" or not item.get("official_url"):
             continue
         item["status"] = "claimed"
         claimed.append(item)
