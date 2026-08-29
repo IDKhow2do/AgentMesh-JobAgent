@@ -1,3 +1,4 @@
+# Modified in the IDKhow2do fork: adds a local-only Codex-native CLI entry point.
 [project]
 name = "job-agent"
 version = "0.5.40"
@@ -20,6 +21,7 @@ dev = [
 [project.scripts]
 jobagent = "jobagent.cli:main"
 job-agent = "jobagent.cli:main"
+jobagent-local = "jobagent.local_cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
