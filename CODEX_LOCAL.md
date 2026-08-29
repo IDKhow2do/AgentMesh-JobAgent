@@ -1,164 +1,133 @@
 # Codex Local Job Agent
 
-> Fork extension: this workflow is designed to run without AgentMesh360 cloud credits or an AgentMesh API key. It reuses the upstream open-source browser collectors and delivery drivers. Codex is the reasoning layer.
+This fork is local-only and Codex-native. Do not use AgentMesh360 cloud credits or request an AgentMesh API key. Codex is the reasoning layer; the repository supplies recruiting-platform adapters, official-career routing, dedupe, queue state, and safe delivery controls.
 
-## Goal
+## First run
 
-The user should be able to tell Codex things like:
+Read:
 
-- “开始今天的求职。”
-- “搜上海、苏州、无锡的 FDE / AI 应用 / AI Solution / 工业 AI 岗位。”
-- “把匹配度 80 分以上的岗位给我看。”
-- “这 8 个都投。”
+1. `AGENTS.md`
+2. `docs/CAREER_ONBOARDING.md`
+3. `docs/OFFICIAL_FIRST.md`
 
-Codex should turn that intent into local CLI calls, review the returned job JSON itself, and only perform real delivery after explicit user approval.
-
-## Privacy
-
-Never commit resumes, phone numbers, email addresses, recruiting-site cookies, private career notes, or generated application history.
-
-Use these ignored paths:
-
-```text
-career/private/
-.jobagent-local/
-```
-
-Recommended local files:
-
-```text
-career/private/resume.pdf
-career/private/PROFILE.md
-career/private/TARGETS.md
-career/private/FILTERS.md
-```
-
-## Install from this branch
+Install:
 
 ```bash
-git clone -b codex-local-agent https://github.com/IDKhow2do/AgentMesh-JobAgent.git
-cd AgentMesh-JobAgent
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-pip install -e .
+pip install -e '.[dev]'
+pytest tests/test_local_cli.py tests/test_official.py
 jobagent-local doctor
 ```
 
-No AgentMesh API key is required for `jobagent-local`.
+## Personal information
 
-## First-run browser login
+Do not ask the user to manually fill a giant form. If a resume is provided, read it first, identify gaps, and interview conversationally. Store all real user information under ignored `career/private/` only. Recommended files include `MASTER_PROFILE.md`, `TARGETS.md`, `FILTERS.md`, `PROJECTS.md`, `STORIES.md`, `ANSWERS.json`, and resume variants.
 
-The collectors reuse the upstream managed Chrome browser/session code. If a site reports that login is required, let the browser open and ask the user to complete QR/SMS/manual login. Never ask the user to paste a recruiting-site password into a prompt or repository file.
+Never invent answers. When an ATS asks something not covered by the local profile, pause that job, ask the smallest necessary question, save the confirmed answer locally, and continue.
 
-If the existing upstream login commands work locally, they may be used only for browser login/session setup; do not run `jobagent init --key ...`, `resume analyze`, or cloud discovery in this local-only workflow.
+## Discovery
 
-## Discover one platform
+Use all four supported recruiting platforms when useful:
 
 ```bash
-jobagent-local discover \
-  --platform boss \
+jobagent-local round \
   --city 上海 \
   --city 苏州 \
   --keyword FDE \
   --keyword 'AI应用工程师'
 ```
 
-Supported platform values:
+Review the resulting `review.json` yourself. Apply the user's hard filters, score the JD, add `decision`, `score`, `reasons`, `risks`, and `greeting`, and deduplicate obvious cross-platform copies.
 
-```text
-boss
-liepin
-zhilian
-51job
-```
+## Official-first resolution
 
-## Discover all four platforms
+For `selected` and promising `review` jobs, use Codex Browser/search to look for the same requisition on the employer's official Careers page or official ATS. Do this **after** initial JD filtering so you do not open dozens of sites for rejected jobs.
 
-```bash
-jobagent-local round \
-  --city 上海 \
-  --city 苏州 \
-  --city 无锡 \
-  --keyword FDE \
-  --keyword 'Forward Deployed Engineer' \
-  --keyword 'AI应用工程师' \
-  --keyword 'AI Solution Engineer' \
-  --keyword '工业AI' \
-  --keyword '智能制造AI' \
-  --keyword '半导体AI'
-```
-
-The command creates a run directory under `.jobagent-local/runs/<timestamp>/` containing per-platform JSON plus `review.json`.
-
-A failure on one recruiting platform must not stop the other platforms.
-
-## Codex review contract
-
-Open the generated `review.json`, read the user's local career files, and enrich every useful job with fields like:
+Only write an official match when evidence is strong:
 
 ```json
 {
-  "decision": "selected",
-  "score": 88,
-  "reasons": [
-    "role is AI application/FDE-like",
-    "manufacturing domain experience is relevant"
-  ],
-  "risks": [
-    "JD asks for more software engineering experience"
-  ],
-  "greeting": "根据真实简历信息生成的简短招呼语"
+  "official_url": "https://...",
+  "official_match_confidence": 0.93,
+  "official_evidence": {
+    "company_match": true,
+    "title_match": true,
+    "location_match": true,
+    "jd_match": "high"
+  }
 }
 ```
 
-Allowed `decision` values:
-
-- `selected`: recommend for delivery
-- `review`: ask the user to inspect
-- `rejected`: do not send
-
-Rules for Codex:
-
-1. Do not call any third-party LLM API. Codex itself performs job matching and copy generation.
-2. Never invent resume experience, degree, skills, salary, company facts, or JD requirements.
-3. Apply hard filters from `career/private/FILTERS.md` before scoring.
-4. Explain uncertain cases instead of guessing.
-5. Deduplicate obvious cross-platform duplicates before recommending a final set.
-6. Write decisions back to the generated `review.json`.
-7. Show the user the final selected set before real delivery.
-
-## Safe delivery
-
-First run a dry-run:
+Then create the application queue:
 
 ```bash
-jobagent-local apply --input .jobagent-local/runs/<timestamp>/review.json
+jobagent-official prepare --input .jobagent-local/runs/<timestamp>/review.json
 ```
 
-Dry-run is the default and sends nothing.
+The queue prefers a verified official route at confidence >= 0.80. Otherwise it retains the recruiting platform as fallback. Known ATS hosts are labeled Greenhouse, Lever, Ashby, Workday, SmartRecruiters, iCIMS, Jobvite, Oracle/Taleo, SAP SuccessFactors, Moka, or Beisen; unknown forms remain `generic_official` and should be handled by Codex Browser.
 
-Only after the user explicitly approves the selected jobs, run:
+## Browser concurrency
 
-```bash
-jobagent-local apply \
-  --input .jobagent-local/runs/<timestamp>/review.json \
-  --send
-```
-
-Platform behavior follows the upstream browser implementations:
-
-- Boss: sends the reviewed personalized greeting.
-- Liepin: controlled resume/application flow plus greeting when the platform flow supports it.
-- Zhilian: submits the resume; greeting is review/handoff context because its web apply flow has no equivalent first-contact message field.
-- 51Job: submits the resume; greeting is review/handoff context rather than an automatically typed message.
-
-Real delivery must never be inferred from phrases like “看看”, “分析一下”, or “跑一遍”. Require an unambiguous user instruction to apply/send before adding `--send`.
-
-## Recommended Codex startup prompt
-
-Paste this once in Codex after cloning:
+Hard defaults:
 
 ```text
-Read CODEX_LOCAL.md first. You are my local job-search agent. Do not use AgentMesh360 cloud services or request an AgentMesh API key. Use jobagent-local and the existing browser/platform code. Keep all resume and personal career data under career/private or .jobagent-local so it is never committed. First help me prepare PROFILE.md, TARGETS.md and FILTERS.md from my resume. When I say “开始今天的求职”, search all four supported platforms, review and score jobs yourself, deduplicate them, and show me the selected set. Always dry-run delivery first. Only use --send after I explicitly approve the jobs to be submitted. If a recruiting site requires QR/SMS/manual login, pause only for that user action and continue afterward.
+max open tabs          = 4
+max active form tabs   = 2
+max final submissions  = 1
+```
+
+Claim only available form slots:
+
+```bash
+jobagent-official claim --queue <official-queue.json> --kind form
+```
+
+Do not open unclaimed application forms. When a form is done, blocked, failed, or moved to fallback, update its queue status and close/release the tab before claiming another.
+
+Final Submit/Apply is always serial. Mark the job `submitting` immediately before the final click; the queue rejects a second simultaneous submit.
+
+Example transitions:
+
+```bash
+jobagent-official update --queue <queue> --key <key> --status filling
+jobagent-official update --queue <queue> --key <key> --status human_required
+jobagent-official update --queue <queue> --key <key> --status ready_to_submit
+jobagent-official update --queue <queue> --key <key> --status submitting
+jobagent-official update --queue <queue> --key <key> --status submitted --submitted-via official
+```
+
+## Cross-channel rule
+
+The same canonical job should receive one resume submission. If official submission succeeds, suppress duplicate resume submission through Boss/Liepin/Zhilian/51Job. Platform recruiter communication may still be used when useful, e.g. telling a recruiter truthfully that the official application has already been submitted.
+
+If official resolution/application fails technically, mark `fallback_platform` and use the best platform source instead.
+
+## Platform delivery fallback
+
+Always dry-run first:
+
+```bash
+jobagent-local apply --input <review.json>
+```
+
+Only after explicit user approval:
+
+```bash
+jobagent-local apply --input <review.json> --send
+```
+
+## Recommended startup prompt for Codex
+
+```text
+Read AGENTS.md, CODEX_LOCAL.md, docs/CAREER_ONBOARDING.md and docs/OFFICIAL_FIRST.md first. This is my local-only job-search agent. Do not use AgentMesh360 or any paid LLM API. You are the reasoning layer.
+
+On first use, ask me for my resume if I have one, read it first, then interview me conversationally only for missing facts. Keep every real personal detail under career/private and never commit it.
+
+When I ask you to find jobs, use Boss/Liepin/Zhilian/51Job as discovery sources, review and score jobs, and deduplicate them. For jobs I actually want, try to resolve the exact job on the employer's official Careers/ATS site. Prefer verified official applications over platform resume submission.
+
+Use jobagent-official for the official queue. Never exceed 4 open tabs, 2 simultaneous form tabs, or 1 final submission. Close/release finished tabs before claiming more. Unknown ATS/forms should be handled with your browser rather than guessed selectors.
+
+Never submit the same canonical job twice across channels. Do not click a final Submit/Apply or run jobagent-local --send unless I have clearly approved the job set. If a form asks for information you do not know, ask me rather than inventing it, store my confirmed answer locally, then continue.
 ```
